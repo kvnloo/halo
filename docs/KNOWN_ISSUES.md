@@ -198,7 +198,33 @@ the number.
 
 ---
 
-## 8. Scene renders blown out and desaturated — ALBEDO, not exposure
+## 8. Scene renders blown out and desaturated — **CORRECTED: it is volumetricFog, not albedo**
+
+> **This section's original diagnosis was wrong and is kept below for the record.**
+> I attributed the `sat_mean` collapse to material albedo. The terrain agent disproved
+> it with the right experiment: force the terrain albedo to **pure black** and re-measure
+> the `sand` ROI. The desaturation persisted. An albedo problem cannot survive its own
+> albedo being zero.
+>
+> The real cause is an **additive near-field in-scatter term in
+> `src/render/passes/volumetricFog.js`**, which washes a bright, low-saturation haze over
+> every surface at close range. Corroborated independently by the rocks agent: on a
+> sunlit stack face, saturation goes **28.5 -> 52.5** as shipped but **28.5 -> 105.8**
+> with the haze term removed, and `lab_b` goes +3.2 -> +8.5 / +17.8.
+>
+> `volumetricFog.js` was written in the build-only breadth wave and its critic never ran
+> (killed by a usage limit), so it has never been reviewed. That is the file to fix.
+>
+> The albedo work done under the wrong diagnosis was not wasted — it moved whole-frame
+> `lum_mean` from 98.87 to 110.48 against a reference 112.19 — but it was not the cause.
+>
+> **Lesson, and it is the same one as sections 4 and 6:** I reasoned from a correlation
+> ("everything looks white, so the albedos must be white") instead of running the
+> controlled experiment that would separate the candidates. The agent that zeroed the
+> albedo and re-measured got the answer in one step.
+
+### Original (incorrect) diagnosis follows
+
 
 First full-scene capture with terrain, rocks, structures, vegetation and the viewmodel
 present (`shots/preview/preview.png`). Measured at `ref_00000` against `kf_00000`:
@@ -250,3 +276,16 @@ Fix this before anyone tunes exposure, or they will be tuning against a broken c
 
 Do **not** recalibrate the grade against these frames yet — see issue 6. Fix albedos
 first, then 8b, then recalibrate the grade once, against complete frames.
+
+---
+
+## 9. `ctx.config.exposure` pin has no effect
+
+Found by the tonemap agent while fixing 8b. Pinning `exposure` across a **13x range**
+produces byte-identical frames — `lum_mean` 110.51883342978395 for every value. The
+`exposureEV` discontinuity from 8b is fixed (the sweep is now smooth and monotonic, with
+the per-quarter-stop ratio drifting only 0.935 -> 0.905, which is AgX's own curvature),
+but the absolute `exposure` pin is dead.
+
+Note also that 8b's baseline no longer holds: EV 0 has moved from `lum_mean` 148.4 to
+110.5 as the albedo work landed. Re-measure before relying on any number in section 8.

@@ -1,7 +1,9 @@
-node_modules/
-.venv/
 dist/
+*.log
+node_modules/
+*.pyc
+__pycache__/
+ref/frames_full/
 shots/*
 !shots/preview/
-ref/frames_full/
-*.log
+.venv/

@@ -234,10 +234,10 @@ export function create() {
     addStatic(c) {
       if (c?._registered) return c.id;
       if (!validCollider(c)) {
-        if (!addStatic._warned) { addStatic._warned = new Set(); }
+        if (!api.addStatic._warned) { api.addStatic._warned = new Set(); }
         const k = `${c?.type}`;
-        if (!addStatic._warned.has(k)) {
-          addStatic._warned.add(k);
+        if (!api.addStatic._warned.has(k)) {
+          api.addStatic._warned.add(k);
           console.warn(`[physics] ignoring malformed collider (type="${c?.type}") — `
             + `see docs/API.md for the required fields per type`);
         }

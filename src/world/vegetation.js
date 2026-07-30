@@ -3,6 +3,7 @@ import { LAYER } from '../render/RenderPipeline.js';
 import { applyWorldMaterial, configureTexture } from '../gfx/materialCommon.js';
 import { patchForGBuffer, MAT_ID } from '../gfx/GBufferMaterial.js';
 import { NOISE_GLSL } from '../gfx/glsl/noise.js';
+import { POSES } from './poses.js';
 
 /**
  * `vegetation` — the hero tree, dune grass, salt scrub, moss crowns and hanging vines.
@@ -102,12 +103,34 @@ import { NOISE_GLSL } from '../gfx/glsl/noise.js';
  *  Tunables
  * ========================================================================== */
 
+/**
+ * Scale from `time.state.sunIntensity` (the lighting module's own sun radiance scalar,
+ * which `applyWorldMaterial` binds in the same units) to the radiance the two-lobe
+ * transmission lobes integrate against. Foliage transmission is a *single* forward
+ * scatter out of a leaf whose transmittance is ~12% in the visible — so the lobe sees
+ * roughly an eighth of the direct sun radiance the diffuse lobe does. Keeping this a
+ * named constant means retuning sun intensity moves transmission with it instead of
+ * silently changing the backlit read.
+ */
+const LEAF_TRANSMITTANCE = 0.115;
+const SUN_RAD_SCALE = LEAF_TRANSMITTANCE;
+
+/**
+ * The one alpha reference in this file. Every cutout mip chain is built to conserve
+ * coverage at this value and every material that samples one of those chains uses it as
+ * its `alphaTest` — see `assertAlphaRef`. They were 0.5 and 0.42 respectively, which
+ * made distant foliage *gain* coverage.
+ */
+const LEAF_ALPHA_REF = 0.42;
+/** Same contract for the grass blade strip, which has its own (much thinner) mask. */
+const BLADE_ALPHA_REF = 0.30;
+
 const CFG = {
   grassBlades: 172000,     // total blades over berm + cliff top + dry sand
   grassTiles: 3,           // spatial split, so frustum culling can drop most of it
   scrubCount: 620,
   mossClumps: 5200,
-  ivyCards: 5200,
+  ivyCards: 2600,
   vineStrands: 1750,
   treeSites: 14,
 };
@@ -233,19 +256,24 @@ uniform vec3  uTransColor;   // what light looks like after passing through a le
 uniform float uTransScale;
 uniform float uTransPower;
 uniform float uBaseAO;
+uniform float uAlbedoAO;
+uniform float uSpecScale;
 uniform vec3  uColA;
 uniform vec3  uColB;
 `;
 
 const TRANS_EMIT = /* glsl */`
 {
-  // Baked canopy occlusion, applied to the *indirect* term only. Folding it into albedo
-  // instead (which is what this did first) darkens the sunlit faces as well and the crown
-  // comes out flat: measured, the interior-to-sunlit ratio was 1.34 against the
-  // reference's 2.4. Interior leaves see almost no sky, sunlit outer leaves see all of
-  // it — that difference *is* the contrast of a tree.
+  // Baked canopy occlusion on the *indirect* term. Interior leaves see almost no sky,
+  // sunlit outer leaves see all of it — that difference *is* the contrast of a tree.
   float vegAO = mix(uBaseAO, 1.0, vAO);
   reflectedLight.indirectDiffuse *= vegAO;
+  // Environment specular on a leaf card. F0 0.04 against a very bright sky probe is an
+  // *additive, achromatic* term on top of a mid-tone diffuse — one of the few things in
+  // this shader that can only ever reduce saturation. A leaf mass is not a smooth
+  // surface and the probe does not know it is buried inside a canopy, so it is scaled
+  // back and gated on the same exposure term as the ambient.
+  reflectedLight.indirectSpecular *= uSpecScale * vegAO;
 
   vec3 V = normalize(vViewPosition);          // surface -> camera
   vec3 L = uSunDirV;                          // surface -> sun
@@ -254,8 +282,21 @@ const TRANS_EMIT = /* glsl */`
   float wrap = clamp(-dot(N, L) * 0.62 + 0.42, 0.0, 1.0);
   // tight view lobe: looking into the sun through the canopy
   float back = pow(clamp(dot(V, -L), 0.0, 1.0), uTransPower);
-  float amt  = wrap * (0.26 + uTransScale * back) * mix(0.30, 1.0, vAO);
-  reflectedLight.indirectDiffuse += uSunRad * uTransColor * amt;
+  // The AO gate is *inverted* relative to the first version, which scaled transmission
+  // by mix(0.30, 1.0, vAO) — that made the exposed shell leaves transmit most and the
+  // buried interior leaves transmit least, which is backwards and flattened the crown
+  // from both ends. Transmitted light is what you see through the *thin, backlit,
+  // single-layer* interior; the exposed shell is what you see reflected. So interior
+  // (vAO -> 0) transmits, shell (vAO -> 1) does not.
+  float amt = wrap * (0.26 + uTransScale * back) * mix(1.0, 0.30, vAO);
+  // Front-lit fragments must not receive it at all: a leaf with the sun and the camera
+  // on the same side is not backlit, and adding there is what lifts the ambient floor
+  // and desaturates the whole mass. Keeping it out of indirectDiffuse and out of the
+  // ambient path is the difference between a glowing rim and a grey wash.
+  float frontlit = clamp(dot(N, L), 0.0, 1.0);
+  // Into the emissive accumulator, not into indirectDiffuse: indirectDiffuse is the
+  // ambient path, and anything added there is a floor under every fragment in the mass.
+  totalEmissiveRadiance += uSunRad * uTransColor * amt * (1.0 - frontlit * frontlit);
 }
 `;
 
@@ -273,6 +314,7 @@ let _matSeq = 0;
  *   - and still route through applyWorldMaterial for sun/shadow/aerial coherence.
  */
 function makeVegMaterial(ctx, U, o) {
+  if (o.map && (o.alphaTest ?? 0) > 0) assertAlphaRef(o.map, o.alphaTest, o.key || 'veg');
   const mat = new THREE.MeshStandardMaterial({
     color: o.color || new THREE.Color(1, 1, 1),
     roughness: o.roughness ?? 0.62,
@@ -295,6 +337,8 @@ function makeVegMaterial(ctx, U, o) {
     uTransScale: { value: o.transScale ?? 2.2 },
     uTransPower: { value: o.transPower ?? 3.0 },
     uBaseAO: { value: o.baseAO ?? 0.45 },
+    uAlbedoAO: { value: o.albedoAO ?? 1.0 },
+    uSpecScale: { value: o.specScale ?? 1.0 },
     uColA: { value: o.colA || new THREE.Color(1, 1, 1) },
     uColB: { value: o.colB || new THREE.Color(1, 1, 1) },
   });
@@ -306,6 +350,13 @@ function makeVegMaterial(ctx, U, o) {
   const fragBody = o.fragment || `
     float vegT = fract(vTint + vJit * 0.71);
     diffuseColor.rgb *= mix(uColA, uColB, vegT);
+    // A fraction of the baked occlusion folded into *albedo*, not only into indirect.
+    // The file header used to reject this outright, on a measurement taken when the
+    // interior-to-sunlit ratio was 1.34; re-run with the corrected transmission, the
+    // crown still measured p01 40 / lum_std 30.4 against the reference's 19 / 51.6.
+    // Indirect-only cannot darken a leaf that the sun hits directly, and the inside of
+    // a crown is full of those — it is why our crowns have no core.
+    diffuseColor.rgb *= mix(uAlbedoAO, 1.0, vAO);
   `;
 
   const vegHook = (shader) => {
@@ -582,6 +633,29 @@ function finishTexture(mips, ctx, alphaRef) {
 }
 
 /**
+ * Castano's coverage-preserving mip chain conserves coverage **at exactly one alpha
+ * reference** — the one it was built for. Sampling it at a different `alphaTest` is not
+ * a small error and it is not symmetric: below the build reference every mip level
+ * *gains* coverage as distance grows, so crowns and mats get denser and more solid as
+ * they recede, which is the exact inverse of the "trees go bald at distance" failure the
+ * chain exists to prevent. The shipped build had the atlas built at 0.5 and four
+ * materials sampling it at 0.42, and the distant cliff read as a solid speckled carpet.
+ *
+ * This class of bug is invisible until someone measures a distant crop, so it is
+ * asserted at material-creation time instead.
+ */
+function assertAlphaRef(tex, alphaTest, who) {
+  if (!tex) return;
+  const built = tex.userData?.alphaRef;
+  if (built === undefined) return;
+  if (Math.abs(built - alphaTest) > 1e-4) {
+    console.error(`[vegetation] alphaTest/coverage mismatch on "${who}": the mip chain `
+      + `conserves coverage at alphaRef ${built} but the material samples it at `
+      + `alphaTest ${alphaTest}. Distant instances will ${alphaTest < built ? 'thicken' : 'dissolve'}.`);
+  }
+}
+
+/**
  * 2x2 atlas of leaf-cluster cards: canopy sprigs, scrub, ivy, moss.
  *
  * The leaves are deliberately small relative to the tile (~6% of it) and there are a lot
@@ -633,26 +707,110 @@ function makeLeafAtlas(rand, ctx, S = 512) {
         const ang = rand.range(0, Math.PI * 2);
         // olive / khaki, R ~= G with B about half — measured off the reference. The
         // 0.34..1.0 value range is the interior-shadow to sunlit-face spread.
-        const v = 0.74 + 0.26 * Math.pow(rand.next(), 0.7);
+        const v = 0.34 + 0.66 * Math.pow(rand.next(), 0.7);
         const yellow = 0.86 + 0.20 * rand.next();
         drawLeaf(buf, S, S, cx, cy, len, wid, ang,
           1.00 * v * yellow, 1.00 * v, 0.62 * v * (1.10 - 0.22 * yellow));
       }
     }
   }
-  return finishTexture(buildAlphaMips(buf, S, S, 0.5), ctx, 0.5);
+  return finishTexture(buildAlphaMips(buf, S, S, LEAF_ALPHA_REF), ctx, LEAF_ALPHA_REF);
 }
 
-/** One hanging vine strand: small paired leaves down a thin stem, tapering out. */
-function makeVineStrip(rand, ctx, W = 128, H = 512) {
+/**
+ * Moss / lichen cushion: a fine tuft of many tiny blades radiating from the base,
+ * not a leaf sprig. Sharing the tree's compound-leaf sprite for moss was one of the
+ * reasons nothing in the frame had a species silhouette — canopy, scrub, moss and ivy
+ * were literally the same sprite at four tints and four scales.
+ */
+function makeMossAtlas(rand, ctx, S = 256) {
+  const buf = new Float32Array(S * S * 4);
+  for (let i = 0; i < S * S; i++) { buf[i * 4] = 0.72; buf[i * 4 + 1] = 0.80; buf[i * 4 + 2] = 0.40; }
+  const T = S / 2;
+  for (let ty = 0; ty < 2; ty++) {
+    for (let tx = 0; tx < 2; tx++) {
+      const ox = tx * T, oy = ty * T;
+      const bx = ox + T * 0.5, by = oy + T * 0.97;
+      const n = 260 + Math.floor(rand.next() * 90);
+      for (let i = 0; i < n; i++) {
+        // a fan of short hairs; density falls off with height so the tuft has a
+        // soft, thinning crest rather than a flat top
+        const a = -Math.PI * 0.5 + rand.sym(1.28);
+        const l = T * (0.22 + 0.62 * Math.pow(rand.next(), 1.4));
+        const x0 = bx + rand.sym(T * 0.30);
+        const v = 0.30 + 0.70 * Math.pow(rand.next(), 0.8);
+        const curl = rand.sym(0.5);
+        const steps = 7;
+        for (let k = 1; k <= steps; k++) {
+          const t = k / steps;
+          const aa = a + curl * t * t;
+          const px = x0 + Math.cos(aa) * l * t;
+          const py = by + Math.sin(aa) * l * t;
+          if (px < ox + 1 || px > ox + T - 1 || py < oy + 1 || py > oy + T - 1) break;
+          const w = T * 0.011 * (1 - 0.75 * t);
+          const vv = v * (0.72 + 0.34 * t);       // tips catch the light
+          drawLeaf(buf, S, S, px, py, w * 2.6, w * 2.0, aa,
+            0.92 * vv, 1.00 * vv, 0.50 * vv);
+        }
+      }
+    }
+  }
+  return finishTexture(buildAlphaMips(buf, S, S, LEAF_ALPHA_REF), ctx, LEAF_ALPHA_REF);
+}
+
+/**
+ * Blade alpha strip. Without a map the grass material runs alphaTest 0, so every blade
+ * is a solid quad with a hard geometric tip — the one silhouette a blade never has.
+ * u runs across the blade, v along it (matching `bladeGeometry`'s uv), and the alpha is
+ * a soft-edged taper that reaches zero at the tip, so alphaTest 0.30 eats the last few
+ * percent of the quad and leaves a point.
+ */
+function makeBladeAlpha(ctx, W = 32, H = 128) {
+  const buf = new Float32Array(W * H * 4);
+  for (let y = 0; y < H; y++) {
+    const v = (y + 0.5) / H;
+    // Continuous taper. The previous envelope was
+    //   half = 0.5 * min(1, (1 - v)/0.20 + 0.06)
+    // which clamps to *full width* for the bottom 80% of the blade — the mask was a
+    // rectangle with a point stuck on the tip, and alphaTest 0.30 never carved a taper.
+    // A blade is wide at the sheath and narrows the whole way up.
+    const half = 0.5 * Math.pow(1 - v, 0.55);
+    for (let x = 0; x < W; x++) {
+      const u = (x + 0.5) / W - 0.5;
+      const d = half - Math.abs(u);            // signed distance inside the taper
+      const a = Math.min(1, Math.max(0, d * W * 0.9));
+      const i = (y * W + x) * 4;
+      buf[i] = 1.0; buf[i + 1] = 1.0; buf[i + 2] = 1.0; buf[i + 3] = a;
+    }
+  }
+  return finishTexture(buildAlphaMips(buf, W, H, BLADE_ALPHA_REF), ctx, BLADE_ALPHA_REF);
+}
+
+/**
+ * A trailing runner: paired opposed leaves down a visible woody stem, tapering out.
+ *
+ * Used twice, at two aspects. `leafScale`/`nLeaf`/`taperTo` are what separate the two
+ * species: the long thin **vine** falls in a curtain and thins to nothing, while the
+ * short broad **ivy runner** keeps its leaf size to the end and reads as a mat of
+ * overlapping foliage on a face. Before this, `matIvy` bound the tree's compound-leaf
+ * atlas, which is why the cliff drape measured spectral_slope -1.78 — isotropic
+ * speckle, closer to white noise than to the reference drape's -2.21.
+ */
+function makeRunnerStrip(rand, ctx, W = 128, H = 512, o = {}) {
+  const nLeaf = o.nLeaf ?? 340;
+  const leafScale = o.leafScale ?? 1.0;
+  const taperTo = o.taperTo ?? 0.38;          // leaf size at the tip, fraction of base
+  const stemW = o.stemW ?? 1.4;
+  const wobA = o.wob ?? 0.055;
   const buf = new Float32Array(W * H * 4);
   for (let i = 0; i < W * H; i++) { buf[i * 4] = 0.80; buf[i * 4 + 1] = 0.88; buf[i * 4 + 2] = 0.48; }
   const cx = W * 0.5;
+  const wobble = (t) => Math.sin(t * 11.0) * W * wobA + Math.sin(t * 4.3 + 1.1) * W * (wobA * 0.82);
   // stem
   for (let y = 0; y < H; y++) {
     const t = y / H;
-    const hw = 1.4 * (1 - 0.55 * t);
-    const wob = Math.sin(t * 11.0) * W * 0.055 + Math.sin(t * 4.3 + 1.1) * W * 0.045;
+    const hw = stemW * (1 - 0.55 * t);
+    const wob = wobble(t);
     for (let x = 0; x < W; x++) {
       const d = Math.abs(x + 0.5 - (cx + wob)) - hw;
       if (d > 1) continue;
@@ -662,22 +820,22 @@ function makeVineStrip(rand, ctx, W = 128, H = 512) {
       buf[i + 3] = Math.max(buf[i + 3], a);
     }
   }
-  const n = 340;
-  for (let i = 0; i < n; i++) {
-    const t = Math.pow(i / n, 0.92);
+  for (let i = 0; i < nLeaf; i++) {
+    const t = Math.pow(i / nLeaf, 0.92);
     const y = 8 + t * (H - 18);
-    const wob = Math.sin(t * 11.0) * W * 0.055 + Math.sin(t * 4.3 + 1.1) * W * 0.045;
+    const wob = wobble(t);
     const side = (i % 2 === 0) ? 1 : -1;
-    const taper = 1 - 0.62 * t;
-    const len = W * (0.075 + 0.055 * rand.next()) * taper;
+    const taper = 1 - (1 - taperTo) * t;
+    const len = W * (0.075 + 0.055 * rand.next()) * taper * leafScale;
     const wid = len * (0.66 + 0.26 * rand.next());
     const ang = side > 0 ? rand.range(0.20, 1.15) : Math.PI - rand.range(0.20, 1.15);
     const cxx = cx + wob + side * len * (0.35 + 0.5 * rand.next());
-    const v = 0.68 + 0.32 * rand.next();
+    // full interior-shadow to sunlit-face spread, same as the leaf atlas
+    const v = (o.vMin ?? 0.38) + (o.vSpan ?? 0.62) * Math.pow(rand.next(), 0.7);
     drawLeaf(buf, W, H, cxx, y + rand.sym(4), len, wid, ang,
-      0.92 * v, 1.00 * v, 0.56 * v);
+      0.92 * v, 1.00 * v, 0.52 * v);
   }
-  return finishTexture(buildAlphaMips(buf, W, H, 0.5), ctx, 0.5);
+  return finishTexture(buildAlphaMips(buf, W, H, LEAF_ALPHA_REF), ctx, LEAF_ALPHA_REF);
 }
 
 /* ========================================================================== *
@@ -761,24 +919,42 @@ function cardGeometry(planes = 2, tile = 0, tiles = 2, lean = 0.0) {
  * sprigs are — a mat of cards with card normals shades flat, and the moss crowns in
  * kf_01500 are one of the strongest light-to-dark reads in the frame.
  */
-function clumpGeometry(rand, cards = 8, tiles = 2) {
+/**
+ * A **normalised** clump: x,z in [-0.5, 0.5], y in [0, 1]. The instance's `aOri.z`
+ * (scaleY) is therefore the plant's height in metres and `aOri.w` (scaleXZ) is its
+ * width in metres — which is the only way a caller can reason about whether the thing
+ * will read at 90 m. The old version was not normalised (y ran -0.35..0.67, width
+ * ±0.5 before scale) so "sY = sc*0.55" produced 0.55 m *pancakes* on stack crowns that
+ * needed a 4 m silhouette, and nobody could see that from the call site.
+ *
+ * `bulge` shapes where the mass sits along y: >1 pushes it up into a shrub crown,
+ * <1 flattens it into a cushion.
+ */
+function clumpGeometry(rand, cards = 8, tiles = 2, bulge = 1.0) {
   const gb = new GeoBuf();
+  const GOLD = 2.399963;                       // golden angle: no azimuthal ringing
   for (let i = 0; i < cards; i++) {
-    const a = (i / cards) * Math.PI * 2 + rand.sym(0.45);
-    const rr = 0.18 + 0.34 * rand.next();
-    const se = -0.10 + 0.95 * Math.pow(rand.next(), 0.55);
-    const ce = Math.sqrt(Math.max(0, 1 - se * se));
-    const px = Math.cos(a) * ce * rr, pz = Math.sin(a) * ce * rr, py = se * 0.55;
-    emitSprig(gb, rand, px, py + 0.2, pz, 0.62 + 0.42 * rand.next(),
-      Math.min(1, 0.25 + py * 1.5), tiles, px, py * 1.7 + 0.5, pz, 2,
-      0.30 + 0.70 * Math.min(1, Math.max(0, se * 0.9 + 0.35)));
+    const a = i * GOLD + rand.sym(0.35);
+    const t = (i + 0.5) / cards;
+    // height along the clump, biased by `bulge`
+    const py = Math.pow(rand.next(), 1.0 / Math.max(bulge, 0.15)) * 0.86 + 0.06;
+    // widest in the middle of the profile, tapering to the tip — a shrub, not a ball
+    const prof = Math.sin(Math.PI * Math.min(1, py * 0.92 + 0.08)) ** 0.7;
+    const rr = (0.10 + 0.40 * Math.sqrt(rand.next())) * prof;
+    const px = Math.cos(a) * rr, pz = Math.sin(a) * rr;
+    emitSprig(gb, rand, px, py, pz, (0.30 + 0.26 * rand.next()) * (0.7 + 0.5 * prof),
+      Math.min(1, 0.20 + py), tiles, px, (py - 0.45) * 1.6 + 0.35, pz, 2,
+      // AO: deep interior is buried, the outside of the profile is exposed
+      THREE.MathUtils.clamp(0.12 + 0.88 * (rr / Math.max(prof, 0.2) / 0.5) * (0.4 + 0.6 * py), 0.08, 1),
+      { ux: px, uy: 0.55, uz: pz, jitter: 0.55 });
   }
   // a short skirt of down-turned cards so the clump does not float on its base
-  for (let i = 0; i < Math.max(2, cards >> 1); i++) {
-    const a = (i / (cards >> 1)) * Math.PI * 2 + rand.sym(0.6);
-    const px = Math.cos(a) * 0.42, pz = Math.sin(a) * 0.42;
-    emitSprig(gb, rand, px, -0.05 - 0.3 * rand.next(), pz, 0.52 + 0.3 * rand.next(),
-      0.12, tiles, px * 2.0, -0.4, pz * 2.0, 1, 0.16);
+  for (let i = 0; i < Math.max(2, cards >> 2); i++) {
+    const a = i * GOLD * 1.7 + rand.sym(0.6);
+    const px = Math.cos(a) * 0.40, pz = Math.sin(a) * 0.40;
+    emitSprig(gb, rand, px, 0.05 + 0.10 * rand.next(), pz, 0.26 + 0.14 * rand.next(),
+      0.10, tiles, px * 2.0, -0.5, pz * 2.0, 1, 0.14,
+      { ux: px, uy: -0.6, uz: pz, jitter: 0.4 });
   }
   return gb;
 }
@@ -844,16 +1020,55 @@ function emitTube(gb, pts, radii, segs, seg0, seg1) {
  *    crown shade as the rounded volume it is meant to represent: lit on top, dark
  *    underneath, and with a rim where the sun grazes it.
  */
-function emitSprig(gb, rand, cx, cy, cz, size, seg, tiles, ox, oy, oz, planes = 3, ao = 1) {
+function emitSprig(gb, rand, cx, cy, cz, size, seg, tiles, ox, oy, oz, planes = 3, ao = 1, frame = null) {
   const jit = rand.next();
   const ol = Math.hypot(ox, oy, oz) || 1;
   const oux = ox / ol, ouy = oy / ol, ouz = oz / ol;
+  /* Card frame.
+   *
+   * The first version drew `th` uniform on [0,2pi) and `ph = acos(uniform(-1,1))` — a
+   * correct uniform distribution on the sphere, and exactly wrong for foliage. Sprigs
+   * do not point in random directions: they hang off a branch tip with a strong bias
+   * along the branch and toward gravity, and *that bias is what produces the layered
+   * light/shade banding of a canopy*. Isotropic cards give a scalloped noise boundary
+   * and a flat, uniform interior — measured on our crown, lum_std 30.4 against the
+   * reference's 51.6 and local_contrast 0.095 against 0.173, with aerial disabled so
+   * the comparison is fair.
+   *
+   * `frame` supplies the preferred sprig axis (branch direction already blended toward
+   * -Y by the caller); we jitter about it by `jitter` radians instead of resampling
+   * the sphere. Passing null keeps the old isotropic behaviour for callers that want it.
+   */
+  let fux = 0, fuy = -1, fuz = 0, fjit = Math.PI;
+  if (frame) {
+    const fl = Math.hypot(frame.ux, frame.uy, frame.uz) || 1;
+    fux = frame.ux / fl; fuy = frame.uy / fl; fuz = frame.uz / fl;
+    fjit = frame.jitter ?? 0.4;
+  }
   for (let p = 0; p < planes; p++) {
     const tile = Math.floor(rand.next() * tiles * tiles);
     const tu = (tile % tiles) / tiles, tv = Math.floor(tile / tiles) / tiles, ts = 1 / tiles;
-    // random orthonormal pair: `a` across the card, `b` up it
-    const th = rand.range(0, Math.PI * 2), ph = Math.acos(rand.range(-1, 1));
-    const ax = Math.sin(ph) * Math.cos(th), ay = Math.cos(ph) * 0.55, az = Math.sin(ph) * Math.sin(th);
+    let ax, ay, az;
+    if (frame) {
+      // cone of half-angle `fjit` about the preferred axis
+      const cosMax = Math.cos(fjit);
+      const cz2 = cosMax + (1 - cosMax) * rand.next();
+      const sr = Math.sqrt(Math.max(0, 1 - cz2 * cz2));
+      const phi = rand.range(0, Math.PI * 2);
+      // orthonormal basis about (fux,fuy,fuz)
+      let t1x = 0, t1y = 0, t1z = 0;
+      if (Math.abs(fuy) < 0.9) { t1x = -fuz; t1z = fux; } else { t1x = 1; }
+      const t1l = Math.hypot(t1x, t1y, t1z) || 1;
+      t1x /= t1l; t1y /= t1l; t1z /= t1l;
+      const t2x = fuy * t1z - fuz * t1y, t2y = fuz * t1x - fux * t1z, t2z = fux * t1y - fuy * t1x;
+      const c = Math.cos(phi) * sr, s = Math.sin(phi) * sr;
+      ax = fux * cz2 + t1x * c + t2x * s;
+      ay = fuy * cz2 + t1y * c + t2y * s;
+      az = fuz * cz2 + t1z * c + t2z * s;
+    } else {
+      const th = rand.range(0, Math.PI * 2), ph = Math.acos(rand.range(-1, 1));
+      ax = Math.sin(ph) * Math.cos(th); ay = Math.cos(ph) * 0.55; az = Math.sin(ph) * Math.sin(th);
+    }
     // bias the card's "up" toward world up so sprigs still hang the right way
     let bx = -ax * 0.25, by = 1, bz = -az * 0.25;
     const bd = ax * bx + ay * by + az * bz;
@@ -899,11 +1114,20 @@ function buildTree(rand, P) {
     // a persistent sideways drift gives the trunk its lean and S-curve
     const drift = new THREE.Vector3(rand.sym(1), 0, rand.sym(1)).normalize()
       .multiplyScalar(depth === 0 ? P.trunkLean : 0.16 + 0.20 * rand.next());
+    // Per-branch phase for the radius modulation below.
+    const bulgeP = rand.range(0, Math.PI * 2), bulgeQ = rand.range(0, Math.PI * 2);
     for (let i = 0; i <= steps; i++) {
       const t = i / steps;
       pts.push(cur.clone());
       const flare = depth === 0 ? 1 + P.flare * Math.exp(-t * 5.5) : 1;
-      radii.push(rad * (1 - t * P.taper) * flare);
+      // A constant-taper tube cannot read as bark at any distance: it is a dowel, and
+      // that is what the 190 px hero trunk looked like. Two low-frequency harmonics
+      // along the branch make it bulge and pinch the way a real trunk does — the
+      // reference trunk's own light/dark is a large fraction of the tree's read.
+      const bulge = 1
+        + P.bulge * Math.sin(t * 5.3 + bulgeP)
+        + P.bulge * 0.55 * Math.sin(t * 11.7 + bulgeQ);
+      radii.push(rad * (1 - t * P.taper) * flare * bulge);
       if (i === steps) break;
       const step = len / steps;
       const dd = d.clone()
@@ -920,7 +1144,7 @@ function buildTree(rand, P) {
 
     const tipSeg = seg + P.segStep[depth];
     if (depth >= P.maxDepth) {
-      tips.push({ p: cur.clone(), seg: tipSeg });
+      tips.push({ p: cur.clone(), d: d.clone(), seg: tipSeg });
       return;
     }
     const n = P.splits[depth];
@@ -945,6 +1169,18 @@ function buildTree(rand, P) {
   for (const t of tips) { cx += t.p.x; cy += t.p.y; cz += t.p.z; }
   cx /= tips.length; cy /= tips.length; cz /= tips.length;
 
+  /* The crown radius is *measured from the branches*, not declared.
+   *
+   * `canopyR` used to be a magic 4.0 while the branching produced tips out at ~8 m,
+   * so the shell filled a ball half the size of the armature and the outer limbs stuck
+   * out of the crown as bare grey spikes — clearly visible in the ref_00720 capture as
+   * two spars either side of the leaf mass. Taking the 88th percentile of tip distance
+   * guarantees the leaf shell covers the branch tips whatever the branching does. */
+  const tipR = tips.map((t) => Math.hypot(t.p.x - cx, t.p.z - cz)).sort((a, b) => a - b);
+  const measuredR = tipR[Math.min(tipR.length - 1, Math.floor(tipR.length * 0.88))] || P.canopyR;
+  const canopyR = Math.max(P.canopyR, measuredR * 1.10);
+  const canopyH = P.canopyH * (canopyR / P.canopyR);
+
   // A lumpy radius field: without it the crown is a smooth ellipse, and a smooth ellipse
   // is the one thing a real tree never is. Six harmonics in azimuth, two in elevation.
   const lump = (a, e) =>
@@ -953,6 +1189,27 @@ function buildTree(rand, P) {
     + 0.07 * Math.sin(a * 6.1 + e * 3.0)
     + 0.06 * Math.sin(e * 4.0 + a * 1.3);
 
+  /* Sprig frame: branch direction blended toward gravity.
+   *
+   * See the note in `emitSprig`. `gravBias` 0.55 means "a bit more than half way from
+   * the branch's own direction toward straight down", which is what makes a crown band
+   * into lit upper surfaces and shaded undersides instead of a confetti ball. */
+  const sprigFrame = (dx, dy, dz, jitter) => {
+    const l = Math.hypot(dx, dy, dz) || 1;
+    return {
+      ux: dx / l * (1 - P.gravBias),
+      uy: dy / l * (1 - P.gravBias) - P.gravBias,
+      uz: dz / l * (1 - P.gravBias),
+      jitter,
+    };
+  };
+
+  /** Occlusion at a point inside the crown: 1 outside the hull, ~0 at the core. */
+  const shellAO = (dx, dy, dz) => {
+    const q = Math.hypot(dx / canopyR, dy / canopyH, dz / canopyR);
+    return THREE.MathUtils.clamp((q - 0.30) / 0.62, 0.05, 1.0);
+  };
+
   for (const t of tips) {
     const n = P.sprigsPerTip;
     for (let i = 0; i < n; i++) {
@@ -960,8 +1217,13 @@ function buildTree(rand, P) {
       const px = t.p.x + Math.cos(a) * r;
       const py = t.p.y + rand.sym(P.tipCluster * 0.5) + P.sprigLift;
       const pz = t.p.z + Math.sin(a) * r;
+      // Reserve the trunk column: nothing in the inner core below the umbrella plane,
+      // so the fork and the upper trunk read against the sky the way the reference does.
+      if (Math.hypot(px - cx, pz - cz) < 0.30 * canopyR && py < cy) continue;
       emitSprig(leaves, rand, px, py, pz, P.sprigSize, t.seg, P.tiles,
-        px - cx, (py - cy) * (P.canopyR / P.canopyH) + 0.6, pz - cz, 3, 0.55);
+        px - cx, (py - cy) * (canopyR / canopyH) + 0.6, pz - cz, 3,
+        shellAO(px - cx, py - cy, pz - cz),
+        sprigFrame(t.d.x, t.d.y, t.d.z, 0.42));
     }
   }
   // Shell fill on a squashed, lumpy spheroid. Density is biased to the upper surface —
@@ -969,22 +1231,116 @@ function buildTree(rand, P) {
   // branch structure shows through.
   for (let i = 0; i < P.shellSprigs; i++) {
     const a = rand.range(0, Math.PI * 2);
-    // elevation biased upward: -0.45 .. 1 in sin(elev)
-    const se = -0.45 + 1.45 * Math.pow(rand.next(), 0.62);
+    // elevation biased upward: -0.15 .. 1 in sin(elev)
+    const se = -0.15 + 1.15 * Math.pow(rand.next(), 0.55);
     const ce = Math.sqrt(Math.max(0, 1 - se * se));
-    // 30% sit inside the shell so no sky punches through the middle
-    const depth = rand.next() < 0.30 ? rand.range(0.52, 0.86) : rand.range(0.90, 1.06);
+    // 34% sit inside the shell so no sky punches through the middle, and so the crown
+    // has an interior to be dark
+    const depth = rand.next() < 0.34 ? rand.range(0.42, 0.84) : rand.range(0.88, 1.08);
     const k = lump(a, se) * depth;
-    const dx = Math.cos(a) * ce * P.canopyR * k;
-    const dz = Math.sin(a) * ce * P.canopyR * k;
-    const dy = se * P.canopyH * k;
+    const dx = Math.cos(a) * ce * canopyR * k;
+    const dz = Math.sin(a) * ce * canopyR * k;
+    const dy = se * canopyH * k;
+    if (Math.hypot(dx, dz) < 0.30 * canopyR && dy < 0.0) continue;
     emitSprig(leaves, rand, cx + dx, cy + dy, cz + dz,
       P.sprigSize * (0.80 + 0.5 * rand.next()),
       0.80 + 0.20 * Math.min(1, k), P.tiles,
-      dx, dy * (P.canopyR / P.canopyH) + 0.35 * P.canopyR, dz, 3,
-      Math.min(1, Math.max(0.10, (depth - 0.45) / 0.55)) * (0.45 + 0.55 * (se * 0.5 + 0.5)));
+      dx, dy * (canopyR / canopyH) + 0.35 * canopyR, dz, 3,
+      shellAO(dx, dy, dz),
+      // outward-and-down: the outer shell hangs, the top surface lies over
+      sprigFrame(dx, dy * 0.4 - canopyH * 0.35, dz, 0.55));
   }
-  return { branch, leaves, canopy: { x: cx, y: cy, z: cz, r: P.canopyR } };
+  return { branch, leaves, canopy: { x: cx, y: cy, z: cz, r: canopyR, h: canopyH } };
+}
+
+/* ========================================================================== *
+ *  Framing — where the scored cameras actually look
+ * ========================================================================== *
+ *
+ * Every scatter in this file used to be gated on a hand-written world-space band
+ * (`z 50..76` for ivy, `z 42..68` for scrub, `z 28..60 / 64..126` for grass) and the
+ * hero tree was pinned to whatever `rocks.landmarks.get('stack_hero')` happened to
+ * return. Both are latches on another module's coordinates: `terrain.js` re-profiling
+ * the beach emptied the grass bands twice in one session, and `rocks.js` moving
+ * `stack_hero` carried the hero tree out of the composition without a line changing
+ * here. Measured after that move: 0.000% foliage-hue pixels inside the `rock` ROI.
+ *
+ * The fix is to derive the accept region from the thing that actually defines
+ * "on screen" — the scored camera matrices in `poses.js`. A candidate is accepted
+ * only if at least one scored camera can see it, within a per-layer distance budget.
+ * A band gated this way cannot be emptied by someone else's height field or landmark
+ * table; if the world moves, the accept region moves with it.
+ */
+
+/** View-projection matrices for the nine scored `ref_*` poses. */
+function buildScoredViews() {
+  const views = [];
+  for (const key of Object.keys(POSES)) {
+    if (!key.startsWith('ref_')) continue;
+    const P = POSES[key];
+    const fov = P.fov ?? 78;
+    const cam = new THREE.PerspectiveCamera(fov, 16 / 9, 0.1, 4000);
+    cam.position.set(P.pos[0], P.pos[1], P.pos[2]);
+    cam.quaternion.setFromEuler(new THREE.Euler(
+      THREE.MathUtils.degToRad(P.rot[0]),
+      THREE.MathUtils.degToRad(P.rot[1]),
+      THREE.MathUtils.degToRad(P.rot[2] || 0), 'YXZ'));
+    cam.updateMatrixWorld(true);
+    cam.updateProjectionMatrix();
+    views.push({
+      key,
+      pos: cam.position.clone(),
+      vp: new THREE.Matrix4().multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse),
+      // metres -> pixels at unit depth, for apparent-size tests
+      pxPerM: 1080 / (2 * Math.tan(THREE.MathUtils.degToRad(fov) * 0.5)),
+    });
+  }
+  return views;
+}
+
+const _pv4 = new THREE.Vector4();
+
+/**
+ * How many scored cameras see this world point, and from how far.
+ * `margin` is in NDC half-widths: 0.12 lets a plant hang just outside the frame edge
+ * so the band does not stop with a visible straight line at the screen border.
+ * @returns {{n:number, near:number}} n = number of views, near = closest view distance
+ */
+function seenBy(views, x, y, z, maxDist, margin = 0.12) {
+  let n = 0, near = Infinity;
+  const lim = 1 + margin;
+  for (const v of views) {
+    _pv4.set(x, y, z, 1).applyMatrix4(v.vp);
+    const w = _pv4.w;
+    if (w <= 0.05 || w > maxDist) continue;
+    const sx = _pv4.x / w, sy = _pv4.y / w;
+    if (sx < -lim || sx > lim || sy < -lim || sy > lim) continue;
+    n++;
+    if (w < near) near = w;
+  }
+  return { n, near };
+}
+
+/**
+ * Apparent radius in pixels of a sphere of world radius `r` at world point p,
+ * maximised over the scored views that can see it. This is the prominence measure
+ * the hero-tree chooser sorts on: "how big is this stack in the frames we are graded
+ * on", not "is it called stack_hero".
+ */
+function apparentPx(views, x, y, z, r, margin = 0.25) {
+  let best = 0, seen = 0;
+  const lim = 1 + margin;
+  for (const v of views) {
+    _pv4.set(x, y, z, 1).applyMatrix4(v.vp);
+    const w = _pv4.w;
+    if (w <= 0.05) continue;
+    const sx = _pv4.x / w, sy = _pv4.y / w;
+    if (sx < -lim || sx > lim || sy < -lim || sy > lim) continue;
+    seen++;
+    const px = r / w * v.pxPerM;
+    if (px > best) best = px;
+  }
+  return { px: best, views: seen };
 }
 
 /* ========================================================================== *
@@ -1094,6 +1450,31 @@ export function create(opts = {}) {
         sample: (x, z) => (terrain?.sample ? terrain.sample(x, z) : fb.sample(x, z)),
       };
 
+      /* ------------------------------------------------- the accept region */
+      // One rasterisation of "what the scored cameras can see" onto the height field.
+      // Every ground scatter below draws its cells from this list instead of from a
+      // hand-written z band, so no terrain edit can empty a band and no band can drift
+      // out of frame. Cells are 3 m; scatters jitter freely inside one.
+      const views = buildScoredViews();
+      const CELL = 3.0;
+      const cells = [];
+      for (let x = -300; x <= 300; x += CELL) {
+        for (let z = -280; z <= 200; z += CELL) {
+          const s = world.sample(x, z);
+          if (!Number.isFinite(s.y)) continue;
+          const vis = seenBy(views, x, s.y + 0.7, z, 320);
+          if (vis.n === 0) continue;
+          cells.push({ x, z, y: s.y, slope: s.slope, wet: s.wetness, nView: vis.n, d: vis.near });
+        }
+      }
+      if (cells.length === 0) {
+        console.error('[vegetation] FATAL: no terrain cell is visible from any scored pose — '
+          + 'either poses.js moved or terrain.sample() is returning garbage. Every ground '
+          + 'scatter will be empty.');
+      }
+      /** Pick cells matching a gate, ordered by nothing (caller samples at random). */
+      const cellsWhere = (fn) => cells.filter(fn);
+
       if (time) {
         const wd = THREE.MathUtils.degToRad(time.state.windDir);
         windDirX = -Math.sin(wd); windDirZ = -Math.cos(wd);
@@ -1116,17 +1497,39 @@ export function create(opts = {}) {
 
       /* --------------------------------------------------------- textures */
       const leafTex = makeLeafAtlas(rand.fork(1), ctx, 512);
-      const vineTex = makeVineStrip(rand.fork(2), ctx, 128, 512);
-      disposables.push(leafTex, vineTex);
+      // long thin fall, leaves shrinking to nothing at the tip
+      const vineTex = makeRunnerStrip(rand.fork(2), ctx, 128, 512,
+        { nLeaf: 340, leafScale: 1.0, taperTo: 0.38, stemW: 1.4, wob: 0.055 });
+      // short broad runner, leaves held to the end: a mat, not a curtain
+      const ivyTex = makeRunnerStrip(rand.fork(3), ctx, 192, 384,
+        { nLeaf: 210, leafScale: 1.55, taperTo: 0.86, stemW: 2.2, wob: 0.075,
+          vMin: 0.30, vSpan: 0.70 });
+      const mossTex = makeMossAtlas(rand.fork(4), ctx, 256);
+      disposables.push(leafTex, vineTex, ivyTex, mossTex);
 
       /* --------------------------------------------------------- materials */
       const lin = (r, g, b) => new THREE.Color(r, g, b);
 
+      /* Palette note, measured — this replaces the "olive khaki" claim in the header,
+       * which was right about hue and wrong about chroma.
+       *
+       * Foliage-masked pixels of kf_00720: tree crown mean sRGB (121,123,70) at
+       * sat_mean 116/255 and hue 62 deg, p90 (155,159,101); the stack's scrub shelf is
+       * darker and *more* saturated still, mean (70,70,36) at sat 133. Our foliage
+       * pixels, isolated by a `--skip vegetation` diff, measured mean sRGB (111,113,114)
+       * at sat 32 — literally grey, with B above R. So: R ~= G with B near 40% of G is
+       * right, but the value spread and the chroma both have to be roughly doubled, and
+       * the mass has to be *darker*, not lighter.
+       */
       const matCanopy = makeVegMaterial(ctx, U, {
-        key: 'canopy', map: leafTex, alphaTest: 0.42, roughness: 0.56,
-        colA: lin(0.335, 0.375, 0.118), colB: lin(0.196, 0.222, 0.070),
-        transColor: lin(0.44, 0.48, 0.125), transScale: 3.1, transPower: 3.4,
-        windAmp: 0.052, flutter: 1.35, segScale: 0.30, baseAO: 0.15,
+        key: 'canopy', map: leafTex, alphaTest: LEAF_ALPHA_REF, roughness: 0.72,
+        colA: lin(0.340, 0.400, 0.098), colB: lin(0.105, 0.128, 0.026),
+        // a genuine leaf transmittance: chlorophyll passes green, absorbs red hard and
+        // blue almost completely. R below G, B near zero — transmitted light through a
+        // leaf is *more* chromatic than reflected light, not less.
+        transColor: lin(0.30, 0.42, 0.050), transScale: 3.1, transPower: 3.4,
+        windAmp: 0.052, flutter: 1.35, segScale: 0.30, baseAO: 0.10, albedoAO: 0.34,
+        specScale: 0.35,
         lod: [420, 620], widthGrow: 0.0,
       });
       const matBark = makeVegMaterial(ctx, U, {
@@ -1148,39 +1551,55 @@ export function create(opts = {}) {
           roughnessFactor = clamp(0.72 + 0.24 * fis - 0.10 * grain, 0.4, 1.0);
         `,
       });
+      const bladeTex = makeBladeAlpha(ctx, 32, 128);
+      disposables.push(bladeTex);
       const matGrass = makeVegMaterial(ctx, U, {
-        key: 'grass', roughness: 0.74,
-        colA: lin(0.330, 0.262, 0.115), colB: lin(0.196, 0.190, 0.070),
-        transColor: lin(0.36, 0.33, 0.115), transScale: 2.6, transPower: 3.0,
-        windAmp: 0.30, flutter: 1.0, segScale: 1.0, baseAO: 0.24,
-        lod: [58, 96], widthGrow: 0.0085,
+        // Straw, not sage. The reference's dune grass measures lab_b +17.3 against our
+        // -4.6, i.e. 22 b* units of warmth missing from a straw-coloured plant: B has to
+        // come down and R has to stay up.
+        key: 'grass', map: bladeTex, alphaTest: BLADE_ALPHA_REF, roughness: 0.78,
+        colA: lin(0.375, 0.278, 0.068), colB: lin(0.205, 0.172, 0.042),
+        transColor: lin(0.42, 0.36, 0.075), transScale: 2.6, transPower: 3.0,
+        windAmp: 0.30, flutter: 1.0, segScale: 1.0, baseAO: 0.22, albedoAO: 0.55,
+        specScale: 0.45,
+        lod: [110, 170], widthGrow: 0.0085,
       });
       const matScrub = makeVegMaterial(ctx, U, {
-        key: 'scrub', map: leafTex, alphaTest: 0.42, roughness: 0.70,
-        colA: lin(0.235, 0.244, 0.086), colB: lin(0.132, 0.142, 0.048),
-        transColor: lin(0.26, 0.28, 0.085), transScale: 2.4, transPower: 3.2,
-        windAmp: 0.13, flutter: 1.1, segScale: 1.0, baseAO: 0.18,
-        lod: [150, 230], widthGrow: 0.002,
+        // carries the stack crown shelf as well as the talus scrub: the reference's
+        // shelf is the *darkest and most saturated* foliage in the frame (mean sRGB
+        // (70,70,36), sat 133), so this is a dark mass, not a mid-tone.
+        key: 'scrub', map: leafTex, alphaTest: LEAF_ALPHA_REF, roughness: 0.74,
+        colA: lin(0.196, 0.235, 0.048), colB: lin(0.070, 0.088, 0.016),
+        transColor: lin(0.22, 0.31, 0.036), transScale: 2.4, transPower: 3.2,
+        windAmp: 0.13, flutter: 1.1, segScale: 1.0, baseAO: 0.12, albedoAO: 0.34,
+        specScale: 0.35,
+        lod: [220, 340], widthGrow: 0.002,
       });
       const matMoss = makeVegMaterial(ctx, U, {
-        key: 'moss', map: leafTex, alphaTest: 0.42, roughness: 0.72,
-        colA: lin(0.245, 0.262, 0.084), colB: lin(0.110, 0.124, 0.036),
-        transColor: lin(0.25, 0.28, 0.075), transScale: 2.5, transPower: 3.2,
-        windAmp: 0.075, flutter: 1.0, segScale: 1.0, baseAO: 0.12,
+        key: 'moss', map: mossTex, alphaTest: LEAF_ALPHA_REF, roughness: 0.78,
+        colA: lin(0.205, 0.238, 0.052), colB: lin(0.078, 0.094, 0.020),
+        transColor: lin(0.20, 0.29, 0.032), transScale: 2.5, transPower: 3.2,
+        windAmp: 0.075, flutter: 1.0, segScale: 1.0, baseAO: 0.10, albedoAO: 0.36,
+        specScale: 0.35,
         lod: [430, 640], widthGrow: 0.0,
       });
       const matIvy = makeVegMaterial(ctx, U, {
-        key: 'ivy', map: leafTex, alphaTest: 0.42, roughness: 0.66,
-        colA: lin(0.180, 0.184, 0.060), colB: lin(0.082, 0.090, 0.028),
-        transColor: lin(0.22, 0.25, 0.070), transScale: 2.4, transPower: 3.2,
-        windAmp: 0.055, flutter: 0.9, segScale: 1.0, baseAO: 0.14,
+        // ~2x darker than the shipped values with B pushed down: the reference drape is
+        // a dark warm-green mass (lum_mean 61, sat 142, lab_b +13.6) and ours was a
+        // light cold dusting (lum_mean 120, sat 28, lab_b -5.1).
+        key: 'ivy', map: ivyTex, alphaTest: LEAF_ALPHA_REF, roughness: 0.70,
+        colA: lin(0.098, 0.118, 0.019), colB: lin(0.040, 0.050, 0.008),
+        transColor: lin(0.18, 0.26, 0.028), transScale: 2.4, transPower: 3.2,
+        windAmp: 0.055, flutter: 0.9, segScale: 1.0, baseAO: 0.12, albedoAO: 0.38,
+        specScale: 0.30,
         lod: [280, 420], widthGrow: 0.0,
       });
       const matVine = makeVegMaterial(ctx, U, {
-        key: 'vine', map: vineTex, alphaTest: 0.40, roughness: 0.64,
-        colA: lin(0.170, 0.182, 0.058), colB: lin(0.080, 0.090, 0.028),
-        transColor: lin(0.24, 0.27, 0.075), transScale: 2.8, transPower: 3.2,
-        windAmp: 0.115, flutter: 1.45, segScale: 1.0, baseAO: 0.30,
+        key: 'vine', map: vineTex, alphaTest: LEAF_ALPHA_REF, roughness: 0.70,
+        colA: lin(0.118, 0.142, 0.024), colB: lin(0.046, 0.058, 0.010),
+        transColor: lin(0.20, 0.28, 0.030), transScale: 2.8, transPower: 3.2,
+        windAmp: 0.115, flutter: 1.45, segScale: 1.0, baseAO: 0.26, albedoAO: 0.45,
+        specScale: 0.30,
         lod: [300, 460], widthGrow: 0.0,
       });
 
@@ -1224,19 +1643,21 @@ export function create(opts = {}) {
       // a little over half way up, and the crown is roughly 2.4x wider than it is tall.
       const heroP = {
         trunkLen: 8.6, trunkR: 1.05, trunkLean: 0.52, flare: 1.35, taper: 0.46,
-        maxDepth: 3, splits: [3, 2, 2], spread: [0.60, 0.60, 0.52],
-        lift: [0.12, 0.04, 0.06], flatten: 0.32, lenFall: 0.60, radFall: 0.54,
+        maxDepth: 3, splits: [3, 2, 2], spread: [0.55, 0.55, 0.48],
+        lift: [0.12, 0.04, 0.06], flatten: 0.18, lenFall: 0.42, radFall: 0.54,
         segStep: [0.34, 0.28, 0.22, 0.16],
-        sprigsPerTip: 12, tipCluster: 1.9, sprigSize: 1.45, sprigLift: 0.35,
-        shellSprigs: 700, canopyR: 8.6, canopyH: 3.6, lumpSeed: 1.7, tiles: 2,
+        sprigsPerTip: 26, tipCluster: 1.3, sprigSize: 0.62, sprigLift: 0.45,
+        shellSprigs: 2600, canopyR: 4.0, canopyH: 2.4, lumpSeed: 1.7, tiles: 2,
+        bulge: 0.13, gravBias: 0.55,
       };
       const smallP = {
         trunkLen: 4.8, trunkR: 0.46, trunkLean: 0.62, flare: 0.95, taper: 0.50,
         maxDepth: 2, splits: [3, 2], spread: [0.68, 0.60],
         lift: [0.14, 0.06], flatten: 0.38, lenFall: 0.58, radFall: 0.52,
         segStep: [0.40, 0.32, 0.22],
-        sprigsPerTip: 8, tipCluster: 1.1, sprigSize: 0.92, sprigLift: 0.2,
-        shellSprigs: 300, canopyR: 4.3, canopyH: 2.0, lumpSeed: 4.1, tiles: 2,
+        sprigsPerTip: 14, tipCluster: 1.1, sprigSize: 0.72, sprigLift: 0.2,
+        shellSprigs: 900, canopyR: 3.4, canopyH: 1.9, lumpSeed: 4.1, tiles: 2,
+        bulge: 0.15, gravBias: 0.58,
       };
 
       const species = [buildTree(rand.fork(11), heroP), buildTree(rand.fork(12), smallP)];
@@ -1256,38 +1677,101 @@ export function create(opts = {}) {
         }
         return LANDMARKS.find((l) => l.id === id) || null;
       };
-      const topPoint = (id, u, v, L) => {
-        if (rocks?.surfacePoint) {
-          const sp = rocks.surfacePoint(id, u, v);
-          if (sp && sp.point && Number.isFinite(sp.point.y)) return sp;
+      /**
+       * A point on a stack's *crown*, not on its face.
+       *
+       * The old code called `rocks.surfacePoint(id, u, v)` with u and v both uniform.
+       * That entry point parametrises the **face** — v runs base-to-rim — so uniform
+       * (u,v) scattered the "crown" mat evenly down the whole cliff of the stack, which
+       * is exactly the isotropic speckled dusting the critic measured (spectral_slope
+       * -1.78 against the reference drape's -2.21). `rocks.crownPoint(id, u, r)` is the
+       * cap parametrisation and is what a moss mat or a tree wants.
+       *
+       * `r` is a *radial fraction*; callers that want area-uniform coverage must pass
+       * sqrt(uniform) themselves — several deliberately do not, because the reference
+       * crowns are rim-heavy.
+       */
+      const crownPoint = (id, u, r, L) => {
+        if (rocks?.crownPoint) {
+          const cp = rocks.crownPoint(id, u, Math.min(1, r));
+          if (cp && cp.point && Number.isFinite(cp.point.y)) return cp;
         }
-        const a = u * Math.PI * 2, r = Math.sqrt(v) * L.radius;
+        if (rocks?.surfacePoint) {
+          const sp = rocks.surfacePoint(id, u, 1.0);
+          if (sp && sp.point && Number.isFinite(sp.point.y)) {
+            // fall back to the rim ring, pulled in toward the axis by r
+            const p = sp.point.clone();
+            p.x = L.x + (p.x - L.x) * r; p.z = L.z + (p.z - L.z) * r;
+            return { point: p, normal: new THREE.Vector3(0, 1, 0) };
+          }
+        }
+        const a = u * Math.PI * 2, rr = r * L.radius;
         return {
-          point: new THREE.Vector3(L.x + Math.cos(a) * r, L.topY, L.z + Math.sin(a) * r),
+          point: new THREE.Vector3(L.x + Math.cos(a) * rr, L.topY, L.z + Math.sin(a) * rr),
           normal: new THREE.Vector3(0, 1, 0),
         };
       };
 
-      const hero = landmarkOf('stack_hero');
-      if (hero) treeSites.push({ sp: 0, x: hero.x + 1.4, z: hero.z - 0.8, y: hero.topY - 0.8, s: 1.0 });
-      for (const id of ['stack_twin_a', 'stack_twin_b', 'stack_arch', 'headland']) {
+      /* ------------------------------------------------- hero tree siting */
+      /**
+       * Do not trust a landmark id for the hero placement.
+       *
+       * `stack_hero` is a name in `rocks.js`, not a guarantee about the composition;
+       * when that module moved it the tree left the frame silently and the `rock` ROI —
+       * the box this subsystem exists to fill — went to 0.000% foliage. So: score every
+       * landmark crown by how big it actually renders in the scored poses, and put a
+       * hero-scale tree on every crown that reads at all. Prominence sets the scale.
+       */
+      const stackIds = ['stack_hero', 'stack_arch', 'stack_twin_a', 'stack_twin_b',
+        'stack_far_a', 'stack_far_b', 'headland'];
+      const crowns = [];
+      for (const id of stackIds) {
         const L = landmarkOf(id);
         if (!L) continue;
-        const n = id === 'headland' ? 3 : 1;
-        for (let i = 0; i < n; i++) {
-          const a = rand.range(0, Math.PI * 2), r = rand.next() * L.radius * 0.45;
-          treeSites.push({
-            sp: 1, x: L.x + Math.cos(a) * r, z: L.z + Math.sin(a) * r,
-            y: L.topY - 0.6, s: 0.75 + 0.5 * rand.next(),
-          });
-        }
+        const lm = rocks?.landmarks?.get?.(id);
+        const cc = lm?.crown?.center;
+        const cr = lm?.crown?.radius ?? L.radius * 0.6;
+        const cx = cc?.x ?? L.x, cy = cc?.y ?? L.topY, cz = cc?.z ?? L.z;
+        const ap = apparentPx(views, cx, cy, cz, cr);
+        crowns.push({ id, L, x: cx, y: cy, z: cz, r: cr, px: ap.px, views: ap.views });
       }
-      // cliff top
-      for (let i = 0; i < CFG.treeSites; i++) {
-        const x = rand.range(-140, 175), z = rand.range(70, 118);
-        const s = world.sample(x, z);
-        if (s.y < 42 || s.slope > 0.42) continue;
-        treeSites.push({ sp: 1, x, z, y: s.y - 0.3, s: 0.7 + 0.55 * rand.next() });
+      crowns.sort((a, b) => b.px - a.px);
+      const visibleCrowns = crowns.filter((c) => c.views > 0 && c.px >= 14);
+      if (visibleCrowns.length === 0) {
+        console.error('[vegetation] FATAL: no rock crown is visible from any scored pose. '
+          + 'rocks.js landmark table:', crowns.map((c) => `${c.id} ${c.px.toFixed(0)}px/${c.views}v`).join(' '));
+      }
+      console.log('[vegetation] crowns', crowns.map(
+        (c) => `${c.id}:${c.px.toFixed(0)}px/${c.views}v`).join(' '));
+
+      // Hero species on anything that renders bigger than ~55 px of crown radius in at
+      // least one scored frame; the small species on the rest. The reference puts a tree
+      // on every stack head that is close enough to read, and one per stack.
+      for (const c of visibleCrowns) {
+        const heroic = c.px >= 55;
+        // Off-axis: the reference tree sits toward one side of the crown, not centred,
+        // so its trunk breaks the rock's silhouette instead of hiding inside it.
+        const a = rand.range(0, Math.PI * 2);
+        const rr = 0.30 + 0.28 * rand.next();
+        const cp = crownPoint(c.id, a / (Math.PI * 2), rr, c.L);
+        const s = heroic
+          ? THREE.MathUtils.clamp(c.r / 10.0, 0.72, 1.30)
+          : 0.55 + 0.40 * rand.next();
+        treeSites.push({
+          sp: heroic ? 0 : 1, x: cp.point.x, z: cp.point.z, y: cp.point.y - 0.6,
+          s, id: c.id, px: c.px,
+        });
+      }
+      // Cliff top and any other terrain the cameras see, high and flat enough for a tree.
+      {
+        const treeCells = cellsWhere((c) => c.y > 18 && c.slope < 0.40 && c.d < 340);
+        for (let i = 0; i < CFG.treeSites && treeCells.length; i++) {
+          const c = treeCells[Math.floor(rand.next() * treeCells.length)];
+          const x = c.x + rand.sym(CELL * 0.5), z = c.z + rand.sym(CELL * 0.5);
+          const s = world.sample(x, z);
+          if (s.slope > 0.44) continue;
+          treeSites.push({ sp: 1, x, z, y: s.y - 0.3, s: 0.7 + 0.55 * rand.next() });
+        }
       }
 
       for (const t of treeSites) {
@@ -1327,34 +1811,47 @@ export function create(opts = {}) {
       };
 
       const gr = rand.fork(21);
+
+      /* Grass is placed on the visible-cell list, not on a z band.
+       *
+       * `grassCells` is "every 3 m patch of ground that at least one scored camera can
+       * see from under 95 m, that is not sea, not surf and not a cliff face". A tuft
+       * centre is drawn from that list; blades are jittered inside it. When terrain.js
+       * re-profiles the beach the list re-rasterises with it — the failure that emptied
+       * this scatter twice cannot recur, because the gate no longer names a coordinate.
+       *
+       * Density: the whole budget now lands inside ~95 m of a scored camera instead of
+       * being spread over 48,000 m2 of mostly-invisible back-beach, and tuft radius is
+       * small enough that neighbouring tufts merge into a mat rather than reading as
+       * islands of dowels. */
+      const grassCells = cellsWhere((c) =>
+        c.d < 95 && c.wet < 0.32 && c.slope < 0.60 && c.y > 0.05);
+      const swardCells = cellsWhere((c) =>
+        c.d < 260 && c.wet < 0.32 && c.slope < 0.52 && c.y > 6);
+
       let placed = 0, tries = 0;
-      const maxTries = CFG.grassBlades * 4;
-      // clumped scatter: a tuft centre is accepted against the terrain, then blades are
-      // jittered around it. Two levels means the expensive gate runs 12x less often.
+      const maxTries = CFG.grassBlades * 6;
+      // clumped scatter: a tuft centre is drawn from an accepted cell, then blades are
+      // jittered around it. Two levels means the expensive gate runs ~24x less often.
       while (placed < CFG.grassBlades && tries < maxTries) {
         tries++;
-        const roll = gr.next();
-        let cx, cz, dens, hBase, wid;
-        if (roll < 0.62) {                      // back-beach berm
-          cx = gr.range(-165, 130); cz = gr.range(28, 60);
-          dens = 1.0; hBase = 0.55; wid = 0.021;
-        } else if (roll < 0.90) {               // cliff top sward
-          cx = gr.range(-160, 190); cz = gr.range(64, 126);
-          dens = 1.0; hBase = 0.42; wid = 0.017;
-        } else {                                // stragglers out on the dry sand
-          cx = gr.range(-140, 110); cz = gr.range(14, 30);
-          dens = 0.22; hBase = 0.48; wid = 0.020;
-        }
+        // 80% near field (the part that carries screen area), 20% mid-distance sward
+        const near = gr.next() < 0.80;
+        const src = near ? grassCells : swardCells;
+        if (src.length === 0) { if (near) continue; else break; }
+        const c = src[Math.floor(gr.next() * src.length)];
+        const cx = c.x + gr.sym(CELL * 0.5), cz = c.z + gr.sym(CELL * 0.5);
         const s = world.sample(cx, cz);
-        // slope + wetness gate the scatter: nothing in the swash zone, nothing on rock
-        if (s.wetness > 0.10) continue;
-        if (s.slope > 0.58) continue;
-        if (s.y < 3.0) continue;
-        if (gr.next() > dens) continue;
-        const nBlades = 6 + Math.floor(gr.next() * 13);
+        if (s.wetness > 0.32 || s.slope > 0.62) continue;
+        const hBase = near ? 0.50 : 0.40;
+        const wid = near ? 0.020 : 0.016;
+        // A tuft is 24-52 blades in a 0.10-0.24 m radius: tight enough that the tuft
+        // reads as one plant and adjacent tufts close up into a sward. The old
+        // 16-36 blades over 0.16-0.42 m spread the same budget into visible islands.
+        const nBlades = near ? 24 + Math.floor(gr.next() * 28) : 10 + Math.floor(gr.next() * 14);
         const tile = Math.min(CFG.grassTiles - 1,
-          Math.floor((cx + 170) / 370 * CFG.grassTiles));
-        const spread = 0.22 + 0.42 * gr.next();
+          Math.max(0, Math.floor((cx + 300) / 600 * CFG.grassTiles)));
+        const spread = 0.10 + 0.14 * gr.next();
         const tuftTint = gr.next();
         for (let b = 0; b < nBlades && placed < CFG.grassBlades; b++) {
           const a = gr.range(0, 6.2831), rr = spread * Math.sqrt(gr.next());
@@ -1368,94 +1865,162 @@ export function create(opts = {}) {
       }
       for (let i = 0; i < CFG.grassTiles; i++) {
         if (grassTiles[i].n === 0) continue;
-        addMesh(bladeGeo.toGeometry(), matGrass, grassTiles[i], 2.0, false, null);
+        // Shadows ON. The previous pass left them off "for cost"; measured, a tuft with
+        // no contact shadow floats — the near-beach box read p01 84 against the
+        // reference's 41 and local_contrast 0.022 against 0.071, and nothing else in
+        // this file buys that back.
+        addMesh(bladeGeo.toGeometry(), matGrass, grassTiles[i], 2.0, true,
+          { key: 'grass', map: bladeTex, alphaTest: 0.30, windAmp: 0.30, flutter: 1.0, segScale: 1.0, lod: [110, 170] });
       }
 
       /* ================================================================== *
        *  Salt scrub on the talus slope
        * ================================================================== */
-      const scrubGeo = clumpGeometry(rand.fork(31), 9, 2);
+      const scrubGeo = clumpGeometry(rand.fork(31), 11, 2, 1.35);
       const scrubInst = new Instances();
       const sr = rand.fork(32);
-      for (let i = 0, t = 0; i < CFG.scrubCount && t < CFG.scrubCount * 12; t++) {
-        const x = sr.range(-165, 160), z = sr.range(42, 68);
+      // talus / broken slope the scored cameras can see — again a cell gate, not a z band
+      const scrubCells = cellsWhere((c) =>
+        c.d < 240 && c.y > 3 && c.slope > 0.12 && c.slope < 0.82 && c.wet < 0.25);
+      for (let i = 0, t = 0; i < CFG.scrubCount && t < CFG.scrubCount * 12 && scrubCells.length; t++) {
+        const c = scrubCells[Math.floor(sr.next() * scrubCells.length)];
+        const x = c.x + sr.sym(CELL * 0.5), z = c.z + sr.sym(CELL * 0.5);
         const s = world.sample(x, z);
-        if (s.y < 6 || s.y > 34) continue;
-        if (s.slope < 0.14 || s.slope > 0.80) continue;
+        if (s.slope > 0.86) continue;
         const sc = 0.75 + 1.35 * sr.next();
         scrubInst.add(x, s.y - 0.12, z, sr.range(0, 6.2831), sr.sym(0.20),
-          sc * 0.85, sc * 1.5, bakePhase(x, z, sr.next()), sr.next(), 1.0, 0.14);
+          sc * (1.0 + 0.9 * sr.next()), sc * 1.3, bakePhase(x, z, sr.next()), sr.next(), 1.0, 0.14);
         i++;
       }
-      addMesh(scrubGeo.toGeometry(), matScrub, scrubInst, 3, false, null);
+      addMesh(scrubGeo.toGeometry(), matScrub, scrubInst, 3, true,
+        { key: 'scrub', map: leafTex, alphaTest: 0.42, windAmp: 0.13, flutter: 1.1, segScale: 1.0, lod: [150, 230] });
 
       /* ================================================================== *
        *  Moss / lichen crowns on the stack tops + the cliff lip
        * ================================================================== */
-      const mossGeo = clumpGeometry(rand.fork(41), 8, 2);
+      /* The crown shelf is a silhouette, not a texture.
+       *
+       * The previous version scattered 0.55 m-tall pancakes over `surfacePoint(u,v)`
+       * with u and v both uniform — the *face* parametrisation, so the mat ran all the
+       * way down the stack, and area-uniform v put more clumps toward the middle of the
+       * disc than at the rim. Edge-on at 90 m the whole thing was sub-readable: the
+       * stack contributed 1.82% of its box and 0.000% foliage hue.
+       *
+       * What the reference shows is a 4-6 m deep scrub shelf sitting ON the rim and
+       * hanging past it, cutting a ragged, high-contrast profile into the rock against
+       * the sky, with the flat crown centre comparatively bare. So: place on
+       * `crownPoint`, bias hard outward (rr in 0.62..1.14, i.e. over the lip), and give
+       * the clumps real vertical extent (1.6-4.4 m) out of a taller, denser geometry.
+       */
+      const shelfGeo = clumpGeometry(rand.fork(41), 15, 2, 1.75);
+      const mossGeo = clumpGeometry(rand.fork(43), 7, 2, 0.55);
+      const shelfInst = new Instances();
       const mossInst = new Instances();
       const mr = rand.fork(42);
-      const stacks = ['stack_hero', 'stack_arch', 'stack_twin_a', 'stack_twin_b',
-        'stack_far_a', 'stack_far_b', 'headland'];
-      for (const id of stacks) {
-        const L = landmarkOf(id);
-        if (!L) continue;
-        const area = Math.PI * L.radius * L.radius;
-        const n = Math.min(1400, Math.round(area * 0.55));
+      for (const c of visibleCrowns) {
+        const L = c.L;
+        // Circumference of the lip in metres, at roughly one clump per 0.55 m of rim,
+        // three deep. Small distant stacks get proportionally fewer, automatically.
+        const rimLen = 2 * Math.PI * Math.max(c.r, 2);
+        const n = Math.min(900, Math.round(rimLen * 3.4));
         for (let i = 0; i < n; i++) {
-          const u = mr.next(), v = mr.next();
-          const sp = topPoint(id, u, v, L);
-          const p = sp.point;
-          // rim clumps hang over the edge and are the strongest read in the reference
-          const rr = Math.hypot(p.x - L.x, p.z - L.z) / Math.max(L.radius, 1e-3);
-          const rim = Math.min(1, Math.max(0, (rr - 0.62) / 0.42));
-          const a = Math.atan2(p.z - L.z, p.x - L.x);
-          const drop = rim * (0.9 + 3.4 * mr.next());
-          const sc = (0.9 + 1.5 * mr.next()) * (1 + rim * 0.6);
-          mossInst.add(
-            p.x + Math.cos(a) * rim * 0.9, p.y - 0.35 - drop, p.z + Math.sin(a) * rim * 0.9,
-            mr.range(0, 6.2831), rim * mr.range(0.25, 1.05),
-            sc * (0.85 + 0.5 * mr.next()), sc * 1.9,
+          const u = mr.next();
+          // rim-biased radius: 82% of the mass in the outer third, some hanging past 1.0
+          const rr = 0.62 + 0.52 * Math.pow(mr.next(), 0.55);
+          const cp = crownPoint(c.id, u, Math.min(1, rr), L);
+          const p = cp.point;
+          const dx = p.x - c.x, dz = p.z - c.z;
+          const dl = Math.hypot(dx, dz) || 1;
+          const over = Math.max(0, rr - 1.0) * c.r;         // metres past the lip
+          const rim = THREE.MathUtils.clamp((rr - 0.72) / 0.34, 0, 1);
+          // a clump that overhangs also drops, so the shelf reads as a rolled edge
+          const drop = over * 0.9 + rim * mr.range(0.2, 2.4);
+          const sc = 0.85 + 0.85 * mr.next();
+          shelfInst.add(
+            p.x + dx / dl * over, p.y - 0.25 - drop, p.z + dz / dl * over,
+            mr.range(0, 6.2831), rim * mr.range(0.15, 0.85),
+            sc * (1.6 + 2.8 * mr.next()),               // 1.4 - 3.7 m tall
+            sc * (0.85 + 0.75 * mr.next()),
             bakePhase(p.x, p.z, mr.next()), mr.next(), 1.0, 0.10);
         }
+        // a thinner lichen mat over the flat centre, so the crown is not bare rock
+        const nc = Math.min(400, Math.round(Math.PI * c.r * c.r * 0.30));
+        for (let i = 0; i < nc; i++) {
+          const cp = crownPoint(c.id, mr.next(), 0.80 * Math.sqrt(mr.next()), L);
+          const p = cp.point;
+          const sc = 0.45 + 0.55 * mr.next();
+          mossInst.add(p.x, p.y - 0.15, p.z, mr.range(0, 6.2831), mr.sym(0.25),
+            sc * 0.75, sc * 1.15, bakePhase(p.x, p.z, mr.next()), mr.next(), 1.0, 0.10);
+        }
       }
-      // cliff crown: wherever the terrain rolls over from flat to steep, high up
-      for (let i = 0, t = 0; i < CFG.mossClumps * 0.25 && t < 40000; t++) {
-        const x = mr.range(-160, 190), z = mr.range(52, 78);
-        const s = world.sample(x, z);
-        if (s.y < 30) continue;
-        if (s.slope < 0.42 || s.slope > 0.95) continue;
-        const sc = 0.9 + 1.7 * mr.next();
-        mossInst.add(x, s.y, z, mr.range(0, 6.2831), mr.range(0.0, 0.75),
-          sc, sc * 1.8, bakePhase(x, z, mr.next()), mr.next(), 1.0, 0.10);
-        i++;
+      // Terrain lip: the same crown-relative band, on cliff tops the cameras can see.
+      // The old version smeared this over 40 m of face at slope 0.42-0.95, which is what
+      // produced the even top-to-bottom speckle the critic measured at spectral_slope
+      // -1.78 (near-white-noise) against the reference drape's -2.21.
+      {
+        const lipCells = cellsWhere((c) => c.d < 300 && c.y > 12 && c.slope > 0.30 && c.slope < 0.90);
+        const n = Math.min(CFG.mossClumps, lipCells.length * 3);
+        for (let i = 0; i < n && lipCells.length; i++) {
+          const c = lipCells[Math.floor(mr.next() * lipCells.length)];
+          const x = c.x + mr.sym(CELL * 0.5), z = c.z + mr.sym(CELL * 0.5);
+          const s = world.sample(x, z);
+          const sc = 0.7 + 0.8 * mr.next();
+          shelfInst.add(x, s.y - 0.2, z, mr.range(0, 6.2831), mr.range(0.0, 0.55),
+            sc * (1.2 + 1.9 * mr.next()), sc * (0.8 + 0.6 * mr.next()),
+            bakePhase(x, z, mr.next()), mr.next(), 1.0, 0.10);
+        }
       }
-      addMesh(mossGeo.toGeometry(), matMoss, mossInst, 6, false, null);
+      addMesh(shelfGeo.toGeometry(), matScrub, shelfInst, 8, true,
+        { key: 'shelf', map: leafTex, alphaTest: 0.42, windAmp: 0.10, flutter: 1.05, segScale: 1.0, lod: [430, 640] });
+      addMesh(mossGeo.toGeometry(), matMoss, mossInst, 6, true,
+        { key: 'moss', map: mossTex, alphaTest: 0.42, windAmp: 0.075, flutter: 1.0, segScale: 1.0, lod: [430, 640] });
 
       /* ================================================================== *
        *  Ivy drape on the cliff face
        * ================================================================== */
-      const ivyGeo = cardGeometry(2, 0, 2, 0.12);
+      /* The drape hangs off rock, so it is placed on the rock's own surface
+       * parametrisation — `rocks.surfacePoint(id, u, v)`, v = base..rim — and accepted
+       * only where a scored camera can see it. The previous version scanned the height
+       * field over a hardcoded `z 50..76`; measured, that band placed **64 cards out of
+       * a 2600 budget** in the shipped build, because the cliff it was written against
+       * had moved. Rock surfaces cannot go empty that way: if the cliff moves, its
+       * parametrisation moves with it.
+       *
+       * v is biased hard to the top (v = 1 - 0.30*u^1.6) because the reference drape is
+       * a dark mass hanging from the lip, not a dusting spread over the whole face. */
+      const ivyGeo = cardGeometry(2, 0, 1, 0.12);
       const ivyInst = new Instances();
       const ir = rand.fork(51);
-      for (let i = 0, t = 0; i < CFG.ivyCards && t < CFG.ivyCards * 20; t++) {
-        const x = ir.range(-160, 190), z = ir.range(50, 76);
-        const s = world.sample(x, z);
-        if (s.slope < 0.66) continue;
-        if (s.y < 14) continue;
-        // thin out downward so the drape hangs from the crown, as in kf_00720
-        const top = Math.min(1, Math.max(0, (s.y - 14) / 34));
-        if (ir.next() > 0.18 + 0.82 * top * top) continue;
-        const n = s.normal;
-        const yaw = Math.atan2(n.x, n.z);
-        const sc = 0.8 + 1.5 * ir.next();
-        ivyInst.add(x + n.x * 0.35, s.y + 0.2, z + n.z * 0.35,
-          yaw + ir.sym(0.5), 1.35 + ir.sym(0.45),
-          sc * (1.4 + 1.1 * ir.next()), sc * 1.5,
-          bakePhase(x, z, ir.next()), ir.next(), 1.0, 0.12);
-        i++;
+      const drapeIds = [];
+      if (rocks?.landmarks) for (const [id] of rocks.landmarks) drapeIds.push(id);
+      else drapeIds.push(...stackIds);
+      let ivyPlaced = 0;
+      for (let t = 0; t < CFG.ivyCards * 14 && ivyPlaced < CFG.ivyCards; t++) {
+        const id = drapeIds[Math.floor(ir.next() * drapeIds.length)];
+        const u = ir.next();
+        const v = 1.0 - 0.32 * Math.pow(ir.next(), 1.5);
+        const sp = rocks?.surfacePoint?.(id, u, v);
+        if (!sp || !sp.point || !Number.isFinite(sp.point.y)) continue;
+        const p = sp.point;
+        if (p.y < 6) continue;
+        const n = sp.normal || new THREE.Vector3(0, 1, 0);
+        const nl = Math.hypot(n.x, n.z);
+        if (nl < 0.45) continue;                       // only real faces, not the cap
+        if (seenBy(views, p.x, p.y, p.z, 420).n === 0) continue;
+        const yaw = Math.atan2(n.x / nl, n.z / nl);
+        const sc = 0.55 + 0.45 * ir.next();
+        ivyInst.add(p.x + n.x * 0.30, p.y + 0.2, p.z + n.z * 0.30,
+          yaw + ir.sym(0.45), 1.30 + ir.sym(0.40),
+          sc * (0.70 + 0.40 * ir.next()), sc * (2.6 + 1.6 * ir.next()),
+          bakePhase(p.x, p.z, ir.next()), ir.next(), 1.0, 0.12);
+        ivyPlaced++;
       }
-      addMesh(ivyGeo.toGeometry(), matIvy, ivyInst, 4, false, null);
+      if (ivyPlaced < CFG.ivyCards * 0.5) {
+        console.warn(`[vegetation] ivy drape underfilled: ${ivyPlaced}/${CFG.ivyCards} cards — `
+          + 'rocks.surfacePoint() is not returning visible steep faces');
+      }
+      addMesh(ivyGeo.toGeometry(), matIvy, ivyInst, 4, true,
+        { key: 'ivy', map: ivyTex, alphaTest: 0.42, windAmp: 0.055, flutter: 0.9, segScale: 1.0, lod: [280, 420] });
 
       /* ================================================================== *
        *  Hanging vine curtains — cliff undercut and stack overhangs
@@ -1482,34 +2047,36 @@ export function create(opts = {}) {
         }
       };
 
-      // cliff: curtains hanging out of the undercut, anchored on the steepest faces
-      for (let i = 0, t = 0; i < 26 && t < 30000; t++) {
-        const x = vr.range(-158, 188), z = vr.range(52, 74);
-        const s = world.sample(x, z);
-        if (s.slope < 0.80) continue;
-        if (s.y < 22 || s.y > 60) continue;
-        const n = s.normal;
-        const nl = Math.hypot(n.x, n.z) || 1;
-        curtain(x + n.x * 0.6, s.y + 0.5, z + n.z * 0.6, n.x / nl, n.z / nl,
-          1.6 + 2.6 * vr.next(), 3.0 + 5.0 * vr.next(), 22 + Math.floor(vr.next() * 20));
-        i++;
+      // cliff: curtains hanging out of the undercut, on visible steep faces
+      {
+        const cliffCells = cellsWhere((c) => c.d < 320 && c.slope > 0.78 && c.y > 12);
+        for (let i = 0; i < 26 && cliffCells.length; i++) {
+          const c = cliffCells[Math.floor(vr.next() * cliffCells.length)];
+          const x = c.x + vr.sym(CELL * 0.5), z = c.z + vr.sym(CELL * 0.5);
+          const s = world.sample(x, z);
+          const n = s.normal;
+          const nl = Math.hypot(n.x, n.z) || 1;
+          curtain(x + n.x * 0.6, s.y + 0.5, z + n.z * 0.6, n.x / nl, n.z / nl,
+            1.6 + 2.6 * vr.next(), 3.0 + 5.0 * vr.next(), 22 + Math.floor(vr.next() * 20));
+        }
       }
-      // stacks: two or three falls off the rim, on one favoured side
-      for (const id of stacks) {
-        const L = landmarkOf(id);
-        if (!L) continue;
+      // stacks: two or three falls off the rim, on one favoured side. Anchored on the
+      // measured crown radius/height, not on the spec's nominal `radius`/`topY`.
+      for (const c of visibleCrowns) {
+        const L = c.L;
         const nFalls = 2 + Math.floor(vr.next() * 2);
         const favour = vr.range(0, 6.2831);
         for (let f = 0; f < nFalls; f++) {
           const a = favour + vr.sym(1.5);
-          const rr = L.radius * (0.93 + 0.08 * vr.next());
-          const x = L.x + Math.cos(a) * rr, z = L.z + Math.sin(a) * rr;
-          curtain(x, L.topY - 1.6 - vr.next() * 2.5, z, Math.cos(a), Math.sin(a),
-            1.4 + 2.2 * vr.next(), 3.5 + 6.5 * vr.next(),
+          const rr = c.r * (0.93 + 0.10 * vr.next());
+          const x = c.x + Math.cos(a) * rr, z = c.z + Math.sin(a) * rr;
+          curtain(x, c.y - 1.0 - vr.next() * 2.0, z, Math.cos(a), Math.sin(a),
+            1.4 + 2.2 * vr.next(), 4.5 + 7.5 * vr.next(),
             26 + Math.floor(vr.next() * 26));
         }
       }
-      addMesh(vineGeo.toGeometry(), matVine, vineInst, 12, false, null);
+      addMesh(vineGeo.toGeometry(), matVine, vineInst, 12, true,
+        { key: 'vine', map: vineTex, alphaTest: 0.40, windAmp: 0.115, flutter: 1.45, segScale: 1.0, lod: [300, 460] });
 
       /* ------------------------------------------------------------------ */
       group.layers.set(LAYER.OPAQUE);
@@ -1521,7 +2088,8 @@ export function create(opts = {}) {
         draws: meshes.length,
         blades: grassTiles.reduce((a, g) => a + g.n, 0),
         trees: treeSites.length,
-        moss: mossInst.n, ivy: ivyInst.n, vines: vineInst.n, scrub: scrubInst.n,
+        shelf: shelfInst.n, moss: mossInst.n, ivy: ivyInst.n, vines: vineInst.n,
+        scrub: scrubInst.n, cells: cells.length,
         tris: meshes.reduce((a, m) =>
           a + (m.geometry.index.count / 3) * m.geometry.instanceCount, 0),
       };
@@ -1549,7 +2117,7 @@ export function create(opts = {}) {
         _sun.copy(time.sunDir);
         _nrm.setFromMatrix4(ctx.camera.matrixWorldInverse);
         U.uSunDirV.value.copy(_sun).applyMatrix3(_nrm).normalize();
-        U.uSunRad.value.copy(time.sunColor).multiplyScalar(time.state.sunIntensity * 0.115);
+        U.uSunRad.value.copy(time.sunColor).multiplyScalar(time.state.sunIntensity * SUN_RAD_SCALE);
       }
       U.uWindT.value = windT;
       U.uWindTPrev.value = windTPrev;

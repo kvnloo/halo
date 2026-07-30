@@ -216,8 +216,22 @@ export class Engine {
   stop() { this._running = false; cancelAnimationFrame(this._raf); }
 
   /** Advance exactly n frames synchronously - used by the capture harness so TAA and
-   *  every temporal buffer converges to a stable image before the screenshot. */
-  advance(n, dt = this.opts.fixedDt) { for (let i = 0; i < n; i++) this.step(dt); }
+   *  every temporal buffer converges to a stable image before the screenshot.
+   *
+   *  Timing is accumulated here as well as in start()'s rAF tick: headless captures
+   *  never call start(), so without this every perf number the scoring harness records
+   *  (scores/*.json, history.jsonl) was a structural zero. `fps` is derived from the
+   *  measured step cost rather than counted per wall-clock second, because advance()
+   *  runs as fast as it can and has no real frame pacing. */
+  advance(n, dt = this.opts.fixedDt) {
+    for (let i = 0; i < n; i++) {
+      const t0 = performance.now();
+      this.step(dt);
+      const ms = performance.now() - t0;
+      this.stats.ms = this.stats.ms > 0 ? this.stats.ms * 0.9 + ms * 0.1 : ms;
+    }
+    this.stats.fps = this.stats.ms > 0 ? 1000 / this.stats.ms : 0;
+  }
 
   dispose() {
     this.stop();

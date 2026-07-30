@@ -157,54 +157,73 @@ function beachProfileY(x, z) {
 /**
  * Landmark table — coordinates are the shared contract in docs/WORLD.md and must not
  * drift. Everything after (x, z, baseY, topY, radius) is silhouette authoring.
+ *
+ * `prof` is BOTTOM-LOADED, and that is a correction, not a preference. Every stack
+ * here used to run 0.68-0.78 R at the foot to 1.10-1.18 R at three-quarter height —
+ * 45-70% wider at the shoulder than at the base — and all seven shared one curve with
+ * jittered numbers, so the whole stack field was a single tree-stump silhouette
+ * repeated six times. kf_01500 and ref/detail/rock_4k show the opposite: near-plumb
+ * columns, widest at or just above the base, undercut ONCE, terminated by a hard rim.
+ * Each stack now gets a different shape *family* (plumb column / leaning slab with a
+ * mid-height undercut / tapered spire / stubby drum / two-tier block), and the single
+ * overhang event comes from `notch` or `undercut`, never from a smooth brow added on
+ * top of a smooth bulge.
  */
 const STACKS = [
   {
+    // plumb column, faint waist, hard rim — the hero silhouette
     id: 'stack_hero', x: -38, z: -92, baseY: -4.0, topY: 38, radius: 15,
-    res: [224, 176], lod: 0, castShadow: true,
-    prof: [[0, 0.72], [0.10, 0.78], [0.32, 0.92], [0.58, 1.06], [0.80, 1.14], [0.94, 1.13], [1.0, 1.08]],
-    lean: [0.20, -0.11], notch: { y: 1.9, w: 1.5, d: 0.17, dir: 0.6 },
+    res: [256, 192], lod: 0, castShadow: true,
+    prof: [[0, 1.12], [0.12, 1.11], [0.38, 1.07], [0.66, 1.035], [0.86, 1.04], [0.95, 1.055], [1.0, 1.005]],
+    lean: [0.20, -0.11], notch: { y: 1.9, w: 1.5, d: 0.20, dir: 0.6 },
     ledges: [[0.40, 0.055], [0.66, 0.040]], flute: 1.0, crownFlat: 1.0,
   },
   {
+    // leaning slab with one mid-height undercut
     id: 'stack_arch', x: 34, z: -70, baseY: -3.4, topY: 41, radius: 17,
-    res: [224, 176], lod: 0, castShadow: true,
-    prof: [[0, 0.68], [0.09, 0.73], [0.30, 0.92], [0.55, 1.08], [0.80, 1.18], [0.93, 1.16], [1.0, 1.10]],
+    res: [256, 192], lod: 0, castShadow: true,
+    prof: [[0, 1.14], [0.13, 1.12], [0.40, 1.06], [0.68, 1.02], [0.88, 1.04], [1.0, 0.98]],
     lean: [-0.24, 0.14], notch: { y: 2.0, w: 1.9, d: 0.25, dir: 2.5 },
+    undercut: { t: 0.55, w: 0.12, d: 0.17, dir: 2.2 },
     ledges: [[0.30, 0.070], [0.58, 0.035]], flute: 1.15, crownFlat: 0.8,
   },
   {
+    // tapered spire
     id: 'stack_twin_a', x: -96, z: -140, baseY: -7.5, topY: 44, radius: 19,
-    res: [176, 144], lod: 1, castShadow: false,
-    prof: [[0, 0.74], [0.12, 0.80], [0.34, 0.94], [0.60, 1.07], [0.82, 1.14], [0.94, 1.12], [1.0, 1.06]],
+    res: [192, 160], lod: 1, castShadow: false,
+    prof: [[0, 1.15], [0.16, 1.12], [0.46, 1.05], [0.74, 0.99], [0.90, 0.955], [1.0, 0.88]],
     lean: [0.14, 0.20], notch: { y: 1.7, w: 1.6, d: 0.16, dir: 4.0 },
+    undercut: { t: 0.40, w: 0.10, d: 0.12, dir: 0.8 },
     ledges: [[0.44, 0.050]], flute: 0.9, crownFlat: 1.0,
   },
   {
+    // stubby drum on a broad foot
     id: 'stack_twin_b', x: -128, z: -172, baseY: -9.0, topY: 33, radius: 13,
-    res: [144, 112], lod: 1, castShadow: false,
-    prof: [[0, 0.76], [0.14, 0.82], [0.36, 0.96], [0.62, 1.08], [0.84, 1.12], [0.95, 1.09], [1.0, 1.02]],
+    res: [160, 128], lod: 1, castShadow: false,
+    prof: [[0, 1.21], [0.10, 1.13], [0.36, 1.08], [0.68, 1.06], [0.88, 1.075], [1.0, 1.03]],
     lean: [-0.18, -0.16], notch: { y: 1.6, w: 1.5, d: 0.15, dir: 1.4 },
     ledges: [[0.52, 0.045]], flute: 1.0, crownFlat: 0.9,
   },
   {
+    // two-tier block
     id: 'stack_far_a', x: 120, z: -210, baseY: -12, topY: 36, radius: 16,
     res: [112, 88], lod: 2, castShadow: false,
-    prof: [[0, 0.76], [0.13, 0.82], [0.35, 0.95], [0.60, 1.06], [0.83, 1.11], [0.95, 1.08], [1.0, 1.00]],
+    prof: [[0, 1.13], [0.18, 1.10], [0.34, 1.03], [0.52, 1.01], [0.74, 0.99], [0.92, 1.00], [1.0, 0.93]],
     lean: [0.16, 0.10], notch: { y: 1.8, w: 1.6, d: 0.14, dir: 3.1 },
     ledges: [[0.48, 0.045]], flute: 0.85, crownFlat: 1.0,
   },
   {
+    // slender leaner
     id: 'stack_far_b', x: 156, z: -246, baseY: -13, topY: 30, radius: 12,
     res: [96, 72], lod: 2, castShadow: false,
-    prof: [[0, 0.78], [0.13, 0.84], [0.36, 0.96], [0.62, 1.07], [0.84, 1.10], [0.95, 1.07], [1.0, 0.98]],
+    prof: [[0, 1.14], [0.15, 1.10], [0.44, 1.03], [0.72, 0.98], [0.90, 0.95], [1.0, 0.86]],
     lean: [-0.12, 0.18], notch: { y: 1.7, w: 1.5, d: 0.14, dir: 5.4 },
     ledges: [[0.45, 0.040]], flute: 0.9, crownFlat: 0.9,
   },
   {
     id: 'headland', x: 108, z: 20, baseY: -2.0, topY: 34, radius: 40,
     res: [192, 120], lod: 0, castShadow: true,
-    prof: [[0, 0.86], [0.10, 0.90], [0.34, 0.97], [0.60, 1.00], [0.80, 0.97], [0.93, 0.88], [1.0, 0.72]],
+    prof: [[0, 1.05], [0.12, 1.04], [0.36, 1.015], [0.60, 0.98], [0.80, 0.945], [0.93, 0.885], [1.0, 0.735]],
     lean: [0.05, 0.08], notch: { y: 1.6, w: 1.7, d: 0.09, dir: 4.4 },
     ledges: [[0.30, 0.035], [0.62, 0.030]], flute: 0.75, crownFlat: 1.0,
     capAmp: 3.2, capTilt: 0.06,
@@ -240,17 +259,26 @@ function makeStackField(spec, rnd) {
    * This is the single feature that stops the silhouette reading as procedural.
    */
   const planes = [];
-  const nPlanes = 3 + rnd.int(0, 2);
+  const nPlanes = 6 + rnd.int(0, 4);
   for (let i = 0; i < nPlanes; i++) {
-    const y0 = spec.baseY + H * rnd.range(0.02, 0.62);
-    const hh = H * rnd.range(0.34, 0.85);
+    const y0 = spec.baseY + H * rnd.range(-0.06, 0.55);
+    const hh = H * rnd.range(0.40, 1.10);
     planes.push({
       phi: rnd.range(0, TAU),
-      p: R * rnd.range(0.76, 1.06),
-      tilt: rnd.sym(0.17),
+      p: R * rnd.range(0.74, 1.02),
+      tilt: rnd.sym(0.20),
       y0, y1: y0 + hh,
-      k: R * rnd.range(0.055, 0.14),
-      w: hh * rnd.range(0.14, 0.34),
+      // 12-30 cm fillet at R = 15. The previous 0.055-0.14 R was a 0.8-2.1 m fillet,
+      // which subtends ~25 px at the 90 m hero stack: at that size a smin does not
+      // produce an arête, it dents a cylinder, and a surface with no slope
+      // discontinuity has no N.L discontinuity and therefore no terminator. That is
+      // why shadow_frac read 0.036 against the reference's 0.101 and highlight_frac
+      // read 0.000 against 0.044.
+      k: R * rnd.range(0.008, 0.020),
+      // Narrow ramps at the band ENDS only, so inside the band the face IS the plane
+      // rather than a smoothstep-weighted lerp toward it. The ramp itself then reads
+      // as a horizontal fracture edge, which is what a bedding plane looks like.
+      w: H * rnd.range(0.012, 0.035),
       s: seed + 3000 + i * 97,
     });
   }
@@ -273,43 +301,68 @@ function makeStackField(spec, rnd) {
   const rAt = (th, t, y) => {
     let r = rSmooth(th, t);
 
-    // one-sided overhanging brow near the crown: the top hangs well outside the foot
-    r += R * 0.22 * smoothstep(0.62, 0.93, t) * Math.pow(sat(Math.cos(th - browDir)), 1.5);
+    // Exactly ONE overhang event per stack, and it is a real undercut — mass removed
+    // below a line so the rock above it hangs — not a smooth brow added on top of a
+    // smooth profile bulge. Only the stacks whose shape family calls for it have one;
+    // the rest get their single undercut from the wave-cut notch further down.
+    if (spec.undercut) {
+      const u = spec.undercut;
+      const ub = Math.exp(-Math.pow((t - u.t) / u.w, 2));
+      const ud = Math.pow(sat(0.5 + 0.5 * Math.cos(th - u.dir)), 1.3);
+      r -= R * u.d * ub * ud * (0.72 + 0.56 * (cylFbm(th, y, 1.8, 0.12, 2, seed + 909) * 0.5 + 0.5));
+    }
 
     // ledges: a discrete step in with an outward lip just below it
     for (const [lt, la] of (spec.ledges || [])) {
-      r -= R * la * smoothstep(lt - 0.014, lt + 0.026, t);
-      r += R * la * 0.55 * Math.exp(-Math.pow((t - lt + 0.011) / 0.013, 2));
+      r -= R * la * 0.55 * smoothstep(lt - 0.030, lt + 0.070, t);
+      r += R * la * 0.40 * Math.exp(-Math.pow((t - lt + 0.011) / 0.016, 2));
     }
 
-    // karst mass: big lumps and blocky sub-masses
-    r += R * 0.115 * cylFbm(th, y, 0.95, 0.055, 3, seed);
-    r += R * 0.042 * cylFbm(th, y, 2.55, 0.145, 3, seed + 31);
-
-    // cleavage faces
+    // ---- cleavage faces, and the planarity mask they hand to everything after -----
+    // The faces are cut FIRST and every noise term downstream is attenuated by how
+    // strongly a face owns this (θ, y). Previously seven displacement terms totalling
+    // ~0.5R ran after the clip on the same radius, so the one feature that was supposed
+    // to give the stack a flat plane immediately had the plane sanded off it again.
+    let planarity = 0;
     for (const pl of planes) {
       const c = Math.cos(th - pl.phi);
-      if (c <= 0.26) continue;
+      // Wide angular acceptance is free: p/cos blows up away from the plane's facing
+      // direction, so the min simply does nothing there. Narrowing it to c > 0.26 only
+      // narrowed the PLANARITY mask, which is what left `rough` near 1 over most of
+      // the perimeter and let the noise sand the faces back off.
+      if (c <= 0.15) continue;
       const g = smoothstep(pl.y0 - pl.w, pl.y0 + pl.w, y) * (1 - smoothstep(pl.y1 - pl.w, pl.y1 + pl.w, y));
       if (g < 0.02) continue;
-      const rp = (pl.p + pl.tilt * (y - pl.y0)) / c + R * 0.055 * cylFbm(th, y, 2.2, 0.10, 2, pl.s);
+      const rp = (pl.p + pl.tilt * (y - pl.y0)) / c + R * 0.028 * cylFbm(th, y, 2.2, 0.10, 2, pl.s);
+      const w = g * sat((c - 0.15) / 0.22);
       r = mix(r, smin(r, rp, pl.k), g);
+      if (w > planarity) planarity = w;
     }
+    // a cut face stays a face; the noise lives on the un-cut mass between arêtes
+    const rough = 1 - 0.88 * planarity;
 
-    // vertical fluting — broad ridged grooves stretched ~35:1 along y, and only on
-    // some faces: uniform ribbing all the way round reads as corduroy, not rock.
+    // karst mass: big lumps and blocky sub-masses
+    r += R * 0.115 * rough * cylFbm(th, y, 0.95, 0.055, 3, seed);
+    r += R * 0.042 * rough * cylFbm(th, y, 2.55, 0.145, 3, seed + 31);
+
+    // vertical fluting — broad ridged grooves stretched along y, on SOME of the
+    // perimeter only: uniform ribbing all the way round reads as corduroy, not rock.
+    // There is no floor on the mask, so roughly half the perimeter carries no fluting
+    // at all, and the grooves are y-banded so they terminate at bedding planes instead
+    // of running dead straight for the full 42 m.
     // The crest must not be serrated: a 1.6 m groove cut into the last row reads as saw
     // teeth against the sky, which no sea stack has. Fade the grooves out under the rim.
     const topFade = 1 - smoothstep(0.84, 0.99, t);
     const fw = 0.40 * cylFbm(th, y, 0.7, 0.05, 2, seed + 77);
-    const fmask = 0.30 + 0.70 * sat(0.55 + 0.9 * Math.cos(th - fluteDir)
-      + 1.5 * cylFbm(th, y, 1.3, 0.045, 2, seed + 91));
-    r -= R * 0.105 * flute * fmask * topFade * cylRidged(th + fw, y, 5.6, 0.024, 3, seed + 53);
+    const fmask = Math.pow(sat(0.55 + 0.9 * Math.cos(th - fluteDir)
+      + 1.5 * cylFbm(th, y, 1.3, 0.045, 2, seed + 91)), 1.5)
+      * smoothstep(-0.30, 0.20, cylFbm(th, y, 0.4, 0.35, 2, seed + 97));
+    r -= R * 0.072 * flute * rough * fmask * topFade * cylRidged(th + fw, y, 5.6, 0.10, 3, seed + 53);
 
     // karst solution channels: narrow, deep, drip-warped, upper faces only
     const cw = 0.85 * cylFbm(th, y, 0.5, 0.09, 2, seed + 201);
-    const ch = cylRidged(th + cw, y, 11.5, 0.014, 2, seed + 143);
-    r -= R * 0.058 * flute * fmask * topFade * Math.pow(sat(ch * 1.30), 2.0)
+    const ch = cylRidged(th + cw, y, 11.5, 0.055, 2, seed + 143);
+    r -= R * 0.058 * flute * rough * fmask * topFade * Math.pow(sat(ch * 1.30), 2.0)
       * (0.25 + 0.75 * smoothstep(0.14, 0.55, t));
 
     // sedimentary bedding — small, and gated so it only shows where the face cuts
@@ -318,22 +371,31 @@ function makeStackField(spec, rnd) {
     const bmask = sat(0.35 + 1.4 * cylFbm(th, y, 1.1, 0.02, 2, seed + 631));
     r += bedA * bmask * (beddingShape((y + bw) / bedP1) + 0.8 * beddingShape((y + bw * 0.6) / bedP2));
 
-    // wave-cut notch: skewed in y so the roof overhangs, deepest on the exposed side
+    // Wave-cut platform. Only on part of the perimeter — a flare all the way round is a
+    // plinth, and stacks do not stand on plinths; the surf cuts a shelf where it reaches.
+    // No floor on the mask and a much smaller flare: at 0.25 floor / 0.20R this ran the
+    // whole way round and was *larger* than the notch, so every stack stood on a
+    // mushroom foot that was wider than its shaft and lit exactly where the dark tide
+    // band belongs.
+    // Cut to 0.07R -> 0.022R and pulled below y = 1.2: with a bottom-loaded profile
+    // the foot is already the widest part of the stack, so any flare on top of it is
+    // a second, brighter skirt exactly where the dark tide band belongs.
+    const ft = smoothstep(1.2, -1.6, y);
+    const fpm = sat(1.5 * cylFbm(th, y, 1.15, 0.06, 2, seed + 811)
+      + 0.9 * Math.cos(th - n.dir) - 0.15);
+    r += R * 0.022 * ft * fpm * (0.55 + 0.45 * (cylFbm(th, y, 3.2, 0.30, 2, seed + 821) * 0.5 + 0.5));
+
+    // wave-cut notch: skewed in y so the roof overhangs, deepest on the exposed side.
+    // Evaluated AFTER the platform so the undercut wins — an undercut that a shelf can
+    // fill back in is not an undercut.
     const dy = y - n.y;
     const np = Math.exp(-Math.pow(dy / (dy > 0 ? n.w * 0.78 : n.w * 1.35), 2));
     const nd = 0.32 + 0.68 * sat(Math.cos(th - n.dir) * 0.5 + 0.5);
     const nb = 0.68 + 0.64 * (cylFbm(th, y, 3.4, 0.25, 2, seed + 511) * 0.5 + 0.5);
-    r -= R * n.d * np * nd * nb;
-
-    // Wave-cut platform. Only on part of the perimeter — a flare all the way round is a
-    // plinth, and stacks do not stand on plinths; the surf cuts a shelf where it reaches.
-    const ft = smoothstep(2.4, -1.2, y);
-    const fpm = sat(0.25 + 1.5 * cylFbm(th, y, 1.15, 0.06, 2, seed + 811)
-      + 0.45 * Math.cos(th - n.dir));
-    r += R * 0.20 * ft * fpm * (0.55 + 0.45 * (cylFbm(th, y, 3.2, 0.30, 2, seed + 821) * 0.5 + 0.5));
+    r -= R * (n.d + 0.07) * np * nd * nb;
 
     // fine relief so the mesh itself carries ~30 cm structure
-    r += R * 0.019 * cylFbm(th, y, 6.2, 0.62, 3, seed + 311);
+    r += R * 0.019 * rough * cylFbm(th, y, 6.2, 0.62, 3, seed + 311);
 
     return Math.max(R * 0.16, r);
   };
@@ -521,8 +583,8 @@ function buildStack(spec, rnd) {
     const y1 = spec.baseY + (spec.topY - spec.baseY) * t1;
     colliders.push({
       type: 'capsule', tag: spec.id,
-      a: [spec.x + a0[0], y0, spec.z + a0[1]],
-      b: [spec.x + a1[0], y1, spec.z + a1[1]],
+      a: new THREE.Vector3(spec.x + a0[0], y0, spec.z + a0[1]),
+      b: new THREE.Vector3(spec.x + a1[0], y1, spec.z + a1[1]),
       radius: rmin * 0.92,
     });
   }
@@ -734,7 +796,9 @@ function buildCliff(rnd, ctx) {
       const zf = zRef(x) - disp(x, 20);
       colliders.push({
         type: 'box', tag: 'cliff_main',
-        center: [x, 32, zf + 26], halfExtents: [spanX / 8 + 1, 32, 26],
+        box: new THREE.Box3().setFromCenterAndSize(
+          new THREE.Vector3(x, 32, zf + 26),
+          new THREE.Vector3((spanX / 8 + 1) * 2, 64, 52)),
       });
     }
   }
@@ -1004,24 +1068,118 @@ uniform sampler2D uNH_A;
 uniform sampler2D uNH_B;
 uniform vec3  uColBase, uColBright, uColGrime, uColStain, uColDamp, uColAlgae, uColMoss, uColLichen, uColBleach;
 uniform float uRough, uAlgaeAmt, uMossAmt, uWetY, uDetailAmt, uAOAmt, uMacroAmt;
-uniform float uSpecF0, uSpecF90;
+uniform float uSpecF0, uSpecF90, uWetAmt, uSpecOccAmt, uHexAmt, uDbg;
 varying vec3 vWNrmRK;
 varying vec4 vRockRK;
 
-/** The library's whiteout tri-planar blend, extended to carry the height channel so
- *  four detail scales cost 12 taps instead of 24. Weights come from triWeights(). */
-vec4 triplanarNH(sampler2D t, vec3 wp, vec3 n, float scale, float sharp){
+/* Specular occlusion, consumed at <lights_fragment_end> (see makeRockMaterial).
+ * three's MeshStandardMaterial applies none at all, so the PMREM sky probe lays an
+ * even blue sheen into every gully and under every overhang — light that no path
+ * in the scene could deliver. Measured on a black-albedo capture it was 35-45% of
+ * the rendered pixel and it was the reason the rock rendered B > R under an ochre
+ * albedo with B/R = 0.24. */
+float gRKSpecOcc = 1.0;
+/* Ambient occlusion, likewise applied to reflectedLight.indirectDiffuse and not to
+ * the albedo, so it cannot darken direct sunlight. */
+float gRKAO = 1.0;
+
+/* ------------------------------------------------------------------ hex-tiling
+ * Mikkelsen, "Practical Real-Time Hex-Tiling", JCGT 11(2) 2022,
+ * https://jcgt.org/published/0011/03/05/ — gamma = 7, beta = 0.6, and the S-curve
+ * gain disabled (r = 0.5) for normal data, which is what the paper prescribes.
+ * The paper is HLSL: mul(M,v) is v*mat(same args) in GLSL because HLSL's float2x2 is
+ * row-major, so the skew is written out longhand rather than as a mat2.
+ * Why it is here: the 9 m octave repeats ~38 times across the 340 m cliff wall. */
+const float RK_HEX_S = 3.46410162;   // 2*sqrt(3)
+
+void rkTriGrid(out vec3 w, out ivec2 v1, out ivec2 v2, out ivec2 v3, vec2 st){
+  st *= RK_HEX_S;
+  vec2 sk = vec2(st.x - 0.57735027 * st.y, 1.15470054 * st.y);
+  ivec2 baseId = ivec2(floor(sk));
+  vec3 t = vec3(fract(sk), 0.0);
+  t.z = 1.0 - t.x - t.y;
+  float s  = step(0.0, -t.z);
+  float s2 = 2.0 * s - 1.0;
+  w  = vec3(-t.z * s2, s - t.y * s2, s - t.x * s2);
+  v1 = baseId + ivec2(int(s), int(s));
+  v2 = baseId + ivec2(int(s), 1 - int(s));
+  v3 = baseId + ivec2(1 - int(s), int(s));
+}
+/* Integer hash. research/terrain.md 1.5: both fract(sin(x)*43758) and the Hoskins
+ * fract(p*0.1031) run out of mantissa once the vertex id passes ~2000, which happens
+ * partway along this cliff, and the base repeat comes back as diagonal banding.
+ * ES 3.00 has uints — use them. */
+vec2 rkHashI(ivec2 p){
+  uvec2 q = uvec2(p) * uvec2(1597334673u, 3812015801u);
+  q = (q.x ^ q.y) * uvec2(1597334673u, 3812015801u);
+  return vec2(q) * (1.0 / float(0xffffffffu));
+}
+/* One hex-tiled fetch. Derivatives are passed in, computed BEFORE the random offset:
+ * Heitz & Neyret 5.4 — the offsets break dFdx across a tile boundary and the hardware
+ * reads that as a huge footprint, i.e. a 1 px blurred line tracing every hex edge. */
+vec4 rkHexTex(sampler2D tex, vec2 st, vec2 dx, vec2 dy){
+  vec3 w; ivec2 v1, v2, v3;
+  rkTriGrid(w, v1, v2, v3, st);
+  vec4 c1 = textureGrad(tex, st + rkHashI(v1), dx, dy);
+  vec4 c2 = textureGrad(tex, st + rkHashI(v2), dx, dy);
+  vec4 c3 = textureGrad(tex, st + rkHashI(v3), dx, dy);
+  // Eq. 3's delta() modulation: let the tile with the more prominent feature win the
+  // transition so the seam stops following the hex edge. These maps carry height in
+  // .w, which is a better proxy for "prominent" than the luminance Eq. 4 uses.
+  vec3 Dw = mix(vec3(1.0), vec3(c1.w, c2.w, c3.w), 0.6);   // beta = 0.6
+  vec3 W = Dw * pow(w, vec3(7.0));                          // gamma = 7
+  W /= max(W.x + W.y + W.z, 1e-6);
+  return W.x * c1 + W.y * c2 + W.z * c3;
+}
+
+/** Whiteout tri-planar blend carrying the height channel, with Golus's projection
+ *  correction and an optional hex-tiled path. Every fetch is textureGrad so the whole
+ *  function is legal inside non-uniform control flow. */
+vec4 rkTriNH(sampler2D t, vec3 wp, vec3 n, float scale, float sharp, float hex){
   vec3 w = triWeights(n, sharp);
-  vec4 sx = texture(t, wp.zy * scale);
-  vec4 sy = texture(t, wp.xz * scale);
-  vec4 sz = texture(t, wp.xy * scale);
+  // Golus's axisSign step, which research/terrain.md 4.1 names this repo's
+  // TRIPLANAR_GLSL for omitting: without it every face whose axis component is
+  // negative samples a mirrored projection, so on a generalised cylinder half of
+  // every stack has its detail lighting running backwards.
+  // https://github.com/bgolus/Normal-Mapping-for-a-Triplanar-Shader
+  vec3 sg = vec3(n.x < 0.0 ? -1.0 : 1.0, n.y < 0.0 ? -1.0 : 1.0, n.z < 0.0 ? -1.0 : 1.0);
+  vec2 ux = vec2(wp.z *  sg.x, wp.y) * scale;
+  vec2 uy = vec2(wp.x *  sg.y, wp.z) * scale;
+  vec2 uz = vec2(wp.x * -sg.z, wp.y) * scale;
+  vec2 dxx = dFdx(ux), dyx = dFdy(ux);
+  vec2 dxy = dFdx(uy), dyy = dFdy(uy);
+  vec2 dxz = dFdx(uz), dyz = dFdy(uz);
+  vec4 sx, sy, sz;
+  if (hex > 0.5) {
+    sx = rkHexTex(t, ux, dxx, dyx);
+    sy = rkHexTex(t, uy, dxy, dyy);
+    sz = rkHexTex(t, uz, dxz, dyz);
+  } else {
+    sx = textureGrad(t, ux, dxx, dyx);
+    sy = textureGrad(t, uy, dxy, dyy);
+    sz = textureGrad(t, uz, dxz, dyz);
+  }
   vec3 nx = sx.xyz * 2.0 - 1.0, ny = sy.xyz * 2.0 - 1.0, nz = sz.xyz * 2.0 - 1.0;
+  nx.x *=  sg.x; ny.x *=  sg.y; nz.x *= -sg.z;
   nx = vec3(nx.xy + n.zy, abs(nx.z) * n.x);
   ny = vec3(ny.xy + n.xz, abs(ny.z) * n.y);
   nz = vec3(nz.xy + n.xy, abs(nz.z) * n.z);
   vec3 nn = normalize(nx.zyx*w.x + ny.xzy*w.y + nz.xyz*w.z);
   float h = sx.w*w.x + sy.w*w.y + sz.w*w.z;
   return vec4(nn, h);
+}
+
+/** Mikkelsen, *Surface Gradient-Based Bump Mapping Framework*, JCGT 9(3) 2020.
+ *  Eq. 2 says the tangent-space normal is the normalised (-dH/du, -dH/dv, 1), so
+ *  DERIVATIVES add linearly and normals do not. Resolve each octave to its
+ *  tangent-plane gradient with this, sum those, and convert once at the end:
+ *  normalize(Ng - g) reproduces the octave exactly when only one is present, and
+ *  composes correctly when several are. The old normalize(Ng + sum(n_k - Ng))
+ *  understates the slope wherever two octaves are both steep, so the surface got
+ *  flatter with every layer added. */
+vec3 rkGrad(vec3 nk, vec3 Ng){
+  float d = max(dot(Ng, nk), 1e-3);
+  return (Ng * d - nk) / d;
 }
 mat3 rotY(float a){ float c = cos(a), s = sin(a); return mat3(c,0.0,-s, 0.0,1.0,0.0, s,0.0,c); }
 `;
@@ -1032,30 +1190,68 @@ vec3 Ng = normalize(vWNrmRK);
 
 float occ = vRockRK.x, cvx = vRockRK.y, shl = vRockRK.z, crn = vRockRK.w;
 
-// ---- tri-planar detail, four scales: 9 m / 1.15 m / 0.30 m / 0.055 m ----------
+float vDist = distance(P, cameraPosition);
+
+// ---- tri-planar detail, five scales: 9 m / 3.5 m / 1.15 m / 0.30 m / 0.055 m --
 // Each scale is rotated in world space so the same map at different sizes does not
 // visibly repeat itself down the pyramid.
-mat3 r1 = rotY(0.9), r2 = rotY(2.1), r3 = rotY(-1.35);
-vec4 dA1 = triplanarNH(uNH_A, P,      Ng, 1.0/9.00,  4.0);
-vec4 dA2 = triplanarNH(uNH_A, r1 * P, Ng, 1.0/1.15,  5.0);
-vec4 dB1 = triplanarNH(uNH_B, r2 * P, Ng, 1.0/0.30,  6.0);
-vec4 dB2 = triplanarNH(uNH_B, r3 * P, Ng, 1.0/0.055, 6.0);
+//
+// Two structural rules from research/terrain.md, neither of which this ladder used
+// to obey:
+//
+// 3.1 — every octave fades out at *its own pixel footprint*, not at a camera
+//   distance, and its albedo and its normal fade together. The old gate was
+//   1 - smoothstep(8, 26, vDist) on the two finest heights only, so the 30 cm and
+//   5.5 cm NORMALS still contributed 0.34 and 0.14 at 300 m where 5.5 cm subtends
+//   0.02 px. That is not detail, it is aliasing, and it was the uniform isotropic
+//   fizz laid over the whole 42 m stack.
+// 3.2 — compose as derivatives (see rkGrad), not as normals.
+const float L0 = 9.00, L1 = 3.50, L2 = 1.15, L3 = 0.30, L4 = 0.055;   // metres
+// anisotropic max pixel footprint in metres
+vec3 ddxP = dFdx(P), ddyP = dFdy(P);
+float fp = max(length(ddxP), length(ddyP));
+// Nyquist is two texels per wavelength; fade between one and two.
+float w0 = 1.0 - smoothstep(0.5, 1.0, fp / L0);
+float w1 = 1.0 - smoothstep(0.5, 1.0, fp / L1);
+float w2 = 1.0 - smoothstep(0.5, 1.0, fp / L2);
+float w3 = 1.0 - smoothstep(0.5, 1.0, fp / L3);
+float w4 = 1.0 - smoothstep(0.5, 1.0, fp / L4);
+
+// Hex-tiling is only worth its 6 extra taps while the tile is still large on screen.
+// A 9 m tile stops being recognisable as a repeat once it is under ~40 px, i.e.
+// fp > 0.22 m; the 3.5 m rung crosses the same threshold at fp > 0.09 m.
+float hexNear = uHexAmt * step(fp, 0.22);
+float hexMid  = uHexAmt * step(fp, 0.09);
+
+mat3 r1 = rotY(0.9), r2 = rotY(2.1), r3 = rotY(-1.35), r0 = rotY(-0.55);
+vec4 dA1 = rkTriNH(uNH_A, P,      Ng, 1.0/L0, 4.0, hexNear);
+vec4 dA0 = rkTriNH(uNH_A, r0 * P, Ng, 1.0/L1, 4.5, hexMid);
+vec4 dA2 = rkTriNH(uNH_A, r1 * P, Ng, 1.0/L2, 5.0, 0.0);
+vec4 dB1 = rkTriNH(uNH_B, r2 * P, Ng, 1.0/L3, 6.0, 0.0);
+vec4 dB2 = rkTriNH(uNH_B, r3 * P, Ng, 1.0/L4, 6.0, 0.0);
 
 float k = uDetailAmt;
-vec3 nDet = Ng
-  + (dA1.xyz - Ng) * (1.05 * k)
-  + (dA2.xyz - Ng) * (1.00 * k)
-  + (dB1.xyz - Ng) * (0.78 * k)
-  + (dB2.xyz - Ng) * (0.48 * k);
-nDet = normalize(nDet);
+vec3 gDet = vec3(0.0);
+gDet += (1.30 * k * w0) * rkGrad(dA1.xyz, Ng);
+gDet += (1.20 * k * w1) * rkGrad(dA0.xyz, Ng);
+gDet += (0.85 * k * w2) * rkGrad(dA2.xyz, Ng);
+gDet += (0.40 * k * w3) * rkGrad(dB1.xyz, Ng);
+gDet += (0.18 * k * w4) * rkGrad(dB2.xyz, Ng);
+// clamp the SUM, not each layer: slope 83 deg, so a stacking accident cannot invert N
+float gLen = length(gDet);
+gDet *= (gLen > 8.0) ? (8.0 / gLen) : 1.0;
+vec3 nDet = normalize(Ng - gDet);
 
 // Expand each scale over its useful band before it modulates anything: the raw maps
 // cluster around the middle and an un-stretched height buys almost no albedo variance.
-float hA = smoothstep(0.12, 0.90, dA1.w);
-float hB = smoothstep(0.12, 0.90, dA2.w);
-float hC = smoothstep(0.12, 0.90, dB1.w);
-float hD = smoothstep(0.15, 0.88, dB2.w);
-float h = hA * 0.38 + hB * 0.29 + hC * 0.20 + hD * 0.13;
+// Each is gated by the SAME footprint weight as its normal — an octave that has left
+// the normal must not still be driving tone, and vice versa.
+float hA  = mix(0.5, smoothstep(0.12, 0.90, dA1.w), w0);
+float hA0 = mix(0.5, smoothstep(0.12, 0.90, dA0.w), w1);
+float hB  = mix(0.5, smoothstep(0.12, 0.90, dA2.w), w2);
+float hC  = mix(0.5, smoothstep(0.12, 0.90, dB1.w), w3);
+float hD  = mix(0.5, smoothstep(0.15, 0.88, dB2.w), w4);
+float h = hA * 0.30 + hA0 * 0.26 + hB * 0.22 + hC * 0.14 + hD * 0.08;
 
 // ---- macro fields (procedural, so they never tile) ---------------------------
 float m1 = fbm3(P * 0.055, 4);
@@ -1086,17 +1282,22 @@ bed2 = smoothstep(0.0, 0.12, bed2) * (1.0 - smoothstep(0.6, 1.0, bed2));
 vec3 alb = uColBase;
 alb *= 1.0 + uMacroAmt * (0.34 * m1 + 0.19 * m2);
 alb *= mix(0.60, 1.24, hA);
-alb *= mix(0.70, 1.20, hB);
-alb *= mix(0.80, 1.16, hC);
-alb *= mix(0.88, 1.10, hD);
+alb *= mix(0.66, 1.22, hA0);
+alb *= mix(0.78, 1.14, hB);
+alb *= mix(0.88, 1.10, hC);
+alb *= mix(0.94, 1.05, hD);
 // curvature wear: grime settles in the concavities, edges scrub clean and bright
 float grime = (1.0 - occ) * (0.45 + 0.55 * (1.0 - smoothstep(0.15, 0.62, h)));
 alb = mix(alb, uColGrime, clamp(grime * 0.95, 0.0, 0.82));
 float wear = cvx * cvx * smoothstep(0.36, 0.88, h);
 alb = mix(alb, uColBright, wear * 0.70);
-// vertical staining, strongest below ledges and absent on up-facing rock
-float stainMask = streak * (1.0 - smoothstep(0.25, 0.72, Ng.y)) * (0.35 + 0.65 * (1.0 - crn));
-alb = mix(alb, uColStain, stainMask * 0.55);
+// Vertical staining, strongest below ledges and absent on up-facing rock. Gated by a
+// low-frequency patch field as well: an unbroken 25:1 ridged streak applied over every
+// non-up-facing texel is corduroy, and it was the dominant read on the whole stack
+// field. Runoff comes off specific ledges and gullies, not off every square metre.
+float stainPatch = smoothstep(-0.10, 0.42, fbm3(P * vec3(0.05, 0.012, 0.05) + 17.0, 3));
+float stainMask = streak * (1.0 - smoothstep(0.25, 0.72, Ng.y)) * (0.35 + 0.65 * (1.0 - crn)) * stainPatch;
+alb = mix(alb, uColStain, stainMask * 0.36);
 // bedding shows as a tonal band, not a groove
 alb *= 1.0 - 0.20 * bed - 0.11 * bed2;
 
@@ -1108,14 +1309,26 @@ alb *= 1.0 - 0.20 * bed - 0.11 * bed2;
 // 0.19 of a mix, which is invisible; this one is a real band.
 float yn = 0.62 * fbm3(P * vec3(0.16, 0.55, 0.16), 3) + 0.30 * fbm3(P * vec3(0.9, 2.2, 0.9), 2);
 float yw = P.y - uWetY + yn * 1.5;
-float wet = smoothstep(1.15, -0.35, yw);
+float wet = smoothstep(1.15, -0.35, yw) * uWetAmt;
 
-// broad damp band: soaked rock, strongest at the waterline, gone by ~5 m up
-float damp = smoothstep(5.0, 0.15, yw);
-damp *= 0.74 + 0.26 * smoothstep(-0.35, 0.50, Ng.y);      // undersides stay damp too
-damp *= 0.66 + 0.34 * smoothstep(-0.40, 0.35, m2);   // reuse the macro octave: no extra fbm3
-damp *= 0.78 + 0.22 * (1.0 - cvx);                        // sun-scrubbed arêtes dry first
-alb = mix(alb, uColDamp, clamp(damp * uAlgaeAmt * 0.95, 0.0, 0.95));
+// Broad damp band: soaked rock, strongest at the waterline, gone by ~5 m up.
+//
+// HEIGHT-BLENDED, not linearly blended — Mishkinis, *Advanced Terrain Texture
+// Splatting* (2013), whose problem statement is exactly this defect: "Sand doesn't
+// stick to stones, instead it falls down and fills cracks between them, leaving tops
+// of stones pure." The sea fills the low plates first and leaves the proud faces dry,
+// so the damp material's height is 1-h and the dry material's is h. A linear 3.45 m
+// ramp gave an 8.7 code-value step where the reference moves 28.6; this one is ragged
+// and near-hard, with dark tongues running up the gullies.
+float dampW = clamp(smoothstep(3.6, 0.15, yw) * uAlgaeAmt, 0.0, 1.0);
+dampW *= 0.82 + 0.18 * smoothstep(-0.40, 0.35, m2);   // reuse the macro octave: no extra fbm3
+float dryW = 1.0 - dampW;
+const float DAMP_DEPTH = 0.20;    // research 4.4: 0.15-0.25 for rock
+float dMa = max(h + dryW, (1.0 - h) + dampW) - DAMP_DEPTH;
+float dB1w = max(h + dryW - dMa, 0.0);
+float dB2w = max((1.0 - h) + dampW - dMa, 0.0);
+float damp = dB2w / max(dB1w + dB2w, 1e-5);
+alb = mix(alb, uColDamp, damp * 0.95);
 
 // weed / algae mat concentrated in the lower half of that band
 float algae = smoothstep(3.2, 0.1, yw) * smoothstep(-3.6, -1.4, yw);
@@ -1149,19 +1362,43 @@ alb = mix(alb, alb * vec3(0.66, 0.645, 0.635), shl * 0.72);
 // only the last bit of specular-dominated darkening, not a second full halving.
 alb *= mix(1.0, 0.66, wet);
 
-// ---- ambient occlusion (floor kept off zero: the reference p01 is 17, never 0) --
-float ao = mix(1.0, 0.36 + 0.64 * occ, uAOAmt);
-ao *= mix(1.0, 0.48, shl * 0.9);
-ao *= mix(1.0, 0.62 + 0.38 * smoothstep(0.02, 0.52, hC), 0.85);
+// ---- ambient occlusion --------------------------------------------------------
+// AO is an INDIRECT term and it is applied to reflectedLight.indirectDiffuse at
+// <lights_fragment_end>, not multiplied into the albedo. Multiplying it in dimmed the
+// SUN as well as the sky, which is exactly backwards here: measured with the albedo
+// forced to a flat 0.18 grey (--config rockDbg=2) the rock's own lighting reads
+// rgb 72/76/88 — B largest, R-B = -15, lab_b -7.5 — i.e. the surface is dominated by
+// a blue sky probe, and the term that should have been suppressing that was instead
+// being spent equally on the one warm, directional source in the scene.
+float ao = mix(1.0, 0.30 + 0.70 * occ, uAOAmt);
+ao *= mix(1.0, 0.40, shl * 0.9);
+ao *= mix(1.0, 0.58 + 0.42 * smoothstep(0.02, 0.52, hC), 0.9);
+gRKAO = ao;
 
-diffuseColor.rgb = alb * ao;
+diffuseColor.rgb = alb;
 diffuseColor.a = 1.0;
+
+// Diagnostic. --config rockDbg=1 forces the albedo to pure black so whatever is
+// left in the frame is indirect specular and nothing else; 2 forces a known 0.18 grey.
+// This is the only honest way to tune a sheen: an albedo problem cannot survive its
+// own albedo being zero.
+if (uDbg > 0.5) diffuseColor.rgb = (uDbg < 1.5) ? vec3(0.0) : vec3(0.18);
 
 // ---- roughness ---------------------------------------------------------------
 float rgh = uRough * (0.84 + 0.38 * (1.0 - h));
 rgh = mix(rgh, 0.55, algae * 0.55);
 rgh = mix(rgh, 0.78, bed * 0.30);
-rgh = mix(rgh, 0.31, wet);           // damp porous limestone, not a mirror
+// the tide line's height-blend weight drives roughness too, not only albedo — a crisp
+// colour edge over a soft lighting edge reads as a decal painted on the rock
+rgh = mix(rgh, 0.52, damp * 0.55);
+rgh = mix(rgh, 0.44, wet);           // damp porous limestone, not a mirror.
+                                     // 0.31 turned the near-flat tide-pool slab into
+                                     // chrome foil at grazing incidence.
+// research/terrain.md 3.3: an octave that left under the footprint gate has to hand
+// its variance to roughness or the rock gets GLOSSIER as it recedes — the exact
+// wrong behaviour. Added in alpha space, which is where variance lives.
+float lostVar = (1.0 - w2) * 0.010 + (1.0 - w3) * 0.024 + (1.0 - w4) * 0.034;
+rgh = sqrt(clamp(rgh * rgh + lostVar, 0.0, 1.0));
 roughnessFactor = clamp(rgh, 0.10, 1.0);
 
 normal = normalize((viewMatrix * vec4(nDet, 0.0)).xyz);
@@ -1176,21 +1413,46 @@ material.diffuseColor = diffuseColor.rgb;
 material.diffuseContribution = diffuseColor.rgb * (1.0 - metalnessFactor);
 material.roughness = min(max(roughnessFactor, 0.0525) + geometryRoughness, 1.0);
 
+// Geometric specular antialiasing — Tokuyoshi & Kaplanyan, *Improved Geometric
+// Specular Antialiasing*, I3D 2019, Eq. 4 / Listing 2:
+//     alphaBar^2 = alpha^2 + min(2*sigma^2*(|dn/du|^2 + |dn/dv|^2), kappa)
+// kappa = 0.18 is the paper's clamp. SIGMA2 = 0.25 is Kaplanyan's half-pixel box
+// kernel; the paper does not state a numeric value, so treat it as tuned, not cited.
+// Nothing in this module did any specular AA at all, and it is 6 ALU.
+{
+  vec3 dnx = dFdx(nDet), dny = dFdy(nDet);
+  float nvar = 0.25 * (dot(dnx, dnx) + dot(dny, dny));
+  float a2 = material.roughness * material.roughness + min(2.0 * nvar, 0.18);
+  material.roughness = sqrt(clamp(a2, 0.0, 1.0));
+}
+
 // ---- specular -----------------------------------------------------------------
-// three gives every non-metal a flat F0 = 0.04 with F90 = 1.0. Against a bright sky
-// probe that is a neutral white sheen laid over the whole rock, and it is measurable:
-// a capture with the rock palette forced to black still reads sRGB 36/37/45 with
-// aerial perspective off, all of it indirect specular. Porous chalky carbonate is not
-// a clean dielectric interface — it is conventionally authored nearer specular 0.3
-// (F0 0.025), and the grazing term of a microporous surface never reaches unity:
-// the 'interface' is a statistical mix of grains, pores and dust, so the Fresnel
-// edge peak is suppressed. Measured effect: -6 sRGB on the black-albedo floor.
-// Wet rock goes the other way: that is the entire visual point of a wet rock.
+// three gives every non-metal a flat F0 = 0.04 with F90 = 1.0 and applies NO specular
+// occlusion, so the PMREM sky probe lays an even sheen over the whole rock. Measured:
+// with the albedo forced to pure black (--config rockDbg=1) and both veils nulled,
+// the rock still rendered sRGB 36/37/45 — 35-45% of the shipped pixel, and BLUE
+// (B > R by 9) under an albedo whose B/R is 0.24. That, not fog, is why the rock ROI
+// came out B > G > R.
+//
+// Two corrections, both physical:
+//  (a) F90. research/terrain.md 5.3 puts dry cliff rock at F0 0.04, and a microporous
+//      carbonate has no coherent grazing interface at all — the 'surface' is a
+//      statistical mix of grains, pores and dust, so the Fresnel edge peak is
+//      suppressed rather than rising to unity. 0.45 was buying a blue rim wash and
+//      nothing else. Wet rock goes the other way: that is the point of a wet rock.
+//  (b) Occlusion by the baked cavity mask, exactly as terrain.js does with its
+//      gTSpecOcc global. None of that sheen should survive inside a gully or under
+//      an overhang.
 float sF0  = mix(uSpecF0, 0.038, wet);
-float sF90 = mix(uSpecF90, 0.80, wet);
+float sF90 = mix(uSpecF90, 0.62, wet);
 material.specularColor = vec3(sF0);
 material.specularColorBlended = mix(vec3(sF0), diffuseColor.rgb, metalnessFactor);
 material.specularF90 = sF90;
+
+float so = mix(1.0, 0.20 + 0.80 * occ, uSpecOccAmt);
+so *= mix(1.0, 0.38, shl);
+so *= mix(0.70, 1.0, wet);          // the wet band keeps its lobe; dry chalk has none
+gRKSpecOcc = so;
 `;
 
 const ROCK_VERT_PARS = /* glsl */`
@@ -1239,7 +1501,13 @@ function makeRockMaterial(ctx, texA, texB, o) {
     uAOAmt: { value: o.ao ?? 1.0 },
     uMacroAmt: { value: o.macro ?? 1.0 },
     uSpecF0: { value: o.specF0 ?? 0.025 },
-    uSpecF90: { value: o.specF90 ?? 0.45 },
+    // 0.45 was re-derived against a black-albedo capture: see the specular block in
+    // ROCK_FRAG. 0.13 is what leaves a neutral, sub-8-sRGB floor.
+    uSpecF90: { value: o.specF90 ?? 0.13 },
+    uWetAmt: { value: o.wetAmt ?? 1.0 },
+    uSpecOccAmt: { value: o.specOcc ?? 1.0 },
+    uHexAmt: { value: o.hex ?? 1.0 },
+    uDbg: { value: 0 },
   };
   // ------------------------------------------------------------------ ordering
   // `applyWorldMaterial` installs its onBeforeCompile and THEN calls
@@ -1254,6 +1522,22 @@ function makeRockMaterial(ctx, texA, texB, o) {
   // calls it before merging its own uniforms. Fixing this properly belongs in
   // src/gfx/materialCommon.js, which this module does not own — reported instead.
   ctx.get('lighting')?.registerMaterial?.(mat);
+
+  // Specular occlusion has to be applied to `reflectedLight`, which only exists after
+  // <lights_fragment_end>; the ROCK_FRAG injection point (<lights_fragment_begin>) is
+  // too early. Chain a hook in front of applyWorldMaterial's so it captures this one
+  // as `prev` — same construction terrain.js uses for gTSpecOcc.
+  const prevOBC = mat.onBeforeCompile;
+  mat.onBeforeCompile = (shader, renderer) => {
+    prevOBC?.(shader, renderer);
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <lights_fragment_end>',
+      `#include <lights_fragment_end>
+  reflectedLight.directSpecular   *= gRKSpecOcc;
+  reflectedLight.indirectSpecular *= gRKSpecOcc;
+  reflectedLight.indirectDiffuse  *= gRKAO;`);
+  };
+
   const noLighting = Object.create(ctx);
   noLighting.get = (n, req) => (n === 'lighting' ? null : ctx.get(n, req));
 
@@ -1350,19 +1634,17 @@ export function create(opts = {}) {
       //    a sunlit stack is. It is emphatically not a white surface; the previous
       //    numbers averaged 0.27 but had a 3.7x bright tail that clipped to bone.
       //
-      // 2. Hue. The reference rock region is *more* saturated than the sand (sat 86.6
-      //    against 69.0) — the rock is what carries the colour in that frame. Getting
-      //    that relationship the right way round means a genuinely ochre albedo, B/R
-      //    near 0.16, not the 0.33 a photograph of grey limestone would suggest. Two
-      //    things justify going that far: coastal karst is limonite-stained (goethite
-      //    has almost no blue reflectance), and — measured, see reports/rocks.md — this
-      //    build lays a neutral additive veil of sRGB 68/74/85 over rock at 37 m from
-      //    aerial inscatter plus probe specular, which subtracts chroma the albedo has
-      //    to supply in the first place.
+      // 2. Hue. Warm, but NOT pre-compensated for the aerial veil. The previous pass
+      //    pushed B/R down to 0.125 on the argument that inscatter would eat the
+      //    chroma back; measured at the scored pose with the veil nulled out that
+      //    lands on sat 128 against a reference 92-96, i.e. the palette was fitted to
+      //    a rendering bug and inverts the moment the bug is fixed. B/R is now 0.24,
+      //    which measures on target with the veil off and is still ochre enough that
+      //    the rock carries more chroma than the sand, as it does in the reference.
       const matRock = makeRockMaterial(ctx, A.tex, B.tex, {
         key: 'rock-limestone',
-        base: C(0.558, 0.330, 0.070),
-        bright: C(0.762, 0.516, 0.148),
+        base: C(0.620, 0.500, 0.151),
+        bright: C(0.800, 0.686, 0.280),
         grime: C(0.086, 0.060, 0.026),
         stain: C(0.158, 0.082, 0.022),
         damp: C(0.062, 0.049, 0.027),
@@ -1390,12 +1672,15 @@ export function create(opts = {}) {
         rough: 0.70, algaeAmt: 1.5, mossAmt: 0.5, macro: 1.3,
       });
       // Far stacks and islets: pure silhouette work, so the expensive detail scales
-      // are dialled down and AO is flattened. Aerial perspective eats most of the
-      // chroma at that range, so these start with more of it than the near rock.
+      // are dialled down and AO is flattened. The palette is NOT boosted to fight
+      // aerial perspective — it used to ship more chroma than the near rock for
+      // exactly that reason, which is a material authored around a rendering bug.
+      // B/R here is >= matRock's, so correcting the veil cannot make the far stacks
+      // more saturated than the near ones.
       const matFar = makeRockMaterial(ctx, A.tex, B.tex, {
         key: 'rock-far',
-        base: C(0.588, 0.338, 0.068),
-        bright: C(0.755, 0.508, 0.150),
+        base: C(0.610, 0.494, 0.155),
+        bright: C(0.790, 0.678, 0.282),
         grime: C(0.110, 0.078, 0.034),
         stain: C(0.162, 0.094, 0.032),
         damp: C(0.072, 0.056, 0.031),
@@ -1405,7 +1690,30 @@ export function create(opts = {}) {
         bleach: C(0.710, 0.540, 0.238),
         rough: 0.78, algaeAmt: 0.8, mossAmt: 0.9, detail: 0.6, ao: 0.75, macro: 0.85,
       });
-      materials.push(matRock, matBoulder, matFar);
+      // The wave-cut shelf is a half-buried horizontal slab seen at a grazing angle,
+      // and at that angle the full detail-normal stack reads as crumpled foil rather
+      // than as rock: measured lap_var 3247 / edge_density 0.295 against a reference
+      // face at 421 / 0.123. Nulling `uDetailAmt` on the shelf dropped lap_var to 24,
+      // so every bit of that energy is detail normals, not the mesh. Same palette,
+      // two-thirds the normal amplitude, and the tide colours pushed up because the
+      // whole slab is inside the splash zone.
+      const matShelf = makeRockMaterial(ctx, A.tex, B.tex, {
+        key: 'rock-shelf',
+        base: C(0.620, 0.500, 0.151),
+        bright: C(0.800, 0.686, 0.280),
+        grime: C(0.086, 0.060, 0.026),
+        stain: C(0.158, 0.082, 0.022),
+        damp: C(0.062, 0.049, 0.027),
+        algae: C(0.048, 0.056, 0.022),
+        moss: C(0.036, 0.068, 0.020),
+        lichen: C(0.300, 0.285, 0.105),
+        bleach: C(0.720, 0.545, 0.235),
+        rough: 0.82, algaeAmt: 1.15, mossAmt: 0.8, detail: 0.72, macro: 1.15,
+        // The whole slab sits inside the wet band, so at full strength the sheen term
+        // turned a 56 x 14 m near-flat plate into chrome foil at grazing incidence.
+        wetAmt: 0.35, specF0: 0.020, specF90: 0.16,
+      });
+      materials.push(matRock, matBoulder, matFar, matShelf);
 
       const addMesh = (geo, mat, name, castShadow = true) => {
         const m = new THREE.Mesh(geo, mat);
@@ -1474,7 +1782,7 @@ export function create(opts = {}) {
       {
         const rnd = ctx.rand.fork(0x5be1f);
         const geo = buildShelf(rnd, heightAt);
-        const mesh = addMesh(geo, matRock, 'tidepool_shelf', true);
+        const mesh = addMesh(geo, matShelf, 'tidepool_shelf', true);
         disposables.push(geo);
         landmarks.set('tidepool_shelf', {
           object3D: mesh,
@@ -1498,7 +1806,7 @@ export function create(opts = {}) {
             z: -Math.cos(ang) * dist,
             baseY: -22, topY: rnd.range(11, 42), radius: rnd.range(16, 52),
             res: [40, 28], lod: 3,
-            prof: [[0, 0.80], [0.14, 0.86], [0.38, 0.96], [0.64, 1.04], [0.85, 1.04], [0.95, 0.95], [1.0, 0.78]],
+            prof: [[0, 1.14], [0.15, 1.10], [0.42, 1.04], [0.70, 1.00], [0.90, 0.97], [1.0, 0.87]],
             lean: [rnd.sym(0.16), rnd.sym(0.16)],
             notch: { y: 1.6, w: 1.6, d: 0.12, dir: rnd.range(0, TAU) },
             ledges: [], flute: 0.7, crownFlat: 1.0,
@@ -1585,7 +1893,7 @@ export function create(opts = {}) {
             const m = list[k];
             const p = new THREE.Vector3().setFromMatrixPosition(m);
             const s = new THREE.Vector3().setFromMatrixScale(m);
-            colliders.push({ type: 'sphere', tag: 'boulder', center: [p.x, p.y, p.z], radius: Math.max(s.x, s.z) * 0.85 });
+            colliders.push({ type: 'sphere', tag: 'boulder', center: p, radius: Math.max(s.x, s.z) * 0.85 });
           }
         });
       }
@@ -1606,7 +1914,31 @@ export function create(opts = {}) {
       this.triangles = tris | 0;
     },
 
-    update() {},
+    /**
+     * Live tuning + diagnostics. `tools/capture.mjs --config k=v` pokes ctx.config
+     * *after* boot, so anything a measurement needs to A/B has to be read per frame
+     * rather than baked into the uniform at init.
+     *
+     *   rockDbg=1        albedo forced to black — everything left is indirect specular
+     *   rockDbg=2        albedo forced to 0.18 grey
+     *   rockSpecF90      grazing Fresnel of the dry rock (shipped 0.13)
+     *   rockSpecOcc      0 disables cavity specular occlusion
+     *   rockHex          0 disables hex tile-breaking on the two coarse octaves
+     *   rockDetail       global detail-normal amplitude
+     */
+    update(dt, ctx) {
+      const c = ctx?.config;
+      if (!c) return;
+      for (const m of materials) {
+        const u = m.userData.rockUniforms;
+        if (!u) continue;
+        u.uDbg.value = +(c.rockDbg ?? 0);
+        if (c.rockSpecF90 !== undefined) u.uSpecF90.value = +c.rockSpecF90;
+        if (c.rockSpecOcc !== undefined) u.uSpecOccAmt.value = +c.rockSpecOcc;
+        if (c.rockHex !== undefined) u.uHexAmt.value = +c.rockHex;
+        if (c.rockDetail !== undefined) u.uDetailAmt.value = +c.rockDetail;
+      }
+    },
     prerender() {},
     resize() {},
 

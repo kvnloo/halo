@@ -289,3 +289,272 @@ but the absolute `exposure` pin is dead.
 
 Note also that 8b's baseline no longer holds: EV 0 has moved from `lum_mean` 148.4 to
 110.5 as the albedo work landed. Re-measure before relying on any number in section 8.
+
+---
+
+# Wave E integration pass — 2026-07-30
+
+Full working notes in `reports/integration.md`. Sections 10–16 below are new.
+
+## Status changes to existing sections
+
+- **§8 (desaturation / volumetricFog): PARTIALLY FIXED, still open.** The fog fix moved
+  whole-frame `sat_mean` 40.05 -> **57.10** against a 79.14 reference — about 44% of the
+  gap. `lum_mean` **105.43** vs ref 105.40 and `p50` **105.89** are now on target, so the
+  *brightness* half of §8 is closed.
+
+  What remains is **contrast, not brightness**, and it is still the same additive haze:
+  `lum_std` 35.44 vs 52.36, `p01` **+8.89** (blacks lifted), `p99` **−18.89** (whites
+  crushed), `local_contrast` 0.128 vs 0.194. Both tails pulled toward the middle is the
+  additive-inscatter signature.
+
+  **Do not chase the residual `sat_mean` with grade saturation.** The tell is that `p01`
+  is *lifted*; saturation cannot do that. Finish removing the near-field in-scatter term.
+
+- **§5 (post-chain order):** the promised follow-up — "the Phase 2 integration pass
+  re-checks determinism at every scored pose" — is now done, see §10. It did not hold, and
+  the cause was unrelated to the post chain.
+
+---
+
+## 10. Program cache key was seeded from `Math.random()` — FIXED
+
+**Where:** `src/gfx/materialCommon.js`
+
+```js
+const key = `wm:${o.matId ?? 0}:${o.inject?.key || Math.random().toString(36).slice(2)}`;
+```
+
+Every world material without an explicit `inject.key` got a **random**
+`customProgramCacheKey` on every run, so the WebGL program cache keyed differently each
+boot. `programs` was observed at **106 in one capture and 107 in the next** on an
+identical scene, and two `--settle 48` captures of `ref_00000` differed across **45% of
+the frame** (the entire ground plane; sky and viewmodel byte-identical).
+
+**Fixed** by replacing the RNG with a monotonic counter — identical uniqueness guarantee
+(no two anonymous materials collide), but reproducible, because module init order and
+per-module material creation order are both fixed. Verified: three consecutive
+byte-identical captures, `programs` stable at 106.
+
+**Why this hid for so long:** determinism checks passed only because `physics` was
+crashing at init (§11) and being disabled, which freed enough CPU that the race never
+lost. Fixing physics exposed it. A green determinism check is not evidence of determinism
+if a module is silently dead.
+
+## 11. `physics` failed to init on every capture ever recorded — FIXED
+
+**Where:** `src/game/physics.js:237`
+
+```
+ReferenceError: addStatic is not defined
+    at Object.addStatic (src/game/physics.js:237:9)
+    at collectColliders (src/game/physics.js:477:58)
+    at Object.init (src/game/physics.js:225:7)
+```
+
+`addStatic` is an object-literal method on `api`, so the bare `addStatic._warned`
+identifier inside it had no binding. The first malformed collider threw, and the engine
+disabled the whole module. **Physics was dead in every capture and every score on
+record.** Fixed to `api.addStatic._warned`.
+
+## 12. Collider contract mismatch — rocks FIXED, structures STILL OPEN
+
+`validCollider` (`physics.js:107`) requires `Vector3` for `sphere.center` and
+`capsule.a`/`.b`, and a `Box3` on `box.box`. Audit of every producer:
+
+| producer | type | emitted | status |
+|---|---|---|---|
+| props.js:804 / :859 / :1040 | sphere / capsule / box | `Vector3` / `Vector3` / `Box3` | ok |
+| structures.js:1055 | capsule | `Vector3` | ok |
+| **structures.js:1042, :1049** | **box** | `center`+`quaternion`+`halfExtents` | **OPEN** |
+| rocks.js:544 / :757 / :1657 | capsule / box / sphere | plain **arrays** | FIXED |
+
+**Every collider `rocks.js` produced was silently discarded** — all sea stacks, cliffs and
+boulders were non-solid. Fixed (arrays -> `Vector3`/`Box3`).
+
+**Still open — needs an owner decision, do not "fix" mechanically.** `structures.js`
+emits the bridge deck and railings as **oriented** boxes. Physics has no OBB case at all:
+`validCollider` rejects them and `computeAabb` cannot represent one. Converting to an
+axis-aligned `Box3` would silently discard the rotation and give the bridge wrong
+collision. Either add an OBB type to the physics API or have structures emit an
+axis-aligned bound deliberately. The warning is left in place until then:
+
+```
+[warn] [physics] ignoring malformed collider (type="box")
+```
+
+## 13. Every frame-time number ever recorded was a structural zero — FIXED
+
+**Where:** `src/core/Engine.js`
+
+`stats.ms` / `stats.fps` were only updated inside `start()`'s `requestAnimationFrame`
+tick. Every headless capture uses `advance(n)`, which calls `step()` directly and never
+touched the accumulators — so every `perf` block in `scores/*.json` and `history.jsonl`
+reads `"fps": 0, "ms": 0`.
+
+Fixed by instrumenting `advance()`. `fps` there is derived from measured step cost rather
+than counted per wall-clock second, because `advance()` has no frame pacing.
+
+**Any perf claim made before this commit is void.** Real steady-state numbers (20 warm-up
+frames discarded, 90 samples):
+
+```
+pose                     p50    p95   mean  draws        tris
+ref_00000               4.90   5.60   5.04    596  13,067,200
+shot_stack_gauntlet     4.70   5.20   4.76    575  12,904,456
+shot_bridge_underside   5.40   8.20   6.70    638  14,354,408
+shot_tide_pools         6.60   9.70   8.06    648  15,336,424
+shot_hero_stack         5.90  10.80   8.93    607  14,052,200
+shot_water_edge         6.00  10.90   8.53    594  13,358,768
+```
+
+Nothing exceeds 11 ms at p50. **`shot_hero_stack` and `shot_water_edge` sit within 0.2 ms
+of the 11 ms bar at p95**; both are the most ocean-dominated poses, so `ocean` is the
+suspect — **on correlation, not proof.** A clean `--skip` A/B on a quiesced tree is still
+needed.
+
+## 14. `--settle 48` has almost no convergence headroom
+
+Before §10 was found, the same nondeterminism was *also* curable by raising settle: at
+`--settle 200` two captures were byte-identical even with the RNG present. 48 is roughly
+the minimum that converges, not a safety margin. Any async work that lands on a different
+frame index will silently change the image. Treat a determinism failure at 48 as a
+convergence question before assuming randomness.
+
+## 15. The `grade` axis is a dead readout
+
+`grade` has scored **0.00 in every run ever recorded**, including runs where it genuinely
+improved. The scoring band is `band(hist, 0.25, 0.75)` — it returns 0 for any
+Bhattacharyya distance >= 0.75. Wave E moved `hist` **0.889 -> 0.802**, real progress
+rendered completely invisible.
+
+Anyone tuning the grade against this axis is tuning against a flat signal. Either re-band
+it to the range the project actually occupies, or read `raw.hist` directly.
+
+## 16. Coordination hazard: concurrent agents writing `src/` during measurement
+
+During this pass, `weapons.js`, `clouds.js`, `rocks.js`, `terrain.js`, `vegetation.js` and
+`ocean.js` were all rewritten *while* captures were running — twice inside a single
+determinism check. This produced findings that look real and are not:
+
+- `terrain: Unexpected identifier 'roughnessFactor'` at "not loaded" — `terrain.js` parses
+  clean now; it was caught mid-write.
+- `vegetation: ReferenceError: topPoint is not defined`, and GLSL errors for `stepAt`,
+  `lodAmp`, `oc_surface`, `oc_wave` — all in files being saved at that second.
+- Two determinism `BROKEN` results that were just the tree changing between captures.
+
+**Rules this implies.** A scored run or determinism check is only valid if `src/` is
+quiescent for its whole duration. Check before trusting a result:
+
+```bash
+find src -name '*.js' -newermt '-10 minutes' -printf '%TH:%TM:%.2TS %p\n' | sort
+```
+
+And note the silent-corruption path: when `terrain` fails to load, `props` does **not**
+fail — it warns and scatters against the `docs/WORLD.md` profile instead ("positions are
+approximate"). A score run that straddles a bad terrain save produces plausible-looking
+numbers from a different world.
+
+One genuine item from that window deserves follow-up independently of the churn, because
+it is a pipeline bug whenever it appears rather than a syntax error:
+
+```
+GL_INVALID_OPERATION: glDrawElements: Feedback loop formed between Framebuffer and active Texture.
+```
+
+---
+
+## 17. Showcase sheet defects (visual, not integration)
+
+From `shots/preview/preview.png`, full cell-by-cell in `reports/integration.md` §2.
+Highest-impact, in order:
+
+1. **Showcase poses `shot_beach_establishing` and `shot_cliff_vegetation` put the camera
+   under the terrain** — grass hangs downward, clouds sit below the ground plane, ~55% of
+   the frame is flat void. 2 of 12 showcase cells.
+2. **The Halo ring renders as two thin white lines** — no band, no inner-surface terrain.
+   It is misread as a rendering artifact in four separate cells (04, 05, 07, 11). The
+   title object of the project.
+3. **Character models stand in three showcase cells** (07 shoreline, 08 waterline, 09 tide
+   pools) — ~12 low-poly humanoids in the tide-pool shot. Reads as placeholder junk.
+4. **Sea stacks float** — cut flat at the base with a visible gap above the water in
+   every stack cell (05, 06, 08).
+5. Cells `shot_water_edge` ("refraction + caustics") and `shot_weapon_detail` ("MA5B
+   viewmodel") do not show the thing their caption promises.
+
+---
+
+## 18. The shared depth texture is cleared every frame — CRITICAL, ROOT CAUSE, still OPEN
+
+**This is the real cause of the near-field haze wash in issue 8, and it is not in
+`volumetricFog.js`.** Found by the fog agent in Wave E; full writeup in `reports/fog.md`.
+
+`RenderPipeline.js:137-158` binds ONE `DepthTexture` to both the G-buffer and `sceneRT`.
+`src/render/passes/scene.js` step 7 then calls `renderer.clearDepth()` on `sceneRT` so the
+viewmodel can be drawn without intersecting the world. That wipes the world's depth and
+refills it with the weapon alone.
+
+Proof, one step: the fog march was made to output `vec3(isGeo, tEnd/uMaxDist, |L|)`.
+`shots/fog/dbg4.png` is a flat green field — `isGeo=0`, `tEnd=uMaxDist` — with the assault
+rifle cut out of it in red. The beach 4 m away, the sea stacks and the bridge all read as
+**sky at 460 m**.
+
+So every world pixel had the full 460 m of haze integrated in front of it: ~0.10-0.13 linear
+of achromatic in-scatter against a lit-sand scene value of ~0.2-0.3. Auto-exposure pulled
+luminance back down, so chroma collapsed while `lum_mean` looked fine. That is exactly the
+signature reported independently in `reports/terrain.md` §2.
+
+**Everything downstream that samples `pipe.depthTex` is reading the same garbage**: `dof`,
+`motionBlur`, `taa` (so this is coupled to issue 1), `ssao`, `ssr`, and water refraction.
+Several of those have been "tuned" against a depth buffer containing only a gun.
+
+Fix belongs in `scene.js`: give the viewmodel its own depth buffer, or copy `depthTex`
+before the clear. The Wave G motion-vector agent owns `scene.js` + `taa.js` together and is
+the right owner. Do not tune any depth-consuming pass until this lands — you would be
+fitting constants to a bug.
+
+---
+
+## 19. "The capture daemon serves stale code" — TESTED AND FALSE
+
+`reports/fog.md` opens by instructing everyone to measure with `HALO_NO_DAEMON=1`, claiming
+the daemon serves a cached module graph so that "an A/B by config looks live while an A/B by
+source edit is a lie."
+
+Tested directly: a vite server started with `HALO_NO_HMR=1` (exactly how `captured.mjs`
+starts it), fetch a module, edit it on disk, fetch again. Vite re-transforms and serves the
+new source. Disabling HMR turns off the *push channel*; it does not disable the watcher or
+the module-graph invalidation. `captured.mjs` additionally opens a fresh page per request
+with a cache-busting query param.
+
+So the workaround is unnecessary, and it is expensive: `HALO_NO_DAEMON=1` restores one vite
+plus one Chrome **per agent**, which is the configuration that exhausted system memory at 17
+agents (14 GB of 15 GB used, 0 available). Do not adopt it.
+
+The symptom the fog agent saw was almost certainly a pass that stopped *loading* rather than
+one that kept running old code — a file that fails to parse is skipped silently and its
+subsystem simply vanishes from the frame (see issue 20). Their own note to grep capture
+output for `passes not loaded` is the right instinct; the diagnosis attached to it was wrong.
+
+What IS true from that report: `--config` overrides work independently of source edits, and
+capture warnings do get swallowed into `warnings[]`.
+
+---
+
+## 20. Backticks inside GLSL template literals — recurring, now gated
+
+Three occurrences so far: `noise.js`, `ocean.js` (twice), `rocks.js`. An agent writes a
+careful prose comment inside a `` /* glsl */` ... ` `` template and quotes a symbol or a flag
+in backticks, as they would in markdown. The backtick ends the template. The file stops
+parsing, `src/modules.js` skips the module, and **the subsystem disappears from every capture
+silently** — no error in the image, just a scene with no ocean in it.
+
+That silence is the whole problem. Wave E's ocean critic scored the subsystem 12/100 before
+discovering there was no ocean in the build at all, and both Wave F and Wave G ran captures
+against a tree where `ocean.js` and `rocks.js` were both dead.
+
+Gated now: `node tools/parsecheck.mjs` checks every file under `src/` and flags this specific
+hazard by looking for `/* glsl */` templates that end somewhere other than a statement
+boundary or a `+` concatenation. **Run it before any measurement you intend to believe.**
+
+In GLSL comments, use 'single quotes'.

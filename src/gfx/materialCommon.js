@@ -111,6 +111,10 @@ export function updateAerialUniforms(ctx) {
  * @param {object} ctx engine context
  * @param {object} o   { matId, roughnessHint, inject:{uniforms, pars, fragment, vertexPars, vertex}, aerial }
  */
+/** Monotonic id for materials that supply no explicit `inject.key`. Deterministic by
+ *  construction, so two identical runs produce identical program cache keys. */
+let _anonKeySeq = 0;
+
 export function applyWorldMaterial(mat, ctx, o = {}) {
   const aerialU = sharedAerialUniforms();
   const extra = o.inject?.uniforms || {};
@@ -168,7 +172,14 @@ export function applyWorldMaterial(mat, ctx, o = {}) {
 
   // Materials that share a program must not share a cache key, or three will hand
   // the second one the first one's compiled shader.
-  const key = `wm:${o.matId ?? 0}:${o.inject?.key || Math.random().toString(36).slice(2)}`;
+  //
+  // The anonymous fallback used to be Math.random(), which made every capture
+  // non-deterministic: the program cache keyed differently each run, so `programs`
+  // drifted (106 vs 107) and terrain/sand shading differed frame-for-frame at the
+  // harness's settle count. A monotonic counter gives the identical uniqueness
+  // guarantee — no two anonymous materials ever collide — but is reproducible,
+  // because module init order and per-module material creation order are both fixed.
+  const key = `wm:${o.matId ?? 0}:${o.inject?.key || `anon${_anonKeySeq++}`}`;
   mat.customProgramCacheKey = () => key;
 
   // CSM must patch the material or it will only ever see cascade 0.

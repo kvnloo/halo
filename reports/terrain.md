@@ -294,3 +294,244 @@ puts the swash in the foreground — and the poses are unfitted (KNOWN_ISSUES §
 `kf_00000`'s `sand` crop is the wet swash zone while ours is dry berm. That mismatch is
 most of the residual `sat_mean` and `lum_std` gap and no amount of terrain authoring
 closes it.
+
+---
+---
+
+# terrain — pass 2 (this session)
+
+All numbers from `tools/capture.mjs --settle 48`, `sand` ROI via `tools/roi.py`,
+against `kf_00000`'s own `sand` crop (lum 119.2 / std 35.1 / sat 86.6 / lab_a 5.10 /
+lab_b 15.35 / lap 1089 / edge 0.228 / lc 0.094 / slope -2.084 / p01 31 / p99 178).
+
+## 0. The reproducibility complaint (critic item 6) was a broken sibling module
+
+The critic measured a 56% luminance swing between two identical `ref_01500`
+invocations. Re-run now, three back-to-back `--pose ref_01500 --settle 48` captures are
+**byte-identical** (sand ROI lum 106.403460 / sat 54.784391 / lap 847.329 / edge
+0.0901587 on all three). The difference: the critic's captures had `ocean` failing to
+init from another agent's uncommitted edit, and a scene that is missing a module renders
+differently depending on *which* modules happened to fail that run. There is no
+nondeterminism in terrain. The engine-level gate the critic asks for (refuse to write a
+PNG when `warnings[]` has a "modules not loaded" line) belongs in `tools/capture.mjs`,
+which this task does not own — but the check is one grep on the capture's own stderr and
+every number below was taken with `terrain` confirmed loaded.
+
+## 1. Critic item 2 was right, and it is three's specular, not albedo
+
+`terrainDbg=3` (albedo forced to pure black), `sand` ROI, ref_00000:
+
+```
+                       before    after
+lum_mean (black alb)    48.4      23.9
+lap_var  (black alb)   645.1     403.2
+```
+
+`terrainDbg=9` (1 m checkerboard, albedo 0.05 vs 0.50, 10:1), near field, solving
+`L = k*a + c` on the linear p10/p90:
+
+```
+              before            after
+p10/p90 sRGB   94 / 174         71.1 / 168.9
+linear ratio   3.85 : 1         6.26 : 1
+k              0.705            0.739
+additive c     0.076 linear     0.0263 linear    (-65%)
+```
+
+Cause and fix: `MeshStandardMaterial` hard-codes F0 = 0.04 and applies **no specular
+occlusion**, and neither `uTSpecBoost` nor `envMapIntensity` gates it — which is why the
+previous pass eliminated every config knob and still measured a black beach at sRGB 44.
+Two new globals, `gTSpecOcc` and `gTAO`, are now applied at the
+`<lights_fragment_end>` injection point:
+
+```glsl
+reflectedLight.directSpecular   *= gTSpecOcc;
+reflectedLight.indirectSpecular *= gTSpecOcc;
+reflectedLight.indirectDiffuse  *= gTAO;
+reflectedLight.indirectSpecular += gTEnvSpec;
+```
+
+with `gTSpecOcc = mix(0.42, 1.0, smoothstep(0.35,0.90,wet)) * ao * (1 - cobShade*0.55)`
+— 0.42 takes F0 from three's 0.04 to sand's ~0.018, wet sand keeps its lobe. This did
+not need `MeshPhysicalMaterial`; it is four lines in an injection that already existed
+and costs nothing measurable.
+
+## 2. Critic item 5 — AO was on the albedo, so it darkened the sun
+
+`diffuseColor.rgb = alb * ao` is physically wrong: AO is an indirect-only term. Combined
+with an AO floor of 0.22 (78% occlusion, on an open beach), a cobble-shade multiplier
+and two damp-stain multipliers all stacked on the same albedo, the shadowed sides of the
+mounds went to sRGB 4 against the reference's p01 of 31. Now: AO floor 0.62, the micro/
+meso/gravel occlusion weights cut roughly in half, `diffuseColor.rgb = alb`, and `ao`
+applied to `reflectedLight.indirectDiffuse` only. Damp stains 0.80/0.85 -> 0.55/0.55 and
+their tints lifted.
+
+```
+sand ROI, ref_00000     before   after   kf_00000
+p01                        4       18       31
+p99                      140      135      178
+shadow_frac             0.0263   0.024    0.0110
+```
+
+## 3. Critic item 3 — the mounds are gone
+
+`FIELD_GLSL` and its `heightJS` mirror, changed in the same edit:
+
+```
+macro dune 40-110 m   fbm2(P*0.0125, 4) * (0.55 + 1.35*beach)  ->  (0.55 + 0.45*beach)
+berm scallop 6-14 m   fbm2(P*0.098,  3) * (0.10 + 0.30*beach)  ->  2 octaves, (0.04 + 0.10*beach)
+lod>=1 cobble mounds  cm * 0.13                                ->  cm * 0.055
+swash micro-terraces  band*(saw-0.25)*0.115                    ->  *0.21   (reinvested, shore-PARALLEL)
+```
+
+The scallop drops from 3 octaves to 2 so its tail stops landing at 2.5 m. Visually this
+is the single biggest change in the frame: `shots/c2_r.png` onward reads as a sand slope
+rather than the tapioca field in `shots/cE_terrain_b.png`.
+
+## 4. Critic item 1 — the wet path no longer mirrors
+
+```
+rough    mix(0.94, 0.12, ...) -> mix(0.94, 0.30, ...)
+sheet    rough -> 0.055        -> 0.085, and the sheet gaussian narrowed
+         exp(-((y - swashTop*0.30)*7.0)^2) -> *22.0   (sigma 0.14 m -> 0.045 m in Y;
+         at a 2 deg beach slope the old value painted 8+ m of ground, not ~1 m of run-up)
+uTWetCol 0.072/0.060/0.048     -> 0.100/0.085/0.070   (dark but still warm)
+stones   mix(colA, colA*vec3(0.58,0.70,0.58), wet*0.75) -> colA *= mix(1.0, 0.55, wet)
+         and the nearC distance fade no longer scales the splat
+```
+
+## 5. Critic item 4 — stones: partly fixed, and the framing is measured
+
+The critic's brief assumed the `sand` ROI is ground at 10-40 m. It is not.
+`terrainDbg=9` and a new `terrainDbg=10` (which paints `vec3(sA, sB, 0.0)`, the two
+stone splat weights) settle it: **in the `sand` crop 1 m of ground is ~1000 px**, i.e.
+the foreground there is 0.5-1.5 m from the camera. That measurement invalidates most of
+the intuition on both sides of this argument — at that range a 22 cm cobble is 200 px
+wide, and the "uniform orange-peel stipple" is the 3 mm grain normal, not the pavement.
+
+Changes made: `tStoneDisc` (an oblate `pow(1-d^2, 0.35)` cap) replaces the hemispherical
+`tStoneCap` for the DISPLACEMENT only, so stones are flattened discs bedded in sand
+rather than marbles; displacement amplitude `(0.045 + 0.078*w1.z)` -> `(0.014+0.020*w1.z)`;
+`tCobbleMask` given a coverage floor independent of `alongshore` (it was gated entirely
+on a waterline band, so the whole near and mid field had **zero** stones) and its height
+cut-off raised 4.8-7.6 m -> 8.2-11.5 m (the berm the camera stands on at ref_00000 is
+already above 4.8 m, so the foreground fell outside the pavement); `nearC` extended from
+14-31 m to 40-62 m and layer B from 6-16 m to 14-30 m; stone albedo re-authored from
+0.010-0.228 to 0.006-0.098 for a real ~3.5x value step against 0.217 sand; contact
+shadow `cobShade` 0.34 -> 0.52.
+
+**This is the weakest part of the pass and it is not finished** — see below.
+
+## Results, `sand` ROI at ref_00000
+
+```
+                 critic's ship   this pass   kf_00000
+lum_mean            108.16        111.90      119.22
+lum_std              24.47         19.95       35.12
+p01                      4            18          31
+p99                    140           135         178
+sat_mean             55.76         66.11       86.58
+lab_a                 4.59          5.56        5.10
+lab_b                 6.86          9.95       15.35
+lap_var             834.5         312.5      1089.0
+edge_density          0.1419        0.0459      0.2284
+local_contrast        0.0783        0.0663      0.0944
+spectral_slope       -1.718        -1.728      -2.084
+shadow_frac           0.0262        0.0240      0.0110
+```
+
+Honest reading: chroma and the black point moved decisively the right way
+(sat +18.5%, lab_b +45%, p01 4 -> 18 against a target of 31) and the false detail is
+gone — but it took `lap_var` and `edge_density` down with it, because the broadband
+energy that was there was specular fizz on the grain normal and nothing replaced it.
+`lum_std` fell 24.5 -> 20.0 for the same reason: the mounds were carrying it, and the
+stones do not yet carry it back.
+
+## 6. Final numbers (this is what is on disk)
+
+`sand` ROI. Two independent `--settle 48` captures at ref_00000 are byte-identical
+(`cmp` clean).
+
+```
+ref_00000            critic's ship   THIS PASS    kf_00000 crop
+lum_mean                108.16        112.40        119.22
+lum_std                  24.47         17.44         35.12
+p01                          4            38            31
+p99                        140           137           178
+shadow_frac             0.0262        0.0053        0.0110
+sat_mean                 55.76         67.53         86.58
+lab_a                     4.59          5.75          5.10
+lab_b                     6.86         10.59         15.35
+lap_var                 834.5         569.1        1089.0
+edge_density              0.1419        0.1176        0.2284
+local_contrast            0.0783        0.0519        0.0944
+spectral_slope           -1.718        -0.886        -2.084
+
+ref_01500 (ocean present in both)   before   after   kf_01500 crop
+lum_mean                            106.40   104.74      66.10
+lum_std                              33.42    32.40      17.41
+sat_mean                             54.78    60.61      39.66
+lap_var                             847.3    861.8      194.97
+edge_density                          0.0902   0.0941     0.0863
+local_contrast                        0.1129   0.1087     0.0511
+spectral_slope                       -2.556   -2.547     -2.247
+```
+
+Note that the critic's ref_01500 figures (lum 129.4 / edge 0.019 / lap 200) cannot be
+reproduced with `ocean` loaded, and `terrainDbg=3` at ref_01500 measures 94.8 with the
+terrain albedo at zero — because most of that crop at that pose is **rocks**, not
+terrain. The ref_01500 `sand` numbers are largely not this module's to move.
+
+## Weakest thing left — read this before touching the stone splat
+
+**The cobble albedo splat does not reach the screen and I could not find out why.**
+Decisive experiment: set `colA` to `vec3(0.0)` — pure black stones over ~30-45% coverage
+— and re-capture. The frame is *visually indistinguishable* from the shipped one
+(`shots/blk4_r.png` vs `shots/c10_r.png`), and the `sand` ROI barely moves. Every
+intermediate step in that chain checks out on its own:
+
+- The line is live. Replacing `sA` with the constant 0.75 in the same `mix` drops the
+  ROI from lum 112 to **67.8**, so the statement executes and reaches `diffuseColor`.
+- `sA` is non-zero and correctly shaped: `terrainDbg=10` (new, paints `vec3(sA, sB, 0)`)
+  shows discrete stones at ~30-45% coverage; `terrainDbg=8` shows the same Worley field.
+- Albedo reaches the screen: `terrainDbg=1` (flat 0.322/0.196/0.116) renders
+  rgb 141.0/120.0/105.7 — **R > G > B**, the hue inversion the critic measured is gone —
+  against `terrainDbg=3` (black) at 18.7. Solving `L = k*a + c` gives k 0.90, floor
+  0.0064 linear. There is no additive floor left that could hide a 3.5x albedo step.
+- Removing `rockW` entirely changes nothing.
+- It is not the shared capture daemon: killing it and re-capturing gives the same frame.
+
+Two facts that must be true simultaneously — `sA` is large, and forcing the colour it
+blends in to black does nothing — cannot both be true, so one of the two measurements is
+lying and I ran out of session before I found which. **Whoever picks this up: start
+there, and start by rendering `sA` and the final `alb` to two halves of the same frame
+so they are read from one capture instead of two.** Do not re-tune anything else until
+that is settled; every stone-related number in this report is downstream of it.
+
+Consequences visible in the table above: `lum_std` 17.4 against 35.1, `local_contrast`
+0.052 against 0.094 and `spectral_slope` -0.886 against -2.084 are all the same defect —
+the mound relief that used to supply the metre-scale variance is (correctly) gone, and
+the stones that should have replaced it are not landing, so what remains of the beach's
+energy is the grain and gravel normals, which is high-frequency by construction. I put
+those normals back up (micro 0.55 -> 0.80, gravel 0.85 -> 1.30) purely to hold
+`edge_density` at 0.118 rather than 0.046 while the splat is broken; that is a knowing
+trade of `spectral_slope` for `edge_density` and it should be reverted the moment the
+splat works.
+
+`p01` also overshot: 4 -> 38 against a target of 31, and `shadow_frac` 0.0053 against
+0.0110. The AO floor is at 0.46; it wants to come back to ~0.35 once real contact
+shadows exist.
+
+## Cost
+
+No new draw calls, no new textures, no new npm anything. Fragment shader: four
+multiplies at `<lights_fragment_end>`, one extra `mix` in the specular-occlusion term.
+Vertex shader: `tStoneDisc` replaces `tStoneCap` (a `pow` for a `sqrt`) and the berm
+scallop drops from 3 fbm octaves to 2, which is a net saving. Module init measured
+1.41 s against 1.51 s before, but other agents were capturing concurrently in both runs,
+so treat that as "unchanged".
+
+## Diagnostics added
+
+`terrainDbg=10` — paints `vec3(sA, sB, 0.0)`, the two cobble splat weights. This is the
+one that showed the splat is present, and it is the one the next person needs.

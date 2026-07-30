@@ -8,19 +8,36 @@ import { applyWorldMaterial, configureTexture } from '../gfx/materialCommon.js';
  * `weapons` — MA5B assault rifle viewmodel, firing, ballistics, recoil.
  *
  * The viewmodel is on screen 100% of the time and owns roughly a quarter of every
- * frame. Everything here is built for one measured target (docs/TARGETS.md, region
- * `weapon`):
+ * frame.
  *
- *     lum_mean 79.8   lum_std 49.4   sat_mean 73.5
- *     lap_var 489     edge_density 0.089   local_contrast 0.178
+ * TARGETS — read this before touching a tunable.
  *
- * i.e. a *dark* object — 26% below the frame mean — carrying the highest local
- * contrast in the image. That combination only comes from one thing: chamfered edges
- * catching hard specular rim highlights against a near-black matte body. So every
- * box in this file is a chamfered box, every chamfer facet carries an `aMask.x` edge
- * weight, and the shader turns that weight into exposed-metal wear with lower
- * roughness. Take the chamfers away and the silhouette survives but `lap_var` and
- * `local_contrast` collapse — the gun goes to a grey prop.
+ * Do NOT tune to `ref/roi_signatures.json`'s `weapon` row (79.8 / 49.4 / 489 / 0.089
+ * / 0.178). That is a mean over the whole clip, and the `weapon` ROI is a fixed
+ * screen rectangle that is ~65% *sand*: its lap_var and edge_density are set by
+ * terrain, not by this file. Two separate mistakes in one number. The per-pose ROI
+ * figure for the pose we actually capture (ref_00000) is
+ *
+ *     lum_mean 103.2  lum_std 61.2  lap_var 999  edge_den 0.124  local_con 0.220
+ *
+ * and the number that actually belongs to this module is the **gun-only** signature,
+ * measured through `tools/_wpnmask.py` (viewmodel silhouette for ours, hand-traced
+ * polygon for the reference). At ref_00000 that reads
+ *
+ *     lum_mean 67.5   lum_std 52.3   p99 226   R-B +11.0   lap_var 1160  hi_frac 0.028
+ *
+ * So the gun is NOT a near-black object: it is a mid-dark *warm-neutral* gunmetal
+ * sitting in strong warm sand bounce, carrying one long specular streak down the top
+ * rail and a 2.8% highlight population. Reading the clip-mean 79.8 as "dark" and
+ * driving the body albedo to charcoal is what produced the navy plank this file used
+ * to render.
+ *
+ * The surface story in `ref/detail/weapon_4k.png` is, in order of contribution:
+ * panel-line grooves, white stencil decals, AO packed into the grooves, and one soft
+ * anisotropic sheen down the rail. It is barely scratched. Chamfer rim wear is a
+ * *supporting* term here, not the main event — it cannot mark a flat face at all
+ * (aMask.x is 0 on every large face by construction), so albedo-domain panel lines
+ * and stencils carry the mid-frequency structure.
  *
  * Nothing is fetched and nothing is authored by hand: the scratch/wear detail map,
  * the glove weave, the rail engraving and the ammo-counter panel are all generated
@@ -42,6 +59,10 @@ import { applyWorldMaterial, configureTexture } from '../gfx/materialCommon.js';
 /* ========================================================================== */
 /*  tunables                                                                  */
 /* ========================================================================== */
+
+/** Linear sand albedo (R,G,B) and overall gain for the env probe's ground hemisphere. */
+const SAND_BOUNCE = [0.30, 0.235, 0.165];
+const SAND_BOUNCE_GAIN = 3.60;
 
 const MAG_SIZE = 60;
 const START_AMMO = 36;          // the reference frame reads 36; boot matching it
@@ -127,8 +148,34 @@ class MB {
     this.m.push(e, a);
   }
 
-  /** Triangle with one flat normal. Points are [x,y,z]; masks are [edge, ao]. */
+  /**
+   * WINDING NORMALISATION — read this before adding a primitive.
+   *
+   * WebGL's front face is CCW, so a triangle is front-facing exactly when
+   * `(b-a) x (c-a)` points the same way as its shading normal. Getting that wrong
+   * does not produce a hole you would notice: with `side: FrontSide` the near
+   * surface is culled and you see the model's INSIDE, lit by normals that point
+   * away from you. It reads as a soft, pale, structureless mass — which is what
+   * this viewmodel was.
+   *
+   * Measured with `tools/_wind.mjs` before the fix, share of triangles whose
+   * winding opposed their own normal, by surface area:
+   *
+   *     boltPoly 99.5%   armR 99.5%   engrave 100%   plate 75.8%   rail 69.2%
+   *     handL 68.7%      poly 42.9%   mag 33.9%      body 25.0%
+   *
+   * Two independent causes: `extrudeProfile` runs stations along **-Z** for
+   * `segRounded`/`ribbedCylinder`, which flips handedness against a CCW-in-XY
+   * profile; and `chamferBox`'s corner facets are only CCW for even-parity
+   * corners. Rather than hand-fix every call site and re-break it with the next
+   * primitive, normalise here: it is one cross product per triangle at build time
+   * and it cannot be got wrong twice.
+   */
   tri(a, b, c, n, ma, mb, mc) {
+    const gx = (b[1] - a[1]) * (c[2] - a[2]) - (b[2] - a[2]) * (c[1] - a[1]);
+    const gy = (b[2] - a[2]) * (c[0] - a[0]) - (b[0] - a[0]) * (c[2] - a[2]);
+    const gz = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+    if (gx * n[0] + gy * n[1] + gz * n[2] < 0) { const t = b; b = c; c = t; const tm = mb; mb = mc; mc = tm; }
     this.vert(a[0], a[1], a[2], n[0], n[1], n[2], ma[0], ma[1]);
     this.vert(b[0], b[1], b[2], n[0], n[1], n[2], mb[0], mb[1]);
     this.vert(c[0], c[1], c[2], n[0], n[1], n[2], mc[0], mc[1]);
@@ -141,6 +188,14 @@ class MB {
 
   /** Quad with per-vertex normals and optional per-vertex UVs. */
   quadN(a, na, b, nb, c, nc, d, nd, ma, mb, mc, md, uva, uvb, uvc, uvd) {
+    // same normalisation as tri(), against the mean of the three shading normals
+    const gx = (b[1] - a[1]) * (c[2] - a[2]) - (b[2] - a[2]) * (c[1] - a[1]);
+    const gy = (b[2] - a[2]) * (c[0] - a[0]) - (b[0] - a[0]) * (c[2] - a[2]);
+    const gz = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+    if (gx * (na[0] + nb[0] + nc[0]) + gy * (na[1] + nb[1] + nc[1]) + gz * (na[2] + nb[2] + nc[2]) < 0) {
+      [a, na, ma, uva, b, nb, mb, uvb, c, nc, mc, uvc, d, nd, md, uvd] =
+        [a, na, ma, uva, d, nd, md, uvd, c, nc, mc, uvc, b, nb, mb, uvb];
+    }
     const V = (p, n, m, t) => this.vert(p[0], p[1], p[2], n[0], n[1], n[2], m[0], m[1],
       t ? t[0] : undefined, t ? t[1] : undefined);
     V(a, na, ma, uva); V(b, nb, mb, uvb); V(c, nc, mc, uvc);
@@ -209,11 +264,21 @@ function chamferBox(w, h, d, c, o = {}) {
   }
 
   // ---- 12 chamfer bands, each split in two so the edge mask can peak in the middle
+  /* The four points arrive in RING order p0 -> p1 -> q0 -> q1, so the vertex facing
+   * p0 across the band is q1, not q0. Pairing them p0+q0 / p1+q1 — as this did —
+   * put both "midpoints" on the band's centroid, i.e. mid0 === mid1 exactly. Every
+   * chamfer on every box then rendered as two triangles meeting at a point (a
+   * bowtie) with two triangular HOLES through it, plus two exactly-degenerate
+   * triangles; and the 0.3 -> 1 -> 0.3 edge-mask ramp this whole function exists to
+   * produce collapsed to a single value. Found with tools/_wpntri.mjs, which dumps
+   * triangle aspect ratios: 12 zero-area triangles per chamferBox, all with two
+   * identical vertices at the band centre. */
   const band = (p0, p1, q0, q1, n) => {
-    const mid0 = [(p0[0] + q0[0]) * 0.5, (p0[1] + q0[1]) * 0.5, (p0[2] + q0[2]) * 0.5];
-    const mid1 = [(p1[0] + q1[0]) * 0.5, (p1[1] + q1[1]) * 0.5, (p1[2] + q1[2]) * 0.5];
+    const mid = (u, v) => [(u[0] + v[0]) * 0.5, (u[1] + v[1]) * 0.5, (u[2] + v[2]) * 0.5];
+    const mid0 = mid(p0, q1);
+    const mid1 = mid(p1, q0);
     mb.quad(p0, p1, mid1, mid0, n, mLo, mLo, mHi, mHi);
-    mb.quad(mid0, mid1, q1, q0, n, mHi, mHi, mLo, mLo);
+    mb.quad(mid0, mid1, q0, q1, n, mHi, mHi, mLo, mLo);
   };
   for (const sy of S) for (const sz of S) {   // edges along X
     const n = nrm3([0, sy, sz]);
@@ -266,9 +331,16 @@ function extrudeProfile(prof, stations, o = {}) {
     prof[i].y * (st.sy ?? st.s ?? 1) + (st.oy || 0), st.z];
   const nAt = (st, base) => nrm3([base[0], base[1], st.nz || 0]);
 
+  const effS = (st) => Math.max(Math.abs(st.sx ?? st.s ?? 1), Math.abs(st.sy ?? st.s ?? 1));
   for (let j = 0; j < stations.length - 1; j++) {
     const A = stations[j], B = stations[j + 1];
     if (A.skip) continue;
+    // A collapsed station fans a ring of near-zero-area triangles. Every viewmodel
+    // mesh is frustumCulled = false and is drawn after a depth clear with its own
+    // camera at near = 0.002, so one such sliver overdraws the world at ANY distance
+    // — that is the pair of 1px stippled hairlines running across a third of the
+    // beach. Drop the segment instead of emitting it.
+    if (effS(A) < 1e-3 && effS(B) < 1e-3) continue;
     const mA = [A.edge || 0, A.ao ?? 1], mB = [B.edge || 0, B.ao ?? 1];
     for (let i = 0; i < n; i++) {
       const i2 = (i + 1) % n;
@@ -278,8 +350,9 @@ function extrudeProfile(prof, stations, o = {}) {
       mb.quadN(p0, n0, p1, n1, p2, n2, p3, n3, mA, mA, mB, mB);
     }
   }
-  if (o.capFront !== false) capProfile(mb, prof, stations[0], -1, o);
-  if (o.capBack !== false) capProfile(mb, prof, stations[stations.length - 1], 1, o);
+  const last = stations[stations.length - 1];
+  if (o.capFront !== false && effS(stations[0]) >= 1e-3) capProfile(mb, prof, stations[0], -1, o);
+  if (o.capBack !== false && effS(last) >= 1e-3) capProfile(mb, prof, last, 1, o);
   return mb;
 }
 
@@ -393,6 +466,45 @@ function recess(mb, x0, x1, y0, y1, faceZ, depth, lip, ao = 0.35) {
   mb.quad([inx0, iny0, bz], [inx1, iny0, bz], [inx1, iny1, bz], [inx0, iny1, bz], nz, mf, mf, mf, mf);
 }
 
+/**
+ * Drop near-zero-area triangles from a non-indexed viewmodel geometry.
+ *
+ * Belt-and-braces behind the station-collapse skip in extrudeProfile. The viewmodel
+ * is drawn frustumCulled = false, after a depth clear, through a camera with
+ * near = 0.002; a sliver whose projected area is sub-pixel still rasterises as a
+ * stippled hairline, and because it owns no depth relationship to the world it
+ * paints straight across terrain tens of metres away. Cheap to prevent, impossible
+ * to hide.
+ */
+function cullDegenerate(geo, minArea = 1e-9) {
+  const pos = geo.getAttribute('position');
+  if (!pos || geo.index) return geo;
+  const tris = pos.count / 3;
+  const keep = [];
+  for (let t = 0; t < tris; t++) {
+    const i = t * 3;
+    const ax = pos.getX(i), ay = pos.getY(i), az = pos.getZ(i);
+    const bx = pos.getX(i + 1), by = pos.getY(i + 1), bz = pos.getZ(i + 1);
+    const cx = pos.getX(i + 2), cy = pos.getY(i + 2), cz = pos.getZ(i + 2);
+    const ux = bx - ax, uy = by - ay, uz = bz - az;
+    const vx = cx - ax, vy = cy - ay, vz = cz - az;
+    const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    if (0.5 * Math.hypot(nx, ny, nz) >= minArea) keep.push(t);
+  }
+  if (keep.length === tris) return geo;
+  const attrs = geo.attributes;
+  for (const name of Object.keys(attrs)) {
+    const a = attrs[name], sz = a.itemSize;
+    const src = a.array, dst = new src.constructor(keep.length * 3 * sz);
+    for (let k = 0; k < keep.length; k++) {
+      const s = keep[k] * 3 * sz;
+      for (let j = 0; j < 3 * sz; j++) dst[k * 3 * sz + j] = src[s + j];
+    }
+    geo.setAttribute(name, new THREE.BufferAttribute(dst, sz));
+  }
+  return geo;
+}
+
 function transformMB(geo, m) {
   geo.applyMatrix4(m);
   return geo;
@@ -450,8 +562,8 @@ function makeSurfaceTex(rand, opts = {}) {
     const along = rand.next() < aniso;
     const base = along ? 0 : Math.PI * 0.5;
     const ang = base + rand.sym(0.10) + (rand.next() < 0.12 ? rand.sym(0.9) : 0);
-    const len = N * (0.02 + Math.pow(rand.next(), 2.2) * 0.55);
-    const amp = (rand.next() < 0.30 ? 1 : -1) * (0.05 + rand.next() * 0.28);
+    const len = N * (0.015 + Math.pow(rand.next(), 2.6) * 0.26);
+    const amp = (rand.next() < 0.30 ? 1 : -1) * (0.03 + rand.next() * 0.13);
     const dx = Math.cos(ang), dy = Math.sin(ang);
     const steps = Math.max(2, Math.ceil(len * 2));
     for (let i = 0; i <= steps; i++) {
@@ -483,6 +595,123 @@ function makeSurfaceTex(rand, opts = {}) {
     }
   }
   const t = new THREE.DataTexture(data, N, N, THREE.RGBAFormat);
+  t.needsUpdate = true;
+  return t;
+}
+
+/**
+ * Receiver-flank decal sheet — the thing this module was missing entirely.
+ *
+ * `ref/detail/weapon_4k.png` shows the MA5B's flank carrying, in order of how much
+ * they contribute at 1080p: panel-line grooves, tonally separated panel plates,
+ * white stencil runs ("MA5B ... 7.62MM ..."), and AO packed into the grooves. It is
+ * barely scratched. The chamfer-driven wear path in VM_FRAG can produce *none* of
+ * that, because `aMask.x` is hard 0 on every large flat face — so a flat receiver
+ * side had literally no albedo signal available. That is the 4.7x lap_var deficit.
+ *
+ * Projected planar in object (z, y), so it lands on the flanks and nowhere else, and
+ * pinned to object space like the rest of the detail so it cannot swim.
+ *
+ * Channels: R = stencil coverage, G = groove darkness, B = groove dv (normal),
+ *           A = large-scale panel plate tone (0.5 = neutral).
+ */
+function makeDecalTex(rand, W = 1024, H = 512) {
+  const sten = new Float32Array(W * H);
+  const grv = new Float32Array(W * H);
+  const plate = new Float32Array(W * H).fill(0.5);
+
+  const rect = (buf, x0, y0, x1, y1, v) => {
+    for (let y = Math.max(0, y0 | 0); y < Math.min(H, y1 | 0); y++) {
+      for (let x = Math.max(0, x0 | 0); x < Math.min(W, x1 | 0); x++) buf[y * W + x] = v;
+    }
+  };
+  const addRect = (buf, x0, y0, x1, y1, v) => {
+    for (let y = Math.max(0, y0 | 0); y < Math.min(H, y1 | 0); y++) {
+      for (let x = Math.max(0, x0 | 0); x < Math.min(W, x1 | 0); x++) buf[y * W + x] += v;
+    }
+  };
+
+  /* ---- panel plates: four tonally separated bands, like the reference's flank */
+  const bands = [[0.00, 0.22, 0.585], [0.22, 0.38, 0.450], [0.38, 0.52, 0.545], [0.52, 1.00, 0.485]];
+  for (const [v0, v1, tone] of bands) rect(plate, 0, v0 * H, W, v1 * H, tone);
+  // long horizontal splits inside the big plate, so it is not one slab
+  for (let i = 0; i < 5; i++) {
+    const v = 0.10 + rand.next() * 0.80;
+    const u0 = rand.next() * 0.5, u1 = u0 + 0.25 + rand.next() * 0.45;
+    addRect(plate, u0 * W, v * H, u1 * W, (v + 0.035) * H, rand.sym(0.045));
+  }
+
+  /* ---- panel-line grooves. Horizontal runs (along the barrel) dominate. */
+  const groove = (x0, y0, x1, y1, wpx, depth) => {
+    const steps = Math.max(2, Math.ceil(Math.hypot(x1 - x0, y1 - y0)));
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps;
+      const px = x0 + (x1 - x0) * t, py = y0 + (y1 - y0) * t;
+      for (let d = -wpx; d <= wpx; d++) {
+        const yy = Math.round(py + d), xx = Math.round(px);
+        if (xx < 0 || xx >= W || yy < 0 || yy >= H) continue;
+        const f = 1 - Math.abs(d) / (wpx + 1);
+        grv[yy * W + xx] = Math.max(grv[yy * W + xx], depth * f);
+      }
+    }
+  };
+  for (const [v, u0, u1, w] of [
+    [0.235, 0.00, 1.00, 1.7], [0.378, 0.00, 1.00, 1.7], [0.518, 0.00, 1.00, 1.4],
+    [0.155, 0.08, 0.62, 1.1], [0.600, 0.20, 0.98, 1.1], [0.305, 0.30, 0.92, 1.0],
+  ]) groove(u0 * W, v * H, u1 * W, v * H, w, 1.0);
+  // vertical breaks between receiver sections
+  for (const u of [0.145, 0.315, 0.505, 0.685, 0.860]) {
+    groove(u * W, 0.10 * H, u * W, 0.66 * H, 1.3, 0.85);
+  }
+  // a handful of countersunk fastener dots
+  for (let i = 0; i < 14; i++) {
+    const cx = rand.next() * W, cy = (0.14 + rand.next() * 0.46) * H, r = 3 + rand.next() * 2;
+    for (let dy = -r - 1; dy <= r + 1; dy++) for (let dx = -r - 1; dx <= r + 1; dx++) {
+      const d = Math.hypot(dx, dy); if (d > r + 1) continue;
+      const xx = ((Math.round(cx + dx) % W) + W) % W, yy = Math.round(cy + dy);
+      if (yy < 0 || yy >= H) continue;
+      grv[yy * W + xx] = Math.max(grv[yy * W + xx], 1 - Math.max(0, d - r + 1));
+    }
+  }
+
+  /* ---- stencil runs.
+   * Not a font: at 1080p the receiver flank is ~200 px across and these marks land
+   * at 3-6 px tall, where a glyph and a bar of the same width are the same image.
+   * They are drawn as proportioned bar runs, which is what survives the resample —
+   * and what the reference's stencils actually read as at this distance. */
+  const stencilRun = (u0, v0, hpx, chars, gap) => {
+    let x = u0 * W;
+    for (let c = 0; c < chars; c++) {
+      const w = hpx * (0.42 + rand.next() * 0.36);
+      if (rand.next() < 0.13) { x += w + gap; continue; }        // word space
+      rect(sten, x, v0 * H, x + w, v0 * H + hpx, 1.0);
+      // knock a light hole through so it does not read as a solid slab
+      if (hpx > 7 && rand.next() < 0.55) {
+        rect(sten, x + w * 0.28, v0 * H + hpx * 0.34, x + w * 0.75, v0 * H + hpx * 0.62, 0.0);
+      }
+      x += w + gap;
+    }
+  };
+  stencilRun(0.075, 0.400, 26, 5, 6);      // big "MA5B" mark
+  stencilRun(0.075, 0.325, 11, 12, 3);     // caliber / serial line
+  stencilRun(0.075, 0.275, 10, 16, 3);
+  stencilRun(0.360, 0.470, 9, 24, 3);      // the long fine-print run along the receiver
+  stencilRun(0.700, 0.545, 13, 7, 4);      // stamp near the ejection port
+  stencilRun(0.180, 0.185, 9, 9, 3);
+
+  const data = new Uint8Array(W * H * 4);
+  const gAt = (x, y) => grv[Math.min(H - 1, Math.max(0, y)) * W + ((x % W) + W) % W];
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = y * W + x;
+      const dv = (gAt(x, y + 1) - gAt(x, y - 1)) * 0.5;
+      data[i * 4] = Math.max(0, Math.min(1, sten[i])) * 255;
+      data[i * 4 + 1] = Math.max(0, Math.min(1, grv[i])) * 255;
+      data[i * 4 + 2] = (Math.max(-1, Math.min(1, -dv * 1.8)) * 0.5 + 0.5) * 255;
+      data[i * 4 + 3] = Math.max(0, Math.min(1, plate[i])) * 255;
+    }
+  }
+  const t = new THREE.DataTexture(data, W, H, THREE.RGBAFormat);
   t.needsUpdate = true;
   return t;
 }
@@ -1140,7 +1369,12 @@ function buildRifle(rand) {
  */
 function buildHands(G, parts) {
   /* ------------------------------------------------- left hand on the fore-end */
-  const H = xform(-0.0480, -0.1150, -0.2560, -20 * DEG, 32 * DEG, -18 * DEG);
+  // Solved against the fore-end box, which sits at [0, -0.0720, -0.2750] with half
+  // extents 0.0215 (y) / 0.070 (z): the palm has to contact its underside, so the
+  // back-of-hand box (half height 0.0185) centres near y -0.105. The old -0.1150 put
+  // the whole hand ~40 mm clear of the handguard and it read as a knife lying on the
+  // sand rather than a grip. Verified by capture, not by arithmetic.
+  const H = xform(0.0125, -0.0805, -0.2560, -14 * DEG, 26 * DEG, -13 * DEG);
   const mul = (a, b) => a.clone().multiply(b);
 
   // back of hand
@@ -1152,13 +1386,16 @@ function buildHands(G, parts) {
   // forearm, tapering away from the camera
   push(parts.handL, segRounded(0.190, 0.0420, 0.0290, 0.0360, 0.0260, 0.0165,
     { steps: 5, capF: 0.10, capB: 0.06 }),
-  mul(H, xform(-0.0950, -0.0060, 0, 0, 88 * DEG, 0)));
+  mul(H, xform(-0.0950, -0.0060, 0, 0, 108 * DEG, -26 * DEG)));
 
   // knuckle plates + proximal finger segments
   for (let i = 0; i < 4; i++) {
     const z = -0.0360 + i * 0.0245;
-    const spread = (i - 1.5) * 0.055;
-    const F = mul(H, xform(0.0420, 0.0020, z, spread, 0, 34 * DEG));
+    // `spread` used to be passed as the rx argument — the fingers were being ROTATED
+    // about X instead of splayed, so all four pivoted into each other and into the
+    // hand box, which is where the triangular spikes came from. It is a translation.
+    const spread = (i - 1.5) * 0.0055;
+    const F = mul(H, xform(0.0420, 0.0020, z + spread, 0, 0, 34 * DEG));
     // proximal segment
     push(parts.handL, segRounded(0.0370, 0.0108, 0.0124, 0.0100, 0.0116, 0.0074,
       { steps: 3, capF: 0.12, capB: 0.12 }), mul(F, xform(0, 0, 0, 0, 90 * DEG, 0)));
@@ -1198,6 +1435,11 @@ function buildHands(G, parts) {
 
 const VM_PARS = /* glsl */`
 uniform sampler2D tDetail;
+uniform sampler2D tDecal;
+uniform vec4  uDecalMap;      // xy = scale(z,y), zw = offset
+uniform float uDecalAmt;      // 0 disables the whole flank-decal path
+uniform vec3  uStencilCol;
+uniform vec3  uRailStreak;    // x = strength, y = centre in object X, z = 1/width
 uniform vec3  uWornCol;
 uniform float uDetailScale;
 uniform float uNormalStr;
@@ -1238,14 +1480,74 @@ pert += aw.z * vec3(dZ.r*2.0-1.0, dZ.g*2.0-1.0, 0.0);
 normal = normalize(normalMatrix * normalize(oN + pert * uNormalStr));
 
 float edgeM = vMaskVM.x;
-float wear  = clamp(edgeM, 0.0, 1.4) * smoothstep(0.28, 0.82, dd.a);
+
+// Wear is NOT gated on edgeM any more. chamferBox writes aMask.x = 0 on all six
+// main faces and extrudeProfile's mid-panel stations pass edge 0, so the old
+// clamp(edgeM,..) * .. form multiplied every large flat face to exactly zero: the
+// receiver could only ever be flat base colour minus grime. Flats now take 35% of
+// the detail map's wear, chamfers still take 100%.
+float wear  = smoothstep(0.28, 0.82, dd.a) * (0.35 + 0.65 * clamp(edgeM, 0.0, 1.4));
 float grime = 1.0 - dd.a;
 
 diffuseColor.rgb *= (1.0 - uGrime * grime * (1.0 - min(edgeM, 1.0)));
 diffuseColor.rgb  = mix(diffuseColor.rgb, uWornCol, clamp(wear * uWearAmt, 0.0, 1.0));
+
+/* ---- flank decals: panel plates, panel-line grooves, stencil runs.
+ * Planar-projected in object (z,y) and weighted by the X-facing triplanar term, so
+ * it marks the receiver sides — where the reference puts all of its surface story —
+ * and leaves the top rail and underside alone. */
+if (uDecalAmt > 0.0) {
+  vec2 duv = vObjPosVM.zy * uDecalMap.xy + uDecalMap.zw;
+  vec2 din = step(vec2(0.0), duv) * step(duv, vec2(1.0));
+  float flank = aw.x * din.x * din.y * uDecalAmt;
+  vec4 dc = texture2D(tDecal, duv);
+  // panel plates: separate the flat into tonally distinct planes
+  diffuseColor.rgb *= mix(1.0, 0.55 + 0.90 * dc.a, flank);
+  // grooves: dark in albedo, rough, and shading-normal perturbed
+  float gr = dc.g * flank;
+  diffuseColor.rgb *= 1.0 - 0.78 * gr;
+  normal = normalize(normal + normalMatrix * vec3(0.0, (dc.b * 2.0 - 1.0) * flank * 1.6, 0.0));
+  roughnessFactor = clamp(roughnessFactor + gr * 0.30, 0.055, 1.0);
+  // stencils: flat matte paint, so they read as ink and not as chrome
+  float sc = dc.r * flank;
+  diffuseColor.rgb = mix(diffuseColor.rgb, uStencilCol, sc * 0.88);
+  roughnessFactor = mix(roughnessFactor, 0.86, sc * 0.9);
+  metalnessFactor = mix(metalnessFactor, 0.0, sc * 0.9);
+}
+
 diffuseColor.rgb *= mix(1.0 - uAoDepth, 1.0, vMaskVM.y);
 roughnessFactor = clamp(roughnessFactor + (dd.b - 0.5) * uRoughVar - wear * 0.24, 0.055, 1.0);
 metalnessFactor = clamp(metalnessFactor + wear * 0.30, 0.0, 1.0);
+
+/* ---- the top-rail sheen.  DEFAULT OFF — see the measurement below.
+ * The single most prominent feature of the reference weapon is one long soft
+ * highlight running the whole length of the rail; an isotropic GGX lobe against a
+ * low-res probe cannot make one. Rather than a full anisotropic BRDF, author the
+ * anisotropy where it is cheap: a narrow low-roughness band in object X on
+ * upward-facing surfaces. The band is invariant along Z, so the isotropic lobe
+ * stretches down the barrel on its own.
+ *
+ * MEASURED RESULT, and the reason uRailStreak.x ships at 0: this does not work with
+ * the environment we have. Gun-only, at matched pose, --config weaponRailStreak =
+ * 0 / 0.7 / 1.4 gives hi_frac 0.009 / 0.008 / 0.004 and p99 196 / 193 / 181 — every
+ * step of polish COSTS highlight energy, because a tighter lobe reflects the probe
+ * (dim) rather than the sun, and even at 256x128 the probe has no bright small
+ * feature to catch. The streak in the reference is a broad soft sheen off a real
+ * sky, not a mirror. Left in, knob-controlled and off, so the next agent can see the
+ * experiment rather than repeat it; the actual fix is a brighter, structured probe
+ * (or a real anisotropic lobe with an explicit sun term), not more smoothness. */
+if (uRailStreak.x > 0.0) {
+  float up = smoothstep(0.30, 0.92, oN.y);
+  float d  = (vObjPosVM.x - uRailStreak.y) * uRailStreak.z;
+  float band = exp(-d * d);
+  float k = uRailStreak.x * up * band;
+  // Polish, do not mirror. Measured: driving the band to roughness 0.075 makes the
+  // lobe so tight that the rail reflects the (dim) probe instead of the sun and
+  // hi_frac COLLAPSES 0.012 -> 0.001, p99 203 -> 156. The reference sheen is broad
+  // and soft; 0.26 is where the band still stretches along Z but keeps its energy.
+  roughnessFactor = mix(roughnessFactor, 0.26, k);
+  metalnessFactor = mix(metalnessFactor, 0.90, k * 0.5);
+}
 `;
 
 const VM_VERT_PARS = /* glsl */`
@@ -1272,27 +1574,71 @@ function vmMaterial(ctx, key, o) {
     applyWorldMaterial(mat, ctx, { matId: MAT_ID.VIEWMODEL, aerial: false, inject: { key } });
     return mat;
   }
-  applyWorldMaterial(mat, ctx, {
-    matId: MAT_ID.VIEWMODEL,
-    aerial: false,
-    inject: {
-      key,
-      uniforms: {
-        tDetail: { value: o.detail },
-        uWornCol: { value: new THREE.Color().setHex(o.worn ?? 0x6a6d72, THREE.SRGBColorSpace) },
-        uDetailScale: { value: o.detailScale ?? 7.0 },
-        uNormalStr: { value: o.normalStr ?? 0.85 },
-        uWearAmt: { value: o.wear ?? 0.85 },
-        uRoughVar: { value: o.roughVar ?? 0.30 },
-        uGrime: { value: o.grime ?? 0.30 },
-        uAoDepth: { value: o.aoDepth ?? 0.45 },
-      },
-      pars: VM_PARS,
-      fragment: VM_FRAG,
-      vertexPars: VM_VERT_PARS,
-      vertex: VM_VERT,
-    },
+  const U = {
+    tDetail: { value: o.detail },
+  };
+
+  /* ---------------------------------------------------------------------------
+   * TWO separate reasons this module's surface shader has never reached the screen.
+   * Both found by nulling a term and re-capturing, not by reading.
+   *
+   * (1) WRONG ANCHOR. applyWorldMaterial splices inject.fragment in front of
+   *     `<lights_fragment_begin>`. three's meshphysical order is
+   *
+   *       <roughnessmap_fragment> <metalnessmap_fragment> <normal_fragment_*>
+   *       <lights_physical_fragment>   <- copies diffuseColor / roughnessFactor /
+   *       <lights_fragment_begin>         metalnessFactor into the BRDF struct
+   *
+   *     so every albedo, roughness and metalness write in VM_FRAG landed after the
+   *     values had already been consumed, and was discarded. Only the `normal` write
+   *     survived. The correct anchor is `<lights_physical_fragment>`.
+   *
+   * (2) CSM EATS THE HOOK. applyWorldMaterial ends with
+   *     `ctx.get('lighting')?.registerMaterial?.(mat)` -> `csm.setupMaterial(mat)`,
+   *     and three's CSM does a bare `material.onBeforeCompile = function(shader){...}`
+   *     — it does not chain. So it *overwrites* applyWorldMaterial's own hook, and
+   *     any hook installed before the call, and the entire injection (uniforms,
+   *     pars, varyings, fragment) is thrown away before the first compile.
+   *
+   *     Proof: forcing `diffuseColor.rgb = vec3(duv, aw.x)` produced a byte-identical
+   *     PNG at both anchors. The gun was a uniform plank because it was being drawn
+   *     by a stock MeshStandardMaterial.
+   *
+   * So do the injection ourselves, *after* applyWorldMaterial has run, chaining onto
+   * whatever CSM left behind. Everything below is what applyWorldMaterial would have
+   * injected, at the anchor that works, plus this module's own.
+   * ------------------------------------------------------------------------- */
+  Object.assign(U, {
+    tDecal: { value: o.decal ?? o.detail },
+    uDecalMap: { value: new THREE.Vector4(...(o.decalMap ?? [1.613, 4.35, 0.758, 0.565])) },
+    uDecalAmt: { value: o.decalAmt ?? 0.0 },
+    uStencilCol: { value: new THREE.Color().setHex(o.stencil ?? 0xa9a49a, THREE.SRGBColorSpace) },
+    uRailStreak: { value: new THREE.Vector3(...(o.railStreak ?? [0, 0, 1])) },
+    uWornCol: { value: new THREE.Color().setHex(o.worn ?? 0x6a6d72, THREE.SRGBColorSpace) },
+    uDetailScale: { value: o.detailScale ?? 7.0 },
+    uNormalStr: { value: o.normalStr ?? 0.85 },
+    uWearAmt: { value: o.wear ?? 0.85 },
+    uRoughVar: { value: o.roughVar ?? 0.30 },
+    uGrime: { value: o.grime ?? 0.30 },
+    uAoDepth: { value: o.aoDepth ?? 0.45 },
   });
+
+  applyWorldMaterial(mat, ctx, { matId: MAT_ID.VIEWMODEL, aerial: false, inject: { key } });
+
+  const prev = mat.onBeforeCompile;          // CSM's, installed by registerMaterial
+  mat.onBeforeCompile = (shader, renderer) => {
+    prev?.(shader, renderer);
+    Object.assign(shader.uniforms, U);
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', `#include <common>\n${VM_VERT_PARS}`)
+      .replace('#include <worldpos_vertex>', `#include <worldpos_vertex>\n${VM_VERT}`);
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', `#include <common>\n${VM_PARS}`)
+      .replace('#include <lights_physical_fragment>',
+        `{\n${VM_FRAG}\n}\n#include <lights_physical_fragment>`);
+    mat.userData.shader = shader;
+  };
+  mat.__vmUniforms = U;
   return mat;
 }
 
@@ -1311,7 +1657,10 @@ function vmMaterial(ctx, key, o) {
  * of drifting with whatever units the sky module happens to publish.
  */
 function buildEnvProbe(ctx, intensityScale) {
-  const W = 64, H = 32;
+  // 256x128, not 64x32: below ~128px of azimuth the probe carries no structure above
+  // ~6 degrees, so even at roughness 0.30 the rail reflects a uniform smear and the
+  // reference's long grazing sheen cannot form. Built once at init; cost is irrelevant.
+  const W = 256, H = 128;
   const data = new Float32Array(W * H * 4);
   const sky = ctx.get('sky');
   const time = ctx.get('time');
@@ -1334,11 +1683,34 @@ function buildEnvProbe(ctx, intensityScale) {
       } else if (sy > 0.005) {
         col.copy(fallbackSky).multiplyScalar(0.22 + 0.30 * sy);
       } else {
-        // ground: warm sand bounce, dimming as it faces away from the sky
+        /* Ground hemisphere = sand bounce, SYNTHESISED, not tinted sky.
+         *
+         * The old code sampled the horizon radiance and multiplied by a warm ratio.
+         * But the horizon sample is blue, and a warm *ratio* applied to a blue
+         * sample is still blue — just dimmer. That is the whole reason the gun
+         * rendered navy: it is ~84% ambient-lit (measured: --config sunScale=0 moved
+         * a receiver-flank patch only 14.75 -> 12.33) and every last bit of that
+         * ambient was cold.
+         *
+         * So build the bounce from what actually bounces: sun colour x sand albedo
+         * x sky visibility, with a small blue sky-fill term for the part of the
+         * ground that sees more sky than sun.
+         */
+        const skyVis = 0.30 + 0.55 * (1 + sy);          // 1 at the horizon -> 0.3 at nadir
         const horizon = sky?.radiance ? sky.radiance(dir.set(Math.cos(az), 0.06, Math.sin(az)), col.clone())
           : fallbackSky.clone().multiplyScalar(0.26);
-        col.setRGB(horizon.r * 0.46, horizon.g * 0.40, horizon.b * 0.30);
-        col.multiplyScalar(0.30 + 0.55 * (1 + sy));
+        const hL = 0.2126 * horizon.r + 0.7152 * horizon.g + 0.0722 * horizon.b;
+        // sand albedo, linear, warm (Silent Cartographer beach measures ~0.22 with a
+        // strong R>G>B ramp). Driven by the sun's own colour so it tracks time of day.
+        col.setRGB(
+          warm.r * SAND_BOUNCE[0],
+          warm.g * SAND_BOUNCE[1],
+          warm.b * SAND_BOUNCE[2],
+        ).multiplyScalar(hL * SAND_BOUNCE_GAIN * skyVis);
+        // a little cold sky fill so the bounce is not cartoon-orange
+        col.r += horizon.r * 0.04 * skyVis;
+        col.g += horizon.g * 0.045 * skyVis;
+        col.b += horizon.b * 0.055 * skyVis;
       }
       const k = (j * W + i) * 3;
       tmp[k] = Math.max(0, col.r); tmp[k + 1] = Math.max(0, col.g); tmp[k + 2] = Math.max(0, col.b);
@@ -1380,6 +1752,13 @@ function buildEnvProbe(ctx, intensityScale) {
   return rt;
 }
 
+/* Build-time geometry is exported for `tools/_wpntri.mjs`, which loads this module
+ * in bare node (no GPU, no DOM) and dumps triangle aspect ratios. That is how the
+ * surviving zero-area strip was found: by measuring triangles, not by tightening a
+ * threshold. Nothing in the runtime path uses it. */
+export const __dbg = { buildRifle, buildHands };
+export const __mount = { pos: MOUNT_POS, rot: MOUNT_ROT, pivot: PIVOT };
+
 /* ========================================================================== */
 /*  module                                                                    */
 /* ========================================================================== */
@@ -1401,6 +1780,7 @@ export function create(opts = {}) {
   const mats = {};
   const tex = {};
   let counter = null, counterTex = null, envRT = null;
+  let pendingEnvInt = null;
   let flashLight = null, flashSprite = null;
   const shells = [];
   const tracers = [];
@@ -1550,42 +1930,50 @@ export function create(opts = {}) {
       rng = ctx.rand.fork('weapons');
       const texRand = ctx.rand.fork('weapons.tex');
 
-      tex.metal = configureTexture(makeSurfaceTex(texRand, { size: 512, scratches: 320, aniso: 0.88 }), ctx);
-      tex.poly = configureTexture(makeSurfaceTex(texRand.fork(1), { size: 512, scratches: 140, aniso: 0.55, grain: 1.6 }), ctx);
+      tex.metal = configureTexture(makeSurfaceTex(texRand, { size: 512, scratches: 70, aniso: 0.90 }), ctx);
+      tex.poly = configureTexture(makeSurfaceTex(texRand.fork(1), { size: 512, scratches: 45, aniso: 0.55, grain: 1.1 }), ctx);
       tex.weave = configureTexture(makeWeaveTex(texRand.fork(2), 256), ctx);
       tex.railN = configureTexture(makeRailNormalTex(texRand.fork(3)), ctx, { repeat: false });
+      tex.decal = configureTexture(makeDecalTex(texRand.fork(4)), ctx, { repeat: false });
 
-      const envInt = ctx.config.weaponEnvInt ?? 0.70;
+      // 0.45, not 0.70: measured gun-only at matched pose, 0.70 -> 0.45 moves lum_std
+      // 32.8 -> 35.0 and R-B +9.1 -> +12.4 at the same mean. A stronger probe is a
+      // stronger *flat* ambient — it fills the shadowed flanks, which is precisely
+      // the tonal range the reference has and this gun lacks.
+      const envInt = ctx.config.weaponEnvInt ?? 0.45;
       try { envRT = buildEnvProbe(ctx, envInt); } catch (e) { console.warn('[weapons] env probe failed', e); }
       const envMap = envRT ? envRT.texture : null;
 
       mats.body = vmMaterial(ctx, 'vm_body', {
-        color: 0x2b2d30, roughness: 0.46, metalness: 0.62, detail: tex.metal,
-        worn: 0x6a6d72, detailScale: 7.2, normalStr: 0.95, wear: 0.90,
-        roughVar: 0.30, grime: 0.34, aoDepth: 0.52, envInt: 1.0,
+        color: 0x847661, roughness: 0.46, metalness: 0.62, detail: tex.metal,
+        worn: 0x8b8678, detailScale: 7.2, normalStr: 0.95, wear: 0.55,
+        roughVar: 0.30, grime: 0.28, aoDepth: 0.52, envInt: 1.0,
+        decal: tex.decal, decalAmt: 1.0, railStreak: [0.0, 0.0, 30.0],
       });
       mats.rail = vmMaterial(ctx, 'vm_rail', {
-        color: 0x3b3e43, roughness: 0.30, metalness: 0.84, detail: tex.metal,
-        worn: 0x7e8288, detailScale: 9.5, normalStr: 0.70, wear: 0.95,
-        roughVar: 0.26, grime: 0.26, aoDepth: 0.48, envInt: 1.15,
+        color: 0x94836e, roughness: 0.30, metalness: 0.84, detail: tex.metal,
+        worn: 0x9b9587, detailScale: 9.5, normalStr: 0.70, wear: 0.65,
+        roughVar: 0.26, grime: 0.22, aoDepth: 0.48, envInt: 1.15,
+        decal: tex.decal, decalAmt: 0.85, railStreak: [0.0, 0.0, 26.0],
       });
       mats.poly = vmMaterial(ctx, 'vm_poly', {
-        color: 0x232529, roughness: 0.66, metalness: 0.05, detail: tex.poly,
-        worn: 0x4a4d52, detailScale: 6.0, normalStr: 1.05, wear: 0.55,
+        color: 0x665b4e, roughness: 0.66, metalness: 0.05, detail: tex.poly,
+        worn: 0x635f55, detailScale: 6.0, normalStr: 1.05, wear: 0.40,
+        decal: tex.decal, decalAmt: 0.55,
         roughVar: 0.24, grime: 0.40, aoDepth: 0.55, envInt: 0.9,
       });
       mats.glove = vmMaterial(ctx, 'vm_glove', {
-        color: 0x101114, roughness: 0.74, metalness: 0.02, detail: tex.weave,
-        worn: 0x2a2c31, detailScale: 22.0, normalStr: 0.85, wear: 0.35,
-        roughVar: 0.22, grime: 0.30, aoDepth: 0.58, envInt: 0.85,
+        color: 0x585046, roughness: 0.78, metalness: 0.02, detail: tex.weave,
+        worn: 0x5d594f, detailScale: 30.0, normalStr: 1.25, wear: 0.45,
+        roughVar: 0.30, grime: 0.26, aoDepth: 0.46, envInt: 0.85,
       });
       mats.plate = vmMaterial(ctx, 'vm_plate', {
-        color: 0x16181c, roughness: 0.40, metalness: 0.30, detail: tex.metal,
-        worn: 0x53575d, detailScale: 12.0, normalStr: 0.80, wear: 0.75,
+        color: 0x5b5346, roughness: 0.40, metalness: 0.30, detail: tex.metal,
+        worn: 0x6f6b5f, detailScale: 12.0, normalStr: 0.80, wear: 0.75,
         roughVar: 0.26, grime: 0.30, aoDepth: 0.50, envInt: 1.05,
       });
       mats.engrave = new THREE.MeshStandardMaterial({
-        color: new THREE.Color().setHex(0x3d4046, THREE.SRGBColorSpace),
+        color: new THREE.Color().setHex(0x585449, THREE.SRGBColorSpace),
         roughness: 0.34, metalness: 0.80, envMapIntensity: 1.1,
         normalMap: tex.railN, normalScale: new THREE.Vector2(0.55, 0.55),
       });
@@ -1618,6 +2006,38 @@ export function create(opts = {}) {
 
       if (envMap) for (const k of Object.keys(mats)) if (mats[k].isMeshStandardMaterial) mats[k].envMap = envMap;
 
+      /* --------------------------------------------------- live config knobs
+       * `tools/captured.mjs` applies --config AFTER __HALO__.ready, via setConfig,
+       * which only writes ctx.config and emits 'config'. Anything read once inside
+       * init() is therefore a dead knob: --config weaponEnvInt=0 and =10 used to
+       * produce byte-identical PNGs. Same failure class as KNOWN_ISSUES section 9.
+       * Subscribe, so this subsystem can actually be bisected. */
+      const uni = (name) => {
+        const out = [];
+        for (const m of Object.values(mats)) {
+          const u = m.userData?.shaderUniforms?.[name] ?? m.__vmUniforms?.[name];
+          if (u) out.push(u);
+        }
+        return out;
+      };
+      ctx.on('config', ({ k, v }) => {
+        if (k === 'weaponScreenEmissive') { mats.screen.emissiveIntensity = +v; }
+        // NB deferred: PMREMGenerator renders, so rebuilding the probe inside the
+        // config callback leaves the renderer bound to its own target and the next
+        // frame comes back black. Queue it and do it at the top of update().
+        else if (k === 'weaponEnvInt') { pendingEnvInt = +v; }
+        else if (k === 'weaponDecalAmt') { for (const u of uni('uDecalAmt')) u.value = +v; }
+        else if (k === 'weaponRailStreak') { for (const u of uni('uRailStreak')) u.value.x = +v; }
+        else if (k === 'weaponWearAmt') { for (const u of uni('uWearAmt')) u.value = +v; }
+        else if (k === 'weaponAlbedoScale') {
+          for (const key of ['body', 'rail', 'poly', 'plate', 'glove']) {
+            const m = mats[key];
+            if (m && !m.__baseCol) m.__baseCol = m.color.clone();
+            if (m) m.color.copy(m.__baseCol).multiplyScalar(+v);
+          }
+        }
+      });
+
       /* ------------------------------------------------------- geometry */
       const { G, parts } = buildRifle(rng);
       buildHands(G, parts);
@@ -1626,6 +2046,7 @@ export function create(opts = {}) {
         if (!geos.length) return null;
         const geo = geos.length === 1 ? geos[0] : mergeGeometries(geos, false);
         if (!geo) { console.warn('[weapons] merge failed for', name); return null; }
+        cullDegenerate(geo);
         geo.computeBoundingSphere();
         const mesh = new THREE.Mesh(geo, mat);
         mesh.name = 'vm_' + name;
@@ -1750,6 +2171,19 @@ export function create(opts = {}) {
     /* ------------------------------------------------------------ update */
     update(dt, c) {
       if (c.config.frozen) dt = 0;
+      if (pendingEnvInt !== null) {
+        const want = pendingEnvInt; pendingEnvInt = null;
+        try {
+          const prevRT = c.renderer.getRenderTarget();
+          const old = envRT;
+          envRT = buildEnvProbe(c, want);
+          c.renderer.setRenderTarget(prevRT);
+          for (const m of Object.values(mats)) {
+            if (m.isMeshStandardMaterial) { m.envMap = envRT.texture; m.needsUpdate = true; }
+          }
+          old?.dispose();
+        } catch (e) { console.warn('[weapons] env rebuild failed', e); }
+      }
       st.t = c.clock.t;
       const cam = c.camera;
       const player = c.get('player');

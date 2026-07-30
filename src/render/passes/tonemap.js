@@ -433,21 +433,60 @@ export function keyedExposure(ctx, cache = { lights: null, frames: 0, warned: fa
  * (see `docs/KNOWN_ISSUES.md` 8 — sat_mean is still 36 against a target of 84).
  *
  * So this is fitted to the two terms exposure actually controls, by least squares on the
- * relative error of lum_mean and p50 against the local slopes (28.9 and 29.3 codes/stop):
+ * relative error of lum_mean and p50 against the local slope (~28 codes/stop).
  *
- *      0.030687 + 0.149749 * EV = 0   ->   EV = -0.205
+ * ### Re-fitted after the albedo, terrain and fog work landed — the trim stays zero
  *
- * Measured with the trim in force (`ref_00000`, `--settle 48`): lum_mean 104.73, p50 107
- * against targets 107.8 and 105 — relative error 2.8% / 1.9%, down from 2.5% / 8.6%.
- * Setting `ctx.config.exposureTrimEV = 0` reproduces the untrimmed 110.52 / 114 exactly.
+ * One `ref_00000` frame is the wrong basis for this fit and the earlier waves used it
+ * anyway. `docs/TARGETS.md`'s whole-frame signature is a **mean over the whole clip**,
+ * but the reference is not flat across it: its own keyframes run lum_mean 71.6 to 125.5,
+ * and `kf_00000` alone is 112.2 against the clip's 107.8. Fitting one pose to a clip mean
+ * therefore bakes in whatever that pose's deviation happens to be.
  *
- * **What this number assumes:** the albedos as of this fit. Other modules are lowering
- * them concurrently and each pass of that work moves lum_mean far more than this trim
- * does — the same sweep measured lum_mean 148.4 at EV 0 when `KNOWN_ISSUES` 8 was
- * written and 110.5 a few hours later. Re-fit with the sweep above whenever the albedo
- * work lands; do not treat -0.2 as a constant of nature. It is worth 5.8 codes.
+ * So the fit is now pose-matched: `--all` (nine poses, one page load, ~20 s) against the
+ * nine `ref/keyframes/kf_*.png` at the same poses, whose own means are lum_mean 105.40 /
+ * p50 99.44. Three replicate pairs, alternating, `--settle 48`:
+ *
+ *      trim     lum_mean (3 runs)        p50 (3 runs)        p99     shadow  highlight
+ *       0.00    105.82 105.82 106.52   106.67 106.67 107.00   203.0   0.0297   0.0028
+ *      -0.15    101.46 102.15 100.69   102.00 102.56 101.44   199.6   0.0383   0.0024
+ *      reference (same nine poses)     105.40         99.44   222.1   0.0565   0.0088
+ *
+ * Slope 30.8 codes/stop on lum_mean, 31.9 on p50; replicate spread 0.7-1.5 codes. At trim
+ * 0 lum_mean is **+0.6% against the pose-matched reference** and -1.6% against the clip
+ * signature — the two bases disagree by more than the residual, which is the whole answer:
+ * the keyed photographic exposure is already inside the uncertainty of what "the target"
+ * even means. Least squares on lum_mean + p50 gives -0.135 stops against the pose-matched
+ * mean and -0.003 against the clip signature. **Shipped 0.**
+ *
+ * ### Why the p50 excess is not an exposure error
+ *
+ * Only p50 pulls negative, and it does so because the histogram is the wrong *shape*, not
+ * because it is in the wrong place: our lum_std is 33-36 per pose against the reference's
+ * 43-58, so we are missing both tails and the median floats up. Solving for the exposure
+ * each pose would need on its own:
+ *
+ *      00000 +0.116   00120 +0.149   00450 +0.355   00600 -0.526   00720 -0.254
+ *      00840 -0.280   01500 -1.004   01800 -0.803   02220 +0.999
+ *      mean -0.139   median -0.254   **sd 0.618 stops**
+ *
+ * The per-pose scatter is 4.5x the pooled offset, so no single number reconciles a pose
+ * that wants +1.0 stops with one that wants -1.0. And the requirement correlates with the
+ * *reference's* shadow_frac at **r = -0.689**: the poses that "want" less exposure are
+ * exactly the ones where the reference has deep shadow we do not reproduce (01500's
+ * reference is shadow_frac 0.1145 / p50 75). That is a shadowing deficit wearing an
+ * exposure costume. Darkening the frame to chase it would take lum_mean, p99 and
+ * highlight_frac *further* from target to move p50 closer — three worse for two better.
+ *
+ * **What this number assumes about fog:** `volumetricFog` was a byte-level no-op last
+ * wave; the fog fix has since landed and it is no longer. Re-measured at `ref_00000`,
+ * `--skip volumetricFog` moves lum_mean 113.71 -> 113.22, i.e. **fog contributes +0.49
+ * codes (0.4%)** and -0.5 sat_mean. That is a sixth of this trim's own resolution, and it
+ * is small by design — per `reports/fog.md` the pass yields opaque-surface haze to
+ * `wmAerial` and owns only the sky and the shafts. A future fog change has to be ~10x
+ * larger than the one that just landed before this constant notices.
  */
-export const KEY_TRIM_EV = -0.2;
+export const KEY_TRIM_EV = 0;
 
 /* ------------------------------------------------------------------ the shader */
 

@@ -15,8 +15,9 @@ codebase at once without stepping on each other.
    with the same seed must produce byte-identical frames — the whole measurement loop
    depends on it.
 4. **No network fetches at runtime.** Every texture is generated procedurally on the GPU or
-   in JS at load time. There is no asset CDN. `src/gfx/TextureForge.js` is the shared
-   generator.
+   in JS at load time, and every mesh is generated from code. There is no asset CDN and
+   there are no texture or model files in this repo. Build your own generators inside the
+   file you own, drawing on the shared GLSL in `src/gfx/glsl/noise.js`.
 5. **Linear HDR everywhere until the tonemap pass.** Materials output linear radiance.
    `renderer.toneMapping` is `NoToneMapping` on purpose — the pipeline tonemaps by hand.
    If you set a colour from a hex literal, call `.setHex(v, THREE.SRGBColorSpace)`.

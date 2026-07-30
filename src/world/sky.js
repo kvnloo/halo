@@ -716,6 +716,7 @@ export function create(opts = {}) {
     tTransmittance: { value: null },
     tSkyRayMie: { value: null },
     tSkyMulti: { value: null },
+    tMsLut: { value: null },
 
     uSunDir: { value: new THREE.Vector3(0.666, 0.656, -0.354) },
     uSunTint: { value: new THREE.Color(1, 1, 1) },
@@ -922,6 +923,7 @@ export function create(opts = {}) {
         uGroundAlbedo: { value: S.groundAlbedo },
       });
       renderLut(renderer, msMat, msRT);
+      uniforms.tMsLut.value = msRT.texture;
 
       /* 3. sky-view (MRT: ray/mie + multi) */
       svRT = makeLutRT(256, 256, 2);

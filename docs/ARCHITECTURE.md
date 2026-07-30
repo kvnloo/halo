@@ -131,6 +131,23 @@ A pass with `needsSwap = false` writes to its own target for later passes to sam
 (e.g. `ssao`) and leaves the main chain alone. A pass with `scenePass = true` runs
 before the post chain (shadow, prepass, opaque, sky, transparent draws).
 
+**Never infer "am I last?" from `out === null`.** Which pass ends the chain depends on
+which passes happen to be enabled, so logic gated on a null target silently becomes
+dead code the moment anything is registered after you — that is exactly how a dither
+written to prevent sky banding ended up never executing once `sharpen` and `grain`
+were added to the manifest. The pipeline sets `pass.writesBackbuffer = true` on the
+pass it is about to run last, every frame. Use that:
+
+```js
+p.render = (ctx, pipe, out) => {
+  mat.uniforms.uDither.value = p.writesBackbuffer ? ditherAmount : 0.0;
+  ...
+};
+```
+
+Anything that depends on the destination being 8-bit — dithering, quantisation,
+final-clamp behaviour — must key off `writesBackbuffer`, not off `out`.
+
 ## Capture / measurement API
 
 The harness drives `window.__HALO__`:

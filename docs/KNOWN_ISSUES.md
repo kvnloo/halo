@@ -76,3 +76,24 @@ Consequences that are **not** bugs right now:
 exists to refit them, but must only be run against a **complete** scene — see the
 "Fitting the poses" section of `docs/ARCHITECTURE.md`. Applying a fit invalidates every
 previously recorded score.
+
+---
+
+## 4. Circular calibration — a methodology trap, not a code bug
+
+Phase 1's grade was fitted by pushing `ref/keyframes/*.png` through the grade LUT and
+minimising against the reference signature. Every statistic it reported was therefore a
+property of *the reference clip*, not of anything this engine renders. Captured through
+`tools/capture.mjs`, the same build measured `lab_b` −24.2 against a claimed +1.35, and
+`sat_mean` 97.7 against a claimed 84.1.
+
+Worse than being wrong, it pointed the defaults the wrong way: saturation was raised to
+1.10 because the *reference* was short on chroma, while the actual render was already
+14–18 units over — so the grade amplified its single largest error.
+
+**Rule.** A calibration is only valid if its input distribution is a frame this engine
+produced. Fit against `tools/capture.mjs` output. If you report a number, it must have
+come from a PNG the renderer wrote — never from a reference frame you transformed.
+
+This generalises: any subsystem that tunes itself against the reference rather than
+against its own output is measuring the target instead of the work.

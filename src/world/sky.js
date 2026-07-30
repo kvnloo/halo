@@ -362,10 +362,12 @@ uniform float uSunDiscRadiance;
 uniform float uCamAltKm;
 uniform float uMieG;
 uniform vec3  uAtmTint;
-uniform float uExposureHint;
 
 uniform float uStarStrength;
 uniform float uStarDensity;
+uniform vec2  uCirrusOffset;
+uniform float uCirrusStrength;
+uniform vec3  uCirrusColor;
 
 uniform vec3  uRingAxis;        // horizontal, across the band's width
 uniform vec3  uRingEast;        // horizontal, along the circumference
@@ -392,7 +394,6 @@ uniform vec3  uPlanetColC;
 uniform vec3  uPlanetColD;
 uniform float uPlanetSeed;
 
-uniform float uDebugTonemap;
 uniform float uDebugMode;
 uniform float uMsScale;
 uniform float uMieScale;
@@ -420,19 +421,33 @@ vec3 stars(vec3 dir, float px){
       vec2 o = vec2(float(i), float(j));
       vec2 id = gi + o + face*37.0;
       float h0 = starCellHash(id, 1.0);
-      if (h0 > 0.24) continue;                     // most cells are empty
+      if (h0 > 0.26) continue;                     // most cells are empty
       vec2 pos = o + vec2(starCellHash(id, 5.0), starCellHash(id, 9.0));
       float d = length((gf - pos) * cell);          // angular-ish distance
       float mag = starCellHash(id, 13.0);
-      float bright = pow(mag, 5.0) + 0.06;
-      float rad = px * (0.78 + 1.1*pow(mag, 8.0));
+      float bright = pow(mag, 4.0)*0.95 + 0.05;
+      float rad = px * (0.60 + 0.85*pow(mag, 9.0));
       float core = exp(-(d*d) / (rad*rad));
-      float halo = 0.10 * exp(-(d) / (rad*2.6));
-      vec3 tint = mix(vec3(0.68, 0.84, 1.28), vec3(1.0, 0.99, 0.97), starCellHash(id, 21.0)*0.45);
+      float halo = 0.055 * exp(-(d) / (rad*2.2));
+      vec3 tint = mix(vec3(0.80, 0.92, 1.22), vec3(1.02, 1.0, 0.99), starCellHash(id, 21.0)*0.55);
       acc += tint * bright * (core + halo);
     }
   }
   return acc * uStarStrength;
+}
+
+/* ------------------------------------------------------------ high cirrus */
+/* The reference's deep sky is not clean: there is a thin, sheared ice veil at
+ * altitude that carries most of its high-frequency energy up there. It belongs to
+ * the atmosphere rather than to the cumulus deck, so it lives here. */
+float cirrusVeil(vec3 dir){
+  if (dir.y < 0.015) return 0.0;
+  vec2 p = dir.xz / max(dir.y, 0.015) * 1.25 + uCirrusOffset;
+  float w = fbm2(p*0.42 + 3.3, 3);
+  float v = fbm2(vec2(p.x*0.18, p.y*4.10) + w*1.10 + 9.1, 5);
+  float f = fbm2(vec2(p.x*0.70, p.y*13.0) + w*0.7 + 21.0, 4);
+  float m = smoothstep(0.24, 0.52, v*0.72 + f*0.45);
+  return m * smoothstep(0.03, 0.34, dir.y) * smoothstep(7.0, 2.4, length(p - uCirrusOffset));
 }
 
 /* -------------------------------------------------------------- Halo ring */
@@ -500,6 +515,10 @@ vec3 ringSurface(float s, float v, out float lum){
   c = mix(c, cloud, cover);
   // storm-front brightening where the two cloud scales agree
   c = mix(c, cloud*1.18, smoothstep(0.30, 0.62, cl)*smoothstep(0.10, 0.45, cf)*0.7);
+  // fine cellular break-up: this is where the band's high-frequency energy comes from
+  float fine = fbm2(cq*9.0 + 133.0, 4);
+  c *= 0.86 + 0.30*(fine*0.5 + 0.5);
+  c = mix(c, cloud*1.10, smoothstep(0.34, 0.66, fine)*cover*0.45);
 
   lum = dot(c, vec3(0.30, 0.59, 0.11));
   return c;
@@ -536,31 +555,6 @@ vec3 planetSurface(vec3 n, out float detail){
   c = mix(c, uPlanetColB*1.14, smoothstep(0.70, 0.97, storm)*0.30);
   detail = b1*0.5 + b2*0.3 + storm*0.2;
   return c;
-}
-
-/* ------------------------------------------------------- AgX (debug preview only) */
-vec3 dbgAgx(vec3 c){
-  const mat3 toR2020 = mat3(0.6274,0.0691,0.0164, 0.3293,0.9195,0.0880, 0.0433,0.0113,0.8956);
-  const mat3 toSRGB  = mat3(1.6605,-0.1246,-0.0182, -0.5876,1.1329,-0.1006, -0.0728,-0.0083,1.1187);
-  const mat3 inset = mat3(0.856627153315983,0.0951212405381588,0.0482516061458583,
-                          0.137318972929847,0.761241990602591,0.101439036467562,
-                          0.11189821299995,0.0767994186031903,0.811302368396859);
-  const mat3 outset = mat3(1.1271005818144368,-0.11060664309660323,-0.016493938717834573,
-                           -0.1413297634984383,1.157823702216272,-0.016493938717834257,
-                           -0.14132976349843826,-0.11060664309660294,1.2519364065950405);
-  c = toR2020 * c;
-  c = inset * c;
-  c = max(c, vec3(1e-10));
-  c = log2(c);
-  c = (c + 12.47393) / (4.026069 + 12.47393);
-  c = clamp(c, 0.0, 1.0);
-  vec3 x2 = c*c, x4 = x2*x2;
-  c = 15.5*x4*x2 - 40.14*x4*c + 31.96*x4 - 6.868*x2*c + 0.4298*x2 + 0.1191*c - 0.00232;
-  c = outset * c;
-  c = pow(max(c, vec3(0.0)), vec3(2.2));
-  c = toSRGB * c;
-  c = clamp(c, 0.0, 1.0);
-  return mix(c*12.92, 1.055*pow(max(c, vec3(1e-6)), vec3(1.0/2.4)) - 0.055, step(vec3(0.0031308), c));
 }
 
 /* ================================================================== main */
@@ -660,9 +654,9 @@ void main(){
       // cos(i) = sin(elevation), so the path through the ring's atmosphere is an
       // airmass of 1/sin(el): the band dissolves as it approaches the horizon exactly
       // the way the reference does, and stays crisp overhead.
-      float am = 1.0 / max(dir.y, 0.012);
-      float hz = 1.0 - exp(-uRingHazeK * am);
-      vec3 hazeCol = mix(uRingHazeColor * (0.55 + 0.60*lit), inscatter * 1.15, 0.30 + 0.55*hz);
+      float am = 1.0 / max(dir.y, 0.010);
+      float hz = 1.0 - exp(-uRingHazeK * pow(max(am - 1.0, 0.0), 1.4));
+      vec3 hazeCol = mix(uRingHazeColor * (0.55 + 0.60*lit), inscatter * 1.05, min(1.0, 0.28 + 0.85*hz));
       surf = mix(surf, hazeCol, hz);
 
       // bright scattering fringe where the air is seen along the band wall
@@ -690,6 +684,16 @@ void main(){
   /* ---- fold space through the atmosphere ---- */
   vec3 col = space * Tview + inscatter * (1.0 - Tview*coverage);
 
+  /* ---- high cirrus, in front of everything but the sun's own disc ---- */
+  if (uCirrusStrength > 0.001){
+    float cv = cirrusVeil(dir) * uCirrusStrength;
+    float sunLit = 0.72 + 0.55*pow(max(cosT, 0.0), 6.0);
+    col = mix(col, uCirrusColor * sunLit * mix(0.55, 1.0, clamp(Tview.g*1.3, 0.0, 1.0)), clamp(cv, 0.0, 1.0));
+  }
+
+  /* ---- 8-bit-safe dither: HDR skies band badly without it ---- */
+  col *= 1.0 + (hash12(gl_FragCoord.xy) - 0.5) * 0.006;
+
   if (uDebugMode > 3.5){
     if (uDebugMode < 4.5) col = Tview;
     else if (uDebugMode < 5.5) col = rm.rgb * 3.0;
@@ -700,7 +704,6 @@ void main(){
   }
 
   col = max(col, vec3(0.0));
-  if (uDebugTonemap > 0.5) col = dbgAgx(col * uExposureHint);
 
   oColor = vec4(col, 1.0);
 }
@@ -716,7 +719,7 @@ export function create(opts = {}) {
     ringWidthRatio: 0.104,     // W / R  -> 520 km band
     ringWidthOffset: 0.0,
     ringBrightness: 2.35,
-    ringHazeZenithOD: 0.20,   // optical depth of the ring's own air, straight down
+    ringHazeZenithOD: 0.28,   // optical depth of the ring's own air, straight down
     ringOpacity: 0.965,
 
     planetAzimuthDeg: 210.4,
@@ -735,9 +738,10 @@ export function create(opts = {}) {
     sunDiscRadiance: 900.0,
     groundAlbedo: 0.14,
     starStrength: 0.55,
-    starDensity: 34.0,
+    starDensity: 56.0,
+    cirrusDrift: 0.00045,
+    cirrusStrength: 0.24,
     atmTint: [0.62, 0.55, 1.12],
-    exposureHint: 1.0,
     cubeSize: 128,
   };
   Object.assign(S, opts.sky || {});
@@ -756,10 +760,12 @@ export function create(opts = {}) {
     uCamAltKm: { value: 0.0017 },
     uMieG: { value: S.mieG },
     uAtmTint: { value: new THREE.Vector3(...S.atmTint) },
-    uExposureHint: { value: S.exposureHint },
 
     uStarStrength: { value: S.starStrength },
     uStarDensity: { value: S.starDensity },
+    uCirrusOffset: { value: new THREE.Vector2(0, 0) },
+    uCirrusStrength: { value: S.cirrusStrength },
+    uCirrusColor: { value: new THREE.Vector3(1.55, 1.62, 1.78) },
 
     uRingAxis: { value: new THREE.Vector3(1, 0, 0) },
     uRingEast: { value: new THREE.Vector3(0, 0, 1) },
@@ -786,7 +792,6 @@ export function create(opts = {}) {
     uPlanetColD: { value: new THREE.Vector3(0.540, 0.480, 0.640) },
     uPlanetSeed: { value: 0 },
 
-    uDebugTonemap: { value: 0 },
     uDebugMode: { value: 0 },
     uMsScale: { value: S.msScale ?? 1.0 },
     uMieScale: { value: S.mieScale ?? 1.0 },
@@ -876,7 +881,7 @@ export function create(opts = {}) {
         const iw = (1 - st) / Math.max(ex, 1e-8);
         const Ts = Math.exp(-_od[k]);
         // single scattering + a crude isotropic multiple-scattering fill
-        const ms = (scR + scM) * 0.11 * Math.exp(-_od[k] * 0.35);
+        const ms = (scR + scM) * 0.052 * Math.exp(-_od[k] * 0.62);
         L[k] += T[k] * ((scR * pR + scM * pM) * Ts + ms) * iw;
         T[k] *= st;
       }
@@ -966,7 +971,7 @@ export function create(opts = {}) {
         uSunDir: uniforms.uSunDir,
         uCamAltKm: uniforms.uCamAltKm,
         uGroundAlbedo: { value: S.groundAlbedo },
-        uGroundTint: { value: new THREE.Vector3(0.62, 0.66, 0.72) },
+        uGroundTint: { value: new THREE.Vector3(0.46, 0.50, 0.56) },
       });
       uniforms.tSkyRayMie.value = svRT.textures[0];
       uniforms.tSkyMulti.value = svRT.textures[1];
@@ -1014,11 +1019,9 @@ export function create(opts = {}) {
       this.renderProbe(ctx);
 
       ctx.on('config', ({ k, v }) => {
-        if (k === 'skyDebugTonemap') uniforms.uDebugTonemap.value = v ? 1 : 0;
         if (k === 'skyDebugMode') uniforms.uDebugMode.value = v;
         if (k === 'skyMsScale') uniforms.uMsScale.value = v;
         if (k === 'skyMieScale') uniforms.uMieScale.value = v;
-        if (k === 'skyExposureHint') uniforms.uExposureHint.value = v;
         if (k === 'skyIrradiance') uniforms.uSolarIrradiance.value = v;
         if (k === 'ringBrightness') uniforms.uRingBrightness.value = v;
         if (k === 'planetBrightness') uniforms.uPlanetBrightness.value = v;
@@ -1060,9 +1063,10 @@ export function create(opts = {}) {
     updateLuts(ctx, force = false) {
       const s = uniforms.uSunDir.value;
       const key = `${s.x.toFixed(4)},${s.y.toFixed(4)},${s.z.toFixed(4)},${uniforms.uCamAltKm.value.toFixed(5)}`;
-      if (!force && key === _sunKey) return;
+      if (!force && key === _sunKey) return false;
       _sunKey = key;
       renderLut(ctx.renderer, svMat, svRT);
+      return true;
     },
 
     renderProbe(ctx) {
@@ -1085,10 +1089,15 @@ export function create(opts = {}) {
       if (!domeMesh) return;
       this.syncFromTime(ctx);
       uniforms.uCamAltKm.value = Math.max(ctx.camera.position.y, 0.4) * 0.001;
+      uniforms.uCirrusOffset.value.set(
+        ctx.clock.t * S.cirrusDrift, ctx.clock.t * S.cirrusDrift * 0.31);
       domeMesh.position.copy(ctx.camera.position);
       domeMesh.updateMatrixWorld(true);
-      this.updateLuts(ctx);
-      this.renderProbe(ctx);
+      const dirty = this.updateLuts(ctx);
+      // Six cube faces every frame is pure waste when the sun is static, but the probe
+      // must never go stale for `env`. Rebuild on a sun change, otherwise every 48
+      // frames — a fixed count, so captures stay byte-identical.
+      if (dirty || (ctx.clock.frame % 48) === 0) this.renderProbe(ctx);
     },
 
     /* ------------------------------------------------------------- public API */

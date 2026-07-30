@@ -64,7 +64,17 @@ export function makeRT(w, h, o = {}) {
  * (e.g. an AO buffer that a later pass samples) and the main chain is untouched.
  */
 export class Pass {
-  constructor(name) { this.name = name; this.enabled = true; this.needsSwap = true; }
+  constructor(name) {
+    this.name = name;
+    this.enabled = true;
+    this.needsSwap = true;
+    /** Set by the pipeline each frame: true when this pass writes the 8-bit default
+     *  framebuffer. A pass must NOT infer that from `out === null` — whether it is last
+     *  depends on which other passes happen to be enabled, so a pass that dithers or
+     *  quantises only when `out === null` silently becomes dead code the moment
+     *  anything is registered after it. */
+    this.writesBackbuffer = false;
+  }
   init(_ctx, _pipe) {}
   setSize(_w, _h) {}
   /** @param {THREE.WebGLRenderTarget|null} out  null = default framebuffer */
@@ -224,14 +234,21 @@ export class RenderPipeline {
     this.blit(this.sceneRT.texture, this.rtA);
 
     const active = this.passes.filter((p) => p.enabled && !p.scenePass);
+    // The last chain pass writes the 8-bit backbuffer; tell it so explicitly rather
+    // than making it guess from a null target (see Pass.writesBackbuffer).
+    const lastSwapIdx = active.reduce((acc, p, i) => (p.needsSwap === false ? acc : i), -1);
+    for (let i = 0; i < active.length; i++) active[i].writesBackbuffer = (i === lastSwapIdx);
+
     for (let i = 0; i < active.length; i++) {
       const p = active[i];
-      const last = i === active.length - 1;
+      const last = i === lastSwapIdx;
       if (p.needsSwap === false) { p.render(ctx, this, null); continue; }
       p.render(ctx, this, last ? null : this.write);
       if (!last) this.swap();
     }
-    if (active.length === 0) this.blit(this.read.texture, null);
+    // Nothing in the chain wrote the backbuffer (no passes at all, or every enabled
+    // pass is an off-chain producer like ssao) - present what we have.
+    if (lastSwapIdx === -1) this.blit(this.read.texture, null);
 
     // restore un-jittered projection so gameplay raycasts stay exact
     cam.projectionMatrix.copy(this.unjitteredProj);

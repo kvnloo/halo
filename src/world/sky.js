@@ -19,14 +19,32 @@ import { fsMaterial, FullScreenQuad, LAYER } from '../render/RenderPipeline.js';
  *        stars -> Threshold -> Halo ring -> sun disc   (all "space" radiance)
  *      then folds them through the atmosphere:
  *        L = space*T + inscatter*(1 - T*objectCoverage)
- *      which is why the ring dissolves into the horizon haze for free.
+ *      which is why the ring and Threshold dissolve into the horizon haze for free,
+ *      while the sky itself (coverage 0) keeps the full in-scatter integral.
+ *      A thin high-cirrus veil and a 0.3% dither go on last.
+ *   5. env probe: a 128px cube of the dome, rendered from a private scene so a
+ *      screen-space cloud pass on LAYER.SKY can never be dragged into it.
  *
- * Everything is linear HDR. The tonemap pass owns exposure.
+ * Everything is linear HDR. The tonemap pass owns exposure; these values are keyed so
+ * that AgX at the tonemap's own `keyedExposure()` (~0.67 for the reference rig) lands
+ * on the clip's measured sky.
  *
- * Placement of the ring / Threshold was measured off ref/keyframes/kf_00600.png and
- * kf_01500.png by back-projecting through the ref_00600 / ref_01500 camera poses;
- * docs/WORLD.md's azimuths for those two are in a different (rotated) convention and
- * do not reproduce the footage. Elevation, sun and everything else match the doc.
+ * Geometry note — the Halo ring is traced analytically as the inner surface of a
+ * cylinder the observer is standing on, so its centre line is a great circle through
+ * the zenith and its apparent width flares as 1/sin(elevation), exactly as in the
+ * footage. Its azimuth (162.5 deg) and Threshold's (az 210.4, el 24.3, 25.5 deg
+ * angular radius) were measured by back-projecting kf_00600 and kf_01500 through the
+ * ref_00600 / ref_01500 poses — the band's screen-space edges land within 1-6 px of
+ * the reference over 500 px of image. docs/WORLD.md's azimuths for these two are in a
+ * different (rotated) convention and do not reproduce the footage; its elevations, the
+ * sun and everything else do.
+ *
+ * Public API (consumed by `env`, `clouds`, `ocean`, `lighting`):
+ *   radiance(dir, target?)  -> THREE.Color, linear HDR sky radiance in a direction
+ *   getRenderTarget()       -> WebGLCubeRenderTarget, HalfFloat, ready to PMREM
+ *   cubeTexture / transmittanceTexture / skyViewTexture / multiScatterTexture
+ *   skyMaterialUniforms     -> the shared uniform block (sun dir, LUTs, tints)
+ *   zenithRadiance() / horizonRadiance()
  */
 
 const PI = Math.PI;
@@ -352,7 +370,6 @@ layout(location = 0) out vec4 oColor;
 uniform sampler2D tTransmittance;
 uniform sampler2D tSkyRayMie;
 uniform sampler2D tSkyMulti;
-uniform sampler2D tMsLut;
 
 uniform vec3  uSunDir;
 uniform vec3  uSunTint;
@@ -394,6 +411,8 @@ uniform vec3  uPlanetColC;
 uniform vec3  uPlanetColD;
 uniform float uPlanetSeed;
 
+/* ctx.config.skyDebugMode: 1 Rayleigh only, 2 Mie only, 3 multi-scatter only,
+ * 4 transmittance, 5/6/7 the raw sky-view LUT channels. 0 = normal. */
 uniform float uDebugMode;
 uniform float uMsScale;
 uniform float uMieScale;
@@ -694,12 +713,10 @@ void main(){
   col *= 1.0 + (hash12(gl_FragCoord.xy) - 0.5) * 0.006;
 
   if (uDebugMode > 3.5){
-    if (uDebugMode < 4.5) col = Tview;
-    else if (uDebugMode < 5.5) col = rm.rgb * 3.0;
-    else if (uDebugMode < 6.5) col = vec3(rm.a) * 30.0;
-    else if (uDebugMode < 7.5) col = ms * 3.0;
-    else if (uDebugMode < 8.5) col = texture(tMsLut, gl_FragCoord.xy/vec2(1920.0,1080.0)).rgb;
-    else col = texture(tTransmittance, gl_FragCoord.xy/vec2(1920.0,1080.0)).rgb;
+    if (uDebugMode < 4.5) col = Tview;                 // transmittance to space
+    else if (uDebugMode < 5.5) col = rm.rgb * 3.0;     // Rayleigh integral, no phase
+    else if (uDebugMode < 6.5) col = vec3(rm.a) * 30.0;// Mie integral, no phase
+    else col = ms * 3.0;                               // multiple scattering
   }
 
   col = max(col, vec3(0.0));
@@ -749,7 +766,6 @@ export function create(opts = {}) {
     tTransmittance: { value: null },
     tSkyRayMie: { value: null },
     tSkyMulti: { value: null },
-    tMsLut: { value: null },
 
     uSunDir: { value: new THREE.Vector3(0.666, 0.656, -0.354) },
     uSunTint: { value: new THREE.Color(1, 1, 1) },
@@ -960,7 +976,6 @@ export function create(opts = {}) {
         uGroundAlbedo: { value: S.groundAlbedo },
       });
       renderLut(renderer, msMat, msRT);
-      uniforms.tMsLut.value = msRT.texture;
 
       /* 3. sky-view (MRT: ray/mie + multi) */
       svRT = makeLutRT(256, 256, 2);

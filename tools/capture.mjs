@@ -68,7 +68,25 @@ async function main() {
 
   await waitForServer(base + '/index.html');
 
-  const browser = await puppeteer.launch({
+  // Several agents capture concurrently, so a handful of Chrome instances can be
+  // contending for the GPU at the same moment. Launch is the step that loses that race
+  // (GPU process startup, shader cache locks); retry it rather than failing a whole
+  // measurement run on a transient.
+  const launchWithRetry = async (opts, tries = 4) => {
+    let lastErr;
+    for (let i = 0; i < tries; i++) {
+      try { return await puppeteer.launch(opts); }
+      catch (e) {
+        lastErr = e;
+        const wait = 800 * (i + 1) + Math.floor(Math.random() * 700);
+        process.stderr.write(`[capture] browser launch failed (${i + 1}/${tries}): ${e.message.slice(0, 120)} — retrying in ${wait}ms\n`);
+        await new Promise((r) => setTimeout(r, wait));
+      }
+    }
+    throw lastErr;
+  };
+
+  const browser = await launchWithRetry({
     headless: 'new',
     executablePath: '/usr/bin/google-chrome-stable',
     args: [
@@ -85,6 +103,7 @@ async function main() {
   });
 
   const page = await browser.newPage();
+  page.setDefaultTimeout(OPT.timeout);
   const logs = [];
   page.on('console', (m) => { const t = m.text(); logs.push(`[${m.type()}] ${t}`); if (OPT.verbose) console.error(' ', t.slice(0, 300)); });
   page.on('pageerror', (e) => logs.push('[pageerror] ' + e.message));

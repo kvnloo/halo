@@ -189,3 +189,22 @@ A flat, untextured CG render lands near −3.0 on spectral slope and under 200 o
 `lap_var`. Getting to −2.6/463 is what "AAA texture density" actually means, and it
 comes from real high-frequency detail — not from a sharpen filter, which raises
 `lap_var` while pushing the slope the wrong way. The metric will catch that.
+
+## The blind test
+
+Numbers are necessary but not sufficient. The final gate is a blind comparison:
+
+```bash
+node tools/score.mjs --tag current                     # capture every matched pose
+node tools/blind.mjs --shots shots/current --out shots/blind
+# -> sheets showing two unlabelled frames, A and B, in randomised order.
+#    One is the real game. One is this build. The answer key is written OUTSIDE
+#    the repo so a reviewer working in-tree cannot find it.
+
+node tools/blind.mjs --score "ref_00000=A,ref_00450=B,..."   # reveal and tally
+```
+
+The bar is a reviewer who cannot reliably tell which is which. If you are a reviewer:
+look at the sheet, pick the one that looks better, and say why — **do not go looking
+for the key**. Guessing from telltales rather than from quality is the one way to make
+this measurement worthless.

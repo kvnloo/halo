@@ -211,9 +211,12 @@ void main(){
   float c3 = pfbm2(uv*18.0 + w*0.40 + 9.7, 18.0, 3) * 0.5 + 0.5;
   // Cell structure: broad weather systems carrying clusters of cumulus, not one
   // uniform field of blobs. c1 gates whether there is any convection here at all.
-  float sys = smoothstep(0.24, 0.78, c1);
-  float cov = clamp(c2 * 0.66 + c3 * 0.34, 0.0, 1.0);
-  cov = clamp(cov * (0.28 + 1.05 * sys), 0.0, 1.0);
+  float sys = smoothstep(0.20, 0.68, c1);
+  float cov = clamp(c2 * 0.62 + c3 * 0.38, 0.0, 1.0);
+  // Hard clustering. A uniform coverage field gives an even carpet of identical
+  // popcorn; the reference is one big congestus bank with clear blue lanes around it,
+  // which needs the system term to switch the deck almost fully on and fully off.
+  cov = clamp(cov * (0.08 + 1.55 * sys), 0.0, 1.0);
 
   // cloud type: 0 flat stratocumulus .. 1 tall congestus. Towers cluster where the
   // system field is strongest, which is what gives the reference its one big anvil
@@ -419,6 +422,18 @@ float lightMarch(vec3 p, float baseStep){
   return od;
 }
 
+/** Two upward taps: how much cloud is between this sample and the open sky.
+ *  Without it the ambient term is a constant wherever the sun march saturates, and the
+ *  whole underside of a big cloud comes out as one flat slate rectangle — which is
+ *  exactly what a cumulus base does NOT look like. Its structure comes from how thick
+ *  the cloud is directly overhead, and that is what this measures. */
+float ambientMarch(vec3 p, vec3 up){
+  vec3 a = p + up * 0.17;
+  vec3 b = p + up * 0.62;
+  return cloudDensity(a, heightFrac(a), true) * 0.34
+       + cloudDensity(b, heightFrac(b), true) * 0.62;
+}
+
 void main(){
   vec2 ndc = vUv * 2.0 - 1.0;
   vec3 rd = normalize(uFwd + uRight * (ndc.x * uTanHalf * uAspect) + uUp * (ndc.y * uTanHalf));
@@ -504,7 +519,7 @@ void main(){
     sun *= uScatterGain;
 
     vec3 amb = mix(uAmbBottom, uAmbTop, clamp(h, 0.0, 1.0)) * uAmbGain;
-    amb *= 0.30 + 0.70 * exp(-od * uExtinction * 0.55);
+    amb *= 0.12 + 0.88 * exp(-ambientMarch(p, normalize(p)) * uExtinction * 0.85);
 
     vec3 S = (sunCol * sun + amb) * sigmaS;
     float Tstep = exp(-sigmaE * step);
@@ -520,11 +535,24 @@ void main(){
   float opacity = 1.0 - trans;
   if (opacity <= 0.0005){ oCol = vec4(0.0, 0.0, 0.0, 1.0); return; }
 
-  // Aerial perspective over the mean cloud distance. Without it the far deck is white
-  // paint; the reference's horizon band is pale blue haze with almost no contrast.
+  // Aerial perspective over the mean cloud distance.
+  //
+  // A cloud at distance d replaces a column of air that would otherwise have scattered
+  // light toward us. Approximating the air's in-scatter over 0..d as L_sky*(1 - Tatm),
+  // the correct composite is
+  //     L_out = L_cloud*Tatm*opacity + L_sky*(1 - opacity*Tatm)
+  // which in this buffer's (radiance, transmittance) encoding is exactly
+  //     L' = L*Tatm            T' = 1 - opacity*Tatm
+  // So the sky dome behind supplies the haze colour, per pixel, in the right direction,
+  // for free. Mixing toward a single uniform horizon colour instead — which is what
+  // this did first — painted the far deck as a hard white strip that was brighter than
+  // the sky it sat in, because one sampled direction cannot stand in for the whole
+  // horizon. Nothing here needs the sky's LUT parameterisation duplicated.
   float dist = distAccum / max(weightAccum, 1e-5);
   float Tatm = exp(-dist * uHazeK);
-  scatter = scatter * Tatm + uHazeColor * (1.0 - Tatm) * opacity;
+  scatter *= Tatm;
+  trans = 1.0 - opacity * Tatm;
+  opacity = 1.0 - trans;
 
   // Fade the very far deck out entirely so the band terminates instead of ending in a
   // hard line where the march distance is clamped.
@@ -636,12 +664,12 @@ export function create(opts = {}) {
     baseTileKm: 5.6,         // horizontal world period of the 128^3 shape volume
     baseTileYKm: 2.6,        // vertical period
     detailTileKm: 0.95,      // world period of the 32^3 erosion volume
-    weatherTileKm: 26.0,
-    weatherTile2Km: 11.0,
+    weatherTileKm: 34.0,
+    weatherTile2Km: 14.0,
     weatherOffsetKm: [0, 0],
 
     erode: 0.42,
-    edgeGain: 7.0,           // sharpness of the condensation boundary
+    edgeGain: 12.0,           // sharpness of the condensation boundary
     curlKm: 0.45,
     lightStepKm: 0.11,
 
@@ -650,20 +678,20 @@ export function create(opts = {}) {
     hgForward: 0.82,
     hgBack: -0.32,
     hgWeight: 0.36,
-    msAtten: 0.52,           // extinction decay per scattering octave
-    msContrib: 0.62,
-    msPhase: 0.58,
+    msAtten: 0.32,           // extinction decay per scattering octave
+    msContrib: 0.78,
+    msPhase: 0.55,
     powder: 0.62,
 
     sunScale: 1.0,           // solar irradiance -> cloud source term
-    scatterGain: 4.2,        // closes the 3-octave truncation, see the shader
+    scatterGain: 1.2,        // closes the 3-octave truncation, see the shader
     ambGain: 1.0,
     ambTopScale: 1.20,
     ambBottomScale: 0.70,
 
-    hazeK: 0.0125,           // 1/km aerial-perspective extinction on the deck
+    hazeK: 0.019,            // 1/km aerial-perspective extinction on the deck
     hazeScale: 1.05,
-    maxDistKm: 150.0,
+    maxDistKm: 118.0,
 
     windScale: 1.0,
     evolveRate: 0.0022,      // km/s of vertical drift through the shape volume
@@ -926,6 +954,9 @@ export function create(opts = {}) {
         if (k === 'cloudExtinction') { S.extinction = v; set('uExtinction', v); }
         if (k === 'cloudErode') { S.erode = v; set('uErode', v); }
         if (k === 'cloudEdgeGain') { S.edgeGain = v; set('uEdgeGain', v); }
+        if (k === 'cloudMS') { S.msAtten = v[0]; S.msContrib = v[1]; S.msPhase = v[2];
+          U.uMSa.value = v[0]; U.uMSb.value = v[1]; U.uMSc.value = v[2]; invalidateHistory(); }
+        if (k === 'cloudAmbBotScale') { S.ambBottomScale = v; sunKey = ''; invalidateHistory(); }
         if (k === 'cloudLightStep') { S.lightStepKm = v; set('uLightStep', v); }
         if (k === 'cloudPowder') { S.powder = v; set('uPowder', v); }
         if (k === 'cloudHazeK') { S.hazeK = v; set('uHazeK', v); }

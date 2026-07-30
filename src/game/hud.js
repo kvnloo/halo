@@ -21,9 +21,9 @@
  * very thin, low-opacity MA5B reticle. Everything else appears on an event and
  * fades back out.
  *
- * Determinism: all animation phase comes from `ctx.clock.t`; jitter comes from
- * `ctx.rand.fork('hud')`. No Math.random / Date.now / performance.now feeds a pixel
- * (performance.now is used only to report this module's own CPU cost).
+ * Determinism: every animation phase is a pure function of `ctx.clock.t`, so two
+ * captures of the same pose draw the same HUD. No Math.random / Date.now feeds a
+ * pixel; performance.now is read only to report this module's own CPU cost.
  *
  * Implements the `hud` interface in docs/API.md:
  *   setHitMarker(kind)   'hit' | 'shield' | 'kill'
@@ -107,7 +107,6 @@ export function create(opts = {}) {
   let vignGrad = null;
   let unsub = [];
   let ctxRef = null;
-  let rnd = null;
 
   /* ================================================================== layout */
 
@@ -291,14 +290,14 @@ export function create(opts = {}) {
     // Trough. Deliberately light: an empty Halo shield bar is a dark translucent
     // channel you can still see the world through, not a row of grey tiles.
     c.lineWidth = sh.barW + 2.4 * u; arc(-1, 1);
-    c.strokeStyle = 'rgba(2,10,15,0.13)'; c.stroke();
+    c.strokeStyle = 'rgba(2,10,15,0.16)'; c.stroke();
     c.lineWidth = sh.barW; arc(-1, 1);
-    c.strokeStyle = 'rgba(16,46,60,0.13)'; c.stroke();
+    c.strokeStyle = 'rgba(16,46,60,0.15)'; c.stroke();
     // trough rails — give the empty bar a shape without giving it weight
     c.globalCompositeOperation = 'lighter';
     c.lineWidth = 1.0 * u;
-    arc(-1, 1, sh.barW * 0.5); c.strokeStyle = rgba(C_CYAN, 0.16); c.stroke();
-    arc(-1, 1, -sh.barW * 0.5); c.strokeStyle = rgba(C_CYAN, 0.11); c.stroke();
+    arc(-1, 1, sh.barW * 0.5); c.strokeStyle = rgba(C_CYAN, 0.24); c.stroke();
+    arc(-1, 1, -sh.barW * 0.5); c.strokeStyle = rgba(C_CYAN, 0.17); c.stroke();
     c.globalCompositeOperation = 'source-over';
 
     const f = clamp(S.shield, 0, 1);
@@ -870,7 +869,6 @@ export function create(opts = {}) {
 
     async init(ctx) {
       ctxRef = ctx;
-      rnd = ctx.rand?.fork ? ctx.rand.fork(0x48554400) : null;
       if (typeof document === 'undefined') return;
       host = document.getElementById('hud');
       if (!host) { console.warn('[hud] no #hud element; HUD disabled'); return; }
@@ -938,6 +936,12 @@ export function create(opts = {}) {
       buildTrackerChrome();
       buildBarScratch();
       vignGrad = null;
+      // Shape the HUD font once here rather than paying ~10 ms of first-layout cost
+      // on whichever frame happens to show the first pickup line.
+      g.font = `500 ${L.text.size.toFixed(1)}px "Segoe UI", Roboto, system-ui, sans-serif`;
+      try { g.letterSpacing = `${(L.text.size * 0.16).toFixed(2)}px`; } catch { /* noop */ }
+      g.measureText('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789');
+      try { g.letterSpacing = '0px'; } catch { /* noop */ }
       S.cleared = false;
     },
 

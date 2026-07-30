@@ -239,6 +239,14 @@ uniform vec3  uColB;
 
 const TRANS_EMIT = /* glsl */`
 {
+  // Baked canopy occlusion, applied to the *indirect* term only. Folding it into albedo
+  // instead (which is what this did first) darkens the sunlit faces as well and the crown
+  // comes out flat: measured, the interior-to-sunlit ratio was 1.34 against the
+  // reference's 2.4. Interior leaves see almost no sky, sunlit outer leaves see all of
+  // it — that difference *is* the contrast of a tree.
+  float vegAO = mix(uBaseAO, 1.0, vAO);
+  reflectedLight.indirectDiffuse *= vegAO;
+
   vec3 V = normalize(vViewPosition);          // surface -> camera
   vec3 L = uSunDirV;                          // surface -> sun
   vec3 N = normalize(normal);
@@ -246,7 +254,7 @@ const TRANS_EMIT = /* glsl */`
   float wrap = clamp(-dot(N, L) * 0.62 + 0.42, 0.0, 1.0);
   // tight view lobe: looking into the sun through the canopy
   float back = pow(clamp(dot(V, -L), 0.0, 1.0), uTransPower);
-  float amt  = wrap * (0.30 + uTransScale * back);
+  float amt  = wrap * (0.26 + uTransScale * back) * mix(0.30, 1.0, vAO);
   reflectedLight.indirectDiffuse += uSunRad * uTransColor * amt;
 }
 `;
@@ -297,7 +305,7 @@ function makeVegMaterial(ctx, U, o) {
   // mottling of a real crown into the mass.
   const fragBody = o.fragment || `
     float vegT = fract(vTint + vJit * 0.71);
-    diffuseColor.rgb *= mix(uColA, uColB, vegT) * mix(uBaseAO, 1.0, vAO);
+    diffuseColor.rgb *= mix(uColA, uColB, vegT);
   `;
 
   const vegHook = (shader) => {
@@ -493,8 +501,8 @@ function drawLeaf(buf, W, H, cx, cy, len, wid, ang, r, g, b) {
       if (d > 0.16) continue;
       const a = Math.min(1, Math.max(0, -d / 0.16));
       // midrib + a touch of shading toward the edge
-      const rib = 1 - 0.30 * Math.exp(-Math.abs(v) * 26);
-      const sh = 0.80 + 0.20 * (1 - Math.abs(v) / Math.max(half, 1e-3));
+      const rib = 1 - 0.22 * Math.exp(-Math.abs(v) * 26);
+      const sh = 0.86 + 0.14 * (1 - Math.abs(v) / Math.max(half, 1e-3));
       const k = rib * sh;
       const i = (y * W + x) * 4;
       const na = a;
@@ -584,6 +592,7 @@ function finishTexture(mips, ctx, alphaRef) {
  */
 function makeLeafAtlas(rand, ctx, S = 512) {
   const buf = new Float32Array(S * S * 4);
+  for (let i = 0; i < S * S; i++) { buf[i * 4] = 0.86; buf[i * 4 + 1] = 0.90; buf[i * 4 + 2] = 0.52; }
   const T = S / 2;
   for (let ty = 0; ty < 2; ty++) {
     for (let tx = 0; tx < 2; tx++) {
@@ -624,10 +633,10 @@ function makeLeafAtlas(rand, ctx, S = 512) {
         const ang = rand.range(0, Math.PI * 2);
         // olive / khaki, R ~= G with B about half — measured off the reference. The
         // 0.34..1.0 value range is the interior-shadow to sunlit-face spread.
-        const v = 0.34 + 0.66 * Math.pow(rand.next(), 0.75);
-        const yellow = 0.84 + 0.24 * rand.next();
+        const v = 0.74 + 0.26 * Math.pow(rand.next(), 0.7);
+        const yellow = 0.86 + 0.20 * rand.next();
         drawLeaf(buf, S, S, cx, cy, len, wid, ang,
-          0.92 * v * yellow, 0.98 * v, 0.48 * v * (1.10 - 0.25 * yellow));
+          1.00 * v * yellow, 1.00 * v, 0.62 * v * (1.10 - 0.22 * yellow));
       }
     }
   }
@@ -637,6 +646,7 @@ function makeLeafAtlas(rand, ctx, S = 512) {
 /** One hanging vine strand: small paired leaves down a thin stem, tapering out. */
 function makeVineStrip(rand, ctx, W = 128, H = 512) {
   const buf = new Float32Array(W * H * 4);
+  for (let i = 0; i < W * H; i++) { buf[i * 4] = 0.80; buf[i * 4 + 1] = 0.88; buf[i * 4 + 2] = 0.48; }
   const cx = W * 0.5;
   // stem
   for (let y = 0; y < H; y++) {
@@ -648,7 +658,7 @@ function makeVineStrip(rand, ctx, W = 128, H = 512) {
       if (d > 1) continue;
       const a = Math.min(1, Math.max(0, -d));
       const i = (y * W + x) * 4;
-      buf[i] = 0.42 * a; buf[i + 1] = 0.40 * a; buf[i + 2] = 0.20 * a;
+      buf[i] = 0.62; buf[i + 1] = 0.58; buf[i + 2] = 0.32;
       buf[i + 3] = Math.max(buf[i + 3], a);
     }
   }
@@ -663,9 +673,9 @@ function makeVineStrip(rand, ctx, W = 128, H = 512) {
     const wid = len * (0.66 + 0.26 * rand.next());
     const ang = side > 0 ? rand.range(0.20, 1.15) : Math.PI - rand.range(0.20, 1.15);
     const cxx = cx + wob + side * len * (0.35 + 0.5 * rand.next());
-    const v = 0.34 + 0.52 * rand.next();
+    const v = 0.68 + 0.32 * rand.next();
     drawLeaf(buf, W, H, cxx, y + rand.sym(4), len, wid, ang,
-      0.82 * v, 0.94 * v, 0.42 * v);
+      0.92 * v, 1.00 * v, 0.56 * v);
   }
   return finishTexture(buildAlphaMips(buf, W, H, 0.5), ctx, 0.5);
 }
@@ -1114,14 +1124,14 @@ export function create(opts = {}) {
 
       const matCanopy = makeVegMaterial(ctx, U, {
         key: 'canopy', map: leafTex, alphaTest: 0.42, roughness: 0.56,
-        colA: lin(0.215, 0.250, 0.082), colB: lin(0.135, 0.160, 0.052),
-        transColor: lin(0.40, 0.44, 0.115), transScale: 3.1, transPower: 3.4,
-        windAmp: 0.052, flutter: 1.35, segScale: 0.30, baseAO: 0.44,
+        colA: lin(0.335, 0.375, 0.118), colB: lin(0.196, 0.222, 0.070),
+        transColor: lin(0.44, 0.48, 0.125), transScale: 3.1, transPower: 3.4,
+        windAmp: 0.052, flutter: 1.35, segScale: 0.30, baseAO: 0.15,
         lod: [420, 620], widthGrow: 0.0,
       });
       const matBark = makeVegMaterial(ctx, U, {
         key: 'bark', roughness: 0.86, side: THREE.FrontSide,
-        colA: lin(0.098, 0.079, 0.052), colB: lin(0.052, 0.042, 0.030),
+        colA: lin(0.130, 0.104, 0.066), colB: lin(0.062, 0.049, 0.032),
         transColor: lin(0, 0, 0), transScale: 0.0, transPower: 1.0,
         windAmp: 0.055, flutter: 0.35, segScale: 1.0, baseAO: 1.0,
         lod: [900, 1400], widthGrow: 0.0,
@@ -1140,37 +1150,37 @@ export function create(opts = {}) {
       });
       const matGrass = makeVegMaterial(ctx, U, {
         key: 'grass', roughness: 0.74,
-        colA: lin(0.300, 0.240, 0.105), colB: lin(0.175, 0.170, 0.062),
+        colA: lin(0.330, 0.262, 0.115), colB: lin(0.196, 0.190, 0.070),
         transColor: lin(0.36, 0.33, 0.115), transScale: 2.6, transPower: 3.0,
-        windAmp: 0.30, flutter: 1.0, segScale: 1.0, baseAO: 0.30,
+        windAmp: 0.30, flutter: 1.0, segScale: 1.0, baseAO: 0.24,
         lod: [58, 96], widthGrow: 0.0085,
       });
       const matScrub = makeVegMaterial(ctx, U, {
         key: 'scrub', map: leafTex, alphaTest: 0.42, roughness: 0.70,
-        colA: lin(0.150, 0.150, 0.058), colB: lin(0.095, 0.100, 0.038),
+        colA: lin(0.235, 0.244, 0.086), colB: lin(0.132, 0.142, 0.048),
         transColor: lin(0.26, 0.28, 0.085), transScale: 2.4, transPower: 3.2,
-        windAmp: 0.13, flutter: 1.1, segScale: 1.0, baseAO: 0.36,
+        windAmp: 0.13, flutter: 1.1, segScale: 1.0, baseAO: 0.18,
         lod: [150, 230], widthGrow: 0.002,
       });
       const matMoss = makeVegMaterial(ctx, U, {
         key: 'moss', map: leafTex, alphaTest: 0.42, roughness: 0.72,
-        colA: lin(0.140, 0.152, 0.050), colB: lin(0.072, 0.082, 0.026),
+        colA: lin(0.245, 0.262, 0.084), colB: lin(0.110, 0.124, 0.036),
         transColor: lin(0.25, 0.28, 0.075), transScale: 2.5, transPower: 3.2,
-        windAmp: 0.075, flutter: 1.0, segScale: 1.0, baseAO: 0.30,
+        windAmp: 0.075, flutter: 1.0, segScale: 1.0, baseAO: 0.12,
         lod: [430, 640], widthGrow: 0.0,
       });
       const matIvy = makeVegMaterial(ctx, U, {
         key: 'ivy', map: leafTex, alphaTest: 0.42, roughness: 0.66,
-        colA: lin(0.108, 0.108, 0.038), colB: lin(0.056, 0.060, 0.020),
+        colA: lin(0.180, 0.184, 0.060), colB: lin(0.082, 0.090, 0.028),
         transColor: lin(0.22, 0.25, 0.070), transScale: 2.4, transPower: 3.2,
-        windAmp: 0.055, flutter: 0.9, segScale: 1.0, baseAO: 0.32,
+        windAmp: 0.055, flutter: 0.9, segScale: 1.0, baseAO: 0.14,
         lod: [280, 420], widthGrow: 0.0,
       });
       const matVine = makeVegMaterial(ctx, U, {
         key: 'vine', map: vineTex, alphaTest: 0.40, roughness: 0.64,
-        colA: lin(0.105, 0.115, 0.038), colB: lin(0.055, 0.062, 0.020),
+        colA: lin(0.170, 0.182, 0.058), colB: lin(0.080, 0.090, 0.028),
         transColor: lin(0.24, 0.27, 0.075), transScale: 2.8, transPower: 3.2,
-        windAmp: 0.115, flutter: 1.45, segScale: 1.0, baseAO: 0.55,
+        windAmp: 0.115, flutter: 1.45, segScale: 1.0, baseAO: 0.30,
         lod: [300, 460], widthGrow: 0.0,
       });
 

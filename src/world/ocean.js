@@ -347,15 +347,18 @@ vec3 oc_surface(vec2 p, float h, float lodAmp, out vec3 tx, out vec3 tz, out flo
     tz.x -= w.Q * kA * D.y * D.x * ct;
     tz.z -= w.Q * kA * D.y * D.y * ct;
     tz.y -= kA * D.y * st;
-    // crest indicator, and breaking weighted to the front face
+    // Crest indicator, and breaking confined to a narrow window around the crest.
+    // A wave aerates as it pitches forward, not over its whole profile: without this
+    // window the depth-limited clip (which is nonzero everywhere inside the surf zone)
+    // fills the entire bay with foam instead of drawing a breaker line.
     float c01 = ct * 0.5 + 0.5;
     crest += c01 * A;
-    brk = max(brk, w.brk * smoothstep(0.05, 0.72, c01) * step(0.02, A));
+    brk = max(brk, w.brk * smoothstep(0.55, 0.95, c01) * step(0.02, A));
   }
   float front;
   float sw = oc_swash(p, h, front);
   P.y += sw * lodAmp;
-  brk = max(brk, front * smoothstep(1.5, 0.15, h) * 0.85);
+  brk = max(brk, front * smoothstep(1.2, 0.10, h) * 0.72);
   return P;
 }
 `;
@@ -454,7 +457,10 @@ void main(){
 
   /* --- decay ------------------------------------------------------------------- */
   // deep-water foam dissipates fast; foam sitting in the swash lingers
-  float tau = mix(0.85, 2.6, shoal);
+  // Foam has to die faster than the wave period or successive breakers merge into one
+  // continuous sheet — which is exactly what happened at tau = 2.6 s against a 4.2 s
+  // swell. At 1.5 s each breaker leaves a separate band with clear water between.
+  float tau = mix(0.65, 1.55, shoal);
   foam *= exp(-uDt / tau);
   wet  *= exp(-uDt / 7.5);
 
@@ -465,12 +471,12 @@ void main(){
    * line and a bay filled with milk. */
   vec3 tx, tz; float brk, crest;
   vec3 S = oc_surface(p, h, 1.0, tx, tz, brk, crest);
-  foam += pow(brk, 2.6) * uFoamGain * uDt * 2.6;
+  foam += pow(brk, 3.0) * uFoamGain * uDt * 1.75;
 
   /* --- inject: the swash sheet -------------------------------------------------- */
   float col = S.y - oc_seabedY(p);
-  float sheet = smoothstep(0.20, 0.015, col) * step(0.0, col);
-  foam += sheet * uDt * 0.85;
+  float sheet = smoothstep(0.16, 0.012, col) * step(0.0, col);
+  foam += sheet * uDt * 0.55;
   wet   = max(wet, step(0.005, col));
 
   /* --- inject: waves hitting rock ------------------------------------------------
@@ -482,12 +488,12 @@ void main(){
     if (lm.w < 0.5) continue;
     float d = length(p - lm.xy) - lm.z;
     if (d > 9.0 || d < -6.0) continue;
-    float ring = exp(-max(d, 0.0) * 0.72) * smoothstep(-3.0, 0.6, d);
+    float ring = exp(-max(d, 0.0) * 0.85) * smoothstep(-2.5, 0.6, d);
     float pulse = pow(clamp(crest * 2.6, 0.0, 1.0), 2.0);
-    foam += ring * (0.2 + 0.8 * pulse) * uDt * 1.5 * smoothstep(0.2, 2.5, h);
+    foam += ring * (0.15 + 0.85 * pulse) * uDt * 1.25 * smoothstep(0.2, 2.5, h);
   }
 
-  oCol = vec4(clamp(foam, 0.0, 1.1), clamp(wet, 0.0, 1.0), 0.0, 1.0);
+  oCol = vec4(clamp(foam, 0.0, 1.0), clamp(wet, 0.0, 1.0), 0.0, 1.0);
 }
 `;
 
@@ -669,12 +675,15 @@ float causticNet(vec2 q, float t){
   return a + 0.55 * b;
 }
 vec3 caustics(vec2 p, float t, float depth){
-  vec2 q = p * 0.62;
-  float e = 0.020;
+  // Cell size scales with depth: the focal length of a wave lens is set by how far the
+  // light travels below it. At 0.62 m^-1 the network read as a 1.6 m honeycomb, which
+  // is the size of paving slabs, not of caustics in ankle-deep water.
+  vec2 q = p * (2.6 / (0.42 + 0.55 * clamp(depth, 0.0, 4.0)));
+  float e = 0.016;
   vec3 c = vec3(causticNet(q + vec2(e, 0.0), t), causticNet(q, t), causticNet(q - vec2(e, 0.0), t));
   // contrast collapses with depth as the focal caustic defocuses
-  float k = exp(-depth * 0.21);
-  return vec3(1.0) + (c - 0.42) * (1.55 * k * uCausticAmount);
+  float k = exp(-depth * 0.42);
+  return vec3(1.0) + (c - 0.40) * (0.95 * k * uCausticAmount);
 }
 
 /* ------------------------------------------------------------ detail normal map */
@@ -968,7 +977,7 @@ void main(){
     vec2 fs = texture(tFoam, fuv).rg;
     env = fs.x; wet = fs.y;
   }
-  env = max(env, pow(vBrk, 2.4) * 0.7);
+  env = max(env, pow(vBrk, 3.0) * 0.55);
 
   float foamCov = 0.0;
   vec3 foamCol = vec3(0.0);
@@ -980,9 +989,11 @@ void main(){
     float bv = smoothstep(0.90, 0.30, fp / 0.24);
     float tex = mix(0.58, lace, lv * 0.92) * mix(1.0, 0.50 + 1.0 * bub, bv * 0.65);
     tex *= 0.66 + 0.62 * (fbm2(fp2 * 0.60 + 71.0, 3) * 0.5 + 0.5);
-    // A hard threshold against a high-frequency field is what makes foam read as torn
-    // lace with holes in it rather than as a painted alpha wash.
-    foamCov = clamp(smoothstep(0.55, 1.02, env * (0.30 + 1.55 * tex)), 0.0, 1.0);
+    // Dissolve the density field against the texture rather than scaling it: a moving
+    // threshold makes foam grow by *filling in holes*, which is how real foam appears
+    // and disappears. Scaling an alpha makes it fade like a painted decal instead.
+    float thr = 1.06 - env * 1.18;
+    foamCov = clamp(smoothstep(thr, thr + 0.30, tex), 0.0, 1.0);
     // foam is a bright rough dielectric: mostly sky, a little sun, and it is never
     // pure white — the reference's brightest swash sits around 215, not 255
     foamCol = (uSkyAmbient * 1.05 + uSunColor * uSunIntensity * 0.085 * clamp(uSunDir.y, 0.0, 1.0))

@@ -231,6 +231,7 @@ uniform float uFalloffStart; // fraction of uRadius at which attenuation begins
 uniform float uAngleBias;    // sin of the minimum elevation above the tangent plane
 uniform float uFrame;
 uniform float uMaxRadiusPx;
+uniform float uDbg;
 out vec4 oCol;
 
 void main(){
@@ -258,6 +259,7 @@ void main(){
 
   float visibility = 0.0;
   vec3  bent = vec3(0.0);
+  float dbgTaps = 0.0, dbgHits = 0.0, dbgMaxAbove = -9.0, dbgMaxW = 0.0;
 
   for (int s = 0; s < SLICES; s++) {
     float phi = (float(s) + rotN) * PI / float(SLICES);
@@ -307,6 +309,7 @@ void main(){
 
         float slz = texture(tPrep, sUv).a;
         if (slz >= SKY_Z) continue;
+        dbgTaps += 1.0;
 
         vec3 D = viewPos(sUv, slz) - P;
         float dist = length(D);
@@ -331,6 +334,9 @@ void main(){
         // above the tangent plane) is just D.N/|D|.
         w *= smoothstep(0.0, uAngleBias, dot(D, N) / dist);
 
+        dbgMaxAbove = max(dbgMaxAbove, dot(D, N) / dist);
+        dbgMaxW = max(dbgMaxW, w);
+        if (w > 0.02) dbgHits += 1.0;
         sCos = mix(lowH, sCos, w);
 
         // Thin-occluder compensation — see the header. max() would latch a grass blade
@@ -370,6 +376,10 @@ void main(){
   // high ones — a systematic darkening of every grazing surface, which is most of a beach.
   // The clamp lives at the end of the temporal pass, after the average has been taken.
   float ao = clamp(visibility / float(SLICES), 0.0, 1.5);
+  if (uDbg > 3.5)      ao = clamp(lz / 60.0, 0.0, 1.0);
+  else if (uDbg > 2.5) ao = dbgMaxW;
+  else if (uDbg > 1.5) ao = clamp(dbgMaxAbove, 0.0, 1.0);
+  else if (uDbg > 0.5) ao = dbgTaps / float(SLICES * 2 * STEPS);
   vec3 bn = (dot(bent, bent) > 1e-8) ? normalize(bent) : N;
   // The bent normal must stay in the upper hemisphere of the geometric normal; the
   // closed form can dip below it when both horizons are extreme.
@@ -582,7 +592,11 @@ void main(){
 
   vec3 mul = mix(vec3(1.0), occ, w * cover);
 
-  if (uDebug > 4.5)      { oCol = vec4(vec3(fract(linZ * 0.05)), 1.0); return; }
+  if (uDebug > 5.5) {
+    float dd = texture(tDepth, vUv).r;
+    oCol = vec4(fract(dd * 1000.0), (dd - 0.99) * 100.0, dd, 1.0); return;
+  }
+  else if (uDebug > 4.5) { oCol = vec4(vec3(fract(linZ * 0.05)), 1.0); return; }
   else if (uDebug > 3.5) { oCol = vec4(N * 0.5 + 0.5, 1.0); return; }
   else if (uDebug > 2.5) { oCol = vec4(vec3(w * cover), 1.0); return; }
   else if (uDebug > 1.5) { oCol = vec4(bentN * 0.5 + 0.5, 1.0); return; }
@@ -671,6 +685,7 @@ export function create(opts = {}) {
       uRadius: { value: cfg.radius }, uThickness: { value: cfg.thickness },
       uFalloffStart: { value: cfg.falloffStart }, uFrame: { value: 0 },
       uAngleBias: { value: cfg.angleBias }, uMaxRadiusPx: { value: cfg.maxRadiusPx },
+      uDbg: { value: 0 },
     }, D);
 
     blurMat = fsMaterial(DENOISE_FRAG, {
@@ -778,6 +793,7 @@ export function create(opts = {}) {
       // Animated from the pipeline's own frame counter, never a clock — two runs of the
       // same capture must produce the same slice rotations on every frame.
       u.uFrame.value = pipe.frameIndex % 64;
+      u.uDbg.value = c.aoGtaoDbg ?? 0;
       quad.material = gtaoMat;
       r.setRenderTarget(gtaoRT);
       quad.render(r);

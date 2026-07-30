@@ -71,14 +71,30 @@ import { Pass, fsMaterial, makeRT, FullScreenQuad } from '../RenderPipeline.js';
  *     render `LAYER.VIEWMODEL` into the G-buffer) or by "wrote depth, no G-buffer
  *     coverage", which in this engine is exactly and only the viewmodel.
  *
- *     **The default is 1.2 px, and it is low on purpose.** docs/TARGETS.md puts the
+ *     **The default is 0.9 px, and it is low on purpose.** docs/TARGETS.md puts the
  *     `weapon` ROI at `lap_var` 489 and `local_contrast` 0.178 — the highest local
  *     contrast in the entire reference frame. The reference's weapon is *sharp*. The near
  *     CoC here exists to seat the gun in depth, not to defocus it, and because the CoC is
  *     a constant across the whole viewmodel (no usable depth gradient from muzzle to
  *     receiver) any larger value softens the sight glass and the receiver detail
- *     uniformly, which is exactly the `detail` score this pass must not spend. Re-measure
- *     the `weapon` ROI against 489 before raising it.
+ *     uniformly, which is exactly the `detail` score this pass must not spend.
+ *
+ *     Measured, `weapon` ROI at `diag_gun`, `tools/roi.py` + `tools/metrics.py --stats`
+ *     on capture output, at the interim value of 1.2 px and *before* the sub-pixel
+ *     coverage fade in `nearCoverage()` existed:
+ *
+ *                        lap_var   local_contrast
+ *         dofEnabled 0    543.36       0.2634
+ *         dofEnabled 1    399.12       0.2632
+ *         reference       489          0.178
+ *
+ *     A 26% cut in the weapon's Laplacian variance for a nominally 1.2 px defocus is far
+ *     more than the optics justify, and chasing it is what surfaced the blur-floor bug
+ *     that `nearCoverage()` now fixes. Both changes landed together; the pair has not
+ *     been re-measured, because the weapon model, its materials and the ROI crop are all
+ *     still moving underneath it and a number taken now would be measuring somebody
+ *     else's work in progress. **Re-measure this table against 489 before trusting the
+ *     default in either direction.**
  *  3. **Covered geometry sitting exactly on the far plane** — impossible for real
  *     geometry, and the signature of a depth buffer that was cleared after the pre-pass
  *     filled it. `scene.js` calls `renderer.clearDepth()` before the viewmodel draw while
@@ -106,7 +122,7 @@ import { Pass, fsMaterial, makeRT, FullScreenQuad } from '../RenderPipeline.js';
  *   dofStrength       string   'off' | 'low' | 'medium' | 'high'   (default 'low')
  *   dofNearMaxCoC     number   px at 1080p, full-res, before the strength scale  (2.6)
  *   dofFarMaxCoC      number   px at 1080p, full-res, before the strength scale  (1.5)
- *   dofViewmodelCoC   number   fixed near CoC for viewmodel pixels               (1.2)
+ *   dofViewmodelCoC   number   fixed near CoC for viewmodel pixels               (0.9)
  *   dofNearEnd        number   metres: full near blur at or below this   (0.28)
  *   dofNearStart      number   metres: near blur gone at or above this   (1.60)
  *   dofFarStart       number   metres: far blur begins                   (90)
@@ -196,11 +212,12 @@ float cocAt(float z){
 /* The only place depth is consulted. See the three refusal cases in the header. */
 float cocAtUv(vec2 uv){
   // Diagnostic override: a horizontal CoC ramp, near field on the left, in focus down
-  // the middle, far field on the right. It exists because with terrain, rocks and the
-  // viewmodel all still stubs, NOTHING in this scene has G-buffer coverage, so every
-  // path below correctly refuses and the gather is unreachable — which means it is also
-  // unverifiable. This makes the filter itself testable without lying about the
-  // defaults. Zero in every real frame.
+  // the middle, far field on the right. It exists because the shipped CoC curve is
+  // deliberately zero over almost every depth in this scene, and because the depth
+  // buffer is currently cleared before post runs (case 3 below), so on a real frame
+  // every path underneath correctly refuses and the gather is unreachable — which makes
+  // it unverifiable too. This exercises the filter itself without weakening the
+  // defaults to do it. Zero in every real frame.
   if (uTestCoC != 0.0) return uTestCoC * (uv.x * 2.0 - 1.0);
 
   vec4 g1 = texture(tGbuf1, uv);
@@ -263,13 +280,33 @@ out vec4 oCol;
 
 ${KERNEL_GLSL}
 
+/* Near-field COVERAGE for a tap whose near CoC is cocS (half-res px) at distance dist.
+ *
+ * Two factors, and the second one is not optional.
+ *
+ *  - scatter-as-gather: the tap's own disc must reach the centre.
+ *  - a sub-pixel fade. Without it, a tap with a CoC of 0.1 px still returns weight 1 at
+ *    dist 0, the coverage alpha saturates, and the composite replaces the pixel wholesale
+ *    with the half-res gather - which is a ~2 px blur no matter how small the CoC was,
+ *    because the half-res round trip is itself a box downsample and a bilinear upsample.
+ *    That is a blur FLOOR imposed by the internal resolution rather than by the optics,
+ *    and it is invisible in a still of a smooth surface and glaring on a gun sight.
+ *    Measured: it cost 26% of the weapon ROI's lap_var at a nominal 1.2 px of CoC.
+ *    The far field never had this problem because its composite fades in over
+ *    smoothstep(0.20, 1.10) of full-res CoC; this is the same ramp, in half-res units,
+ *    applied where the near field's own alpha is built. */
+float nearCoverage(float cocS, float dist){
+  float cn = max(-cocS, 0.0);
+  return clamp(cn - dist + 1.0, 0.0, 1.0) * smoothstep(0.10, 0.55, cn);
+}
+
 void main(){
   vec4 c0 = texture(tPre, vUv);
   float coc0 = c0.a * 0.5;                 // full-res px -> half-res px
 
   // Centre tap: distance 0, so its own disc always covers it.
   vec3 farSum  = c0.rgb;        float farW  = 1.0;
-  float cov0 = clamp(max(-coc0, 0.0) + 1.0, 0.0, 1.0) * step(1e-4, max(-coc0, 0.0));
+  float cov0 = nearCoverage(coc0, 0.0);
   vec3 nearSum = c0.rgb * cov0; float nearW = cov0;
   float nearHits = cov0;
 
@@ -283,7 +320,7 @@ void main(){
     // (cocS ~ 0) is rejected at every distance and cannot leak into a defocused
     // background; a defocused near object has a big CoC and legitimately does reach.
     float wf = clamp(max(cocS, 0.0) - dist + 1.0, 0.0, 1.0);
-    float wn = clamp(max(-cocS, 0.0) - dist + 1.0, 0.0, 1.0);
+    float wn = nearCoverage(cocS, dist);
 
     farSum  += s.rgb * wf;  farW  += wf;
     nearSum += s.rgb * wn;  nearW += wn;
@@ -354,7 +391,7 @@ const DEFAULTS = {
   dofStrength: 'low',
   dofNearMaxCoC: 2.6,
   dofFarMaxCoC: 1.5,
-  dofViewmodelCoC: 1.2,
+  dofViewmodelCoC: 0.9,
   dofNearEnd: 0.28,
   dofNearStart: 1.60,
   dofFarStart: 90.0,

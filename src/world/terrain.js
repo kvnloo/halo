@@ -215,6 +215,32 @@ float tShoreZ(vec2 P, vec4 sh){
   return TZW0 + (P.y - TZW0 - sh.x) / max(sh.y, 0.12);
 }
 
+/** Worley cell: x = F1 distance, y = F2, z = a per-cell hash. The per-cell hash is the
+ *  whole point — it lets the fragment shader give every cobble the vertex shader lifted
+ *  out of the sand its own albedo, from near-black basalt to pale quartz. Cobbles whose
+ *  shading is uncorrelated with their shape read as noise; correlated, they read as
+ *  stones, and that correlation is most of the reference's lum_std and edge density. */
+vec3 tCell(vec2 p){
+  vec2 n = floor(p), f = fract(p);
+  float f1 = 8.0, f2 = 8.0; vec2 best = n;
+  for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++){
+    vec2 g = vec2(float(i), float(j));
+    vec2 c = n + g;
+    vec2 o = hash22(c);
+    // squash cells slightly so stones are ellipsoids, not marbles
+    vec2 dv = g + o - f;
+    float d = length(dv * vec2(1.0, 0.74 + 0.5 * hash12(c + 5.1)));
+    if (d < f1){ f2 = f1; f1 = d; best = c; } else if (d < f2){ f2 = d; }
+  }
+  return vec3(f1, f2, hash12(best + 3.7));
+}
+
+/** Shared by the displacement and the splat so stone shading tracks stone geometry. */
+float tCobbleMask(vec2 P, float alongshore, float y){
+  float m = alongshore * smoothstep(-0.16, 0.30, fbm2(P * 0.42 + 61.0, 3));
+  return m * (1.0 - smoothstep(3.6, 6.4, y));
+}
+
 /* ---- the layers, cheapest first. lod gates the expensive ones by clipmap level. */
 float tHeight(vec2 P, int lod){
   vec4 sh = tShoreAt(P.x);
@@ -264,24 +290,22 @@ float tHeight(vec2 P, int lod){
   }
 
   if (lod >= 2){
-    // Cobble cover is patchy, not a carpet: bare sand between drifts of shingle is
-    // what gives the ground its large-scale structure. A uniform pavement measures
-    // spectral_slope -1.6 (all high frequency) against the reference's -2.1.
-    float cob = sh.w * smoothstep(-0.10, 0.34, fbm2(P * 0.42 + 61.0, 3));
-    cob *= 1.0 - smoothstep(2.6, 5.2, y);                     // no cobbles high on the dune
+    float cob = tCobbleMask(P, sh.w, y);
     // two cobble scales: 22 cm pavement, 9 cm shingle
-    vec2 w1 = worley2(P * 4.6 + 13.0);
-    float c1 = clamp(1.0 - w1.x * 2.15, 0.0, 1.0); c1 = c1 * c1 * (3.0 - 2.0 * c1);
-    vec2 w2 = worley2(P * 11.3 + 41.0);
-    float c2 = clamp(1.0 - w2.x * 2.05, 0.0, 1.0); c2 = c2 * c2 * (3.0 - 2.0 * c2);
-    y += (c1 * 0.048 + c2 * 0.016) * cob * uTDetail;
+    vec3 w1 = tCell(P * 4.6 + 13.0);
+    float c1 = clamp(1.0 - w1.x * 2.05, 0.0, 1.0); c1 = c1 * c1 * (3.0 - 2.0 * c1);
+    vec3 w2 = tCell(P * 11.3 + 41.0);
+    float c2 = clamp(1.0 - w2.x * 1.95, 0.0, 1.0); c2 = c2 * c2 * (3.0 - 2.0 * c2);
+    y += (c1 * (0.030 + 0.055 * w1.z) + c2 * 0.014) * cob * uTDetail;
 
-    // wind ripples: crests perpendicular to the wind, only on damp/dry sand
-    float dry = smoothstep(0.10, 0.85, y) * (1.0 - smoothstep(4.2, 6.5, y));
+    // wind ripples: crests perpendicular to the wind, only on damp/dry sand, and
+    // patchy — an unbroken corduroy across the whole beach is a desert, not a shore
+    float dry = smoothstep(0.10, 0.85, y) * (1.0 - smoothstep(4.6, 7.0, y));
+    float patch = smoothstep(-0.22, 0.28, fbm2(P * 0.20 + 133.0, 3));
     float rw = fbm2(P * 0.34 + 5.0, 3);
     float ph = dot(P, uTWind) * 39.0 + rw * 5.2;
     float rip = sin(ph) * 0.62 + sin(ph * 0.41 + rw * 2.0) * 0.38;
-    y += rip * 0.014 * dry * (1.0 - cob * 0.7) * uTDetail;
+    y += rip * 0.013 * dry * patch * (1.0 - cob * 0.8) * uTDetail;
   }
 
   if (lod >= 3){
@@ -563,8 +587,7 @@ const SURFACE_FRAG = /* glsl */`
   sheet *= 0.45 + 0.55 * smoothstep(0.25, 0.75, fbm2(P * vec2(0.20, 0.9) + 61.0, 3) * 0.5 + 0.5);
 
   /* ---------------- layer weights -------------------------------------------- */
-  float cobD = clamp(sh.w * smoothstep(-0.10, 0.34, fbm2(P * 0.42 + 61.0, 3)) * (0.45 + 1.1 * mac.b), 0.0, 1.2)
-             * (1.0 - smoothstep(2.4, 5.0, wp.y));
+  float cobD = clamp(tCobbleMask(P, sh.w, wp.y) * (0.55 + 1.0 * mac.b), 0.0, 1.25);
   float shelf = smoothstep(-78.0, -66.0, P.x) * (1.0 - smoothstep(-24.0, -12.0, P.x))
               * smoothstep(-17.5, -13.0, P.y) * (1.0 - smoothstep(-4.0, 0.5, P.y));
   float rockW = clamp(shelf * 0.9 + smoothstep(0.42, 0.72, slope), 0.0, 1.0);
@@ -624,15 +647,37 @@ const SURFACE_FRAG = /* glsl */`
   vec3 alb = mix(dry, damp, smoothstep(0.02, 0.45, wet));
   alb = mix(alb, wetC, smoothstep(0.35, 0.92, wet));
 
-  // pebble pavement colour: dark basalt through pale quartz, sitting proud of the sand
-  {
-    float stone = smoothstep(0.14, 0.48, grav.b) * clamp(cobD, 0.0, 1.0);
-    vec3 sc = mix(vec3(0.0125, 0.0118, 0.0112), vec3(0.235, 0.212, 0.176), pow(grav.a, 1.35));
-    sc = mix(sc, sc * vec3(0.62, 0.74, 0.62), smoothstep(0.55, 0.95, wet) * 0.7);
-    alb = mix(alb, sc * tone, stone * 0.95);
-    // contact shading: stones bed into a dark rim of damp sand
-    alb *= 1.0 - smoothstep(0.34, 0.02, grav.b) * clamp(cobD, 0.0, 1.0) * 0.30;
+  /* Cobble pavement. Two layers of the SAME cell field the vertex shader displaced,
+   * so every stone that stands proud of the sand is also shaded as a stone. Beyond
+   * the range where the clipmap resolves them the field keeps going as pure albedo +
+   * normal, so the statistics do not cliff at the geometry's edge. */
+  float cobShade = 0.0;
+  float stoneTop = 0.0;
+  if (cobD > 0.004) {
+    vec3 cA = tCell(P * 4.6 + 13.0);
+    float mA = clamp(1.0 - cA.x * 2.05, 0.0, 1.0);
+    float sA = smoothstep(0.06, 0.42, mA) * clamp(cobD, 0.0, 1.0);
+    vec3 colA = mix(vec3(0.0085, 0.0080, 0.0076), vec3(0.285, 0.252, 0.205), pow(cA.z, 1.25));
+    colA = mix(colA, colA * vec3(0.58, 0.70, 0.58), smoothstep(0.45, 0.92, wet) * 0.75);
+    alb = mix(alb, colA * tone, sA * 0.97);
+
+    vec3 cB = tCell(P * 11.3 + 41.0);
+    float mB = clamp(1.0 - cB.x * 1.95, 0.0, 1.0);
+    float sB = smoothstep(0.10, 0.50, mB) * clamp(cobD, 0.0, 1.0) * (1.0 - sA * 0.7)
+             * clamp(1.0 - (dist - 5.0) / 16.0, 0.0, 1.0);
+    vec3 colB = mix(vec3(0.014, 0.0132, 0.0125), vec3(0.300, 0.268, 0.220), pow(cB.z, 1.15));
+    alb = mix(alb, colB * tone, sB * 0.92);
+
+    // the sand between the stones is shaded, damper and darker
+    cobShade = clamp(cobD, 0.0, 1.0) * (smoothstep(0.30, 0.02, mA) * 0.55 + smoothstep(0.34, 0.05, mB) * 0.25);
+    stoneTop = max(sA, sB);
+    // detail normal from the same cells, so the lighting agrees with the silhouette
+    float e = 0.012;
+    vec2 gA = vec2(tCell((P + vec2(e, 0.0)) * 4.6 + 13.0).x - cA.x,
+                   tCell((P + vec2(0.0, e)) * 4.6 + 13.0).x - cA.x) / e;
+    nDet = tBlendN(nDet, normalize(vec3(gA * 0.055 * clamp(cobD, 0.0, 1.0), 1.0)));
   }
+  alb *= 1.0 - cobShade * 0.40;
 
   // organic strandline: dark weed and shell wrack in a band above the swash
   {
@@ -658,9 +703,9 @@ const SURFACE_FRAG = /* glsl */`
   /* ---------------- occlusion -------------------------------------------------- */
   float ao = 1.0
     - (1.0 - micro.b) * 0.16 * mipFade
-    - (1.0 - meso.b) * 0.20
-    - smoothstep(0.30, 0.0, grav.b) * clamp(cobD, 0.0, 1.0) * 0.24;
-  ao = clamp(ao, 0.28, 1.0);
+    - (1.0 - meso.b) * 0.26
+    - smoothstep(0.32, 0.0, grav.b) * clamp(cobD, 0.0, 1.0) * 0.34;
+  ao = clamp(ao, 0.22, 1.0);
 
   diffuseColor.rgb = alb * ao;
   roughnessFactor = rough;
@@ -718,8 +763,8 @@ export function create(opts = {}) {
     uTHorizon: { value: new THREE.Vector3(0.30, 0.34, 0.40) },
     uTSunRad: { value: new THREE.Vector3(6, 5.6, 5) },
     uTSunDir: { value: new THREE.Vector3(0.6, 0.66, -0.45) },
-    uTDryCol: { value: new THREE.Vector3(0.315, 0.252, 0.163) },
-    uTWetCol: { value: new THREE.Vector3(0.062, 0.052, 0.041) },
+    uTDryCol: { value: new THREE.Vector3(0.300, 0.204, 0.114) },
+    uTWetCol: { value: new THREE.Vector3(0.052, 0.041, 0.031) },
     uTRockCol: { value: new THREE.Vector3(0.085, 0.079, 0.070) },
     uTWetLevel: { value: 0.42 },
     uTSpecBoost: { value: 1.0 },
@@ -955,24 +1000,44 @@ export function create(opts = {}) {
    * every future world material will hit; it is worked around here rather than fixed
    * because this task owns one file. See the report.
    */
-  function applyWorldMaterialWithCSM(mat, ctx, o) {
+  function applyWorldMaterialWithCSM(mat, ctx, o, post) {
     const noLighting = Object.assign({}, ctx, {
       get: (n, req) => (n === 'lighting' ? null : ctx.get(n, req)),
     });
     applyWorldMaterial(mat, noLighting, o);
     const wmChain = mat.onBeforeCompile;
     const lighting = ctx.get('lighting');
+    let csmChain = null;
     if (lighting?.registerMaterial) {
       lighting.registerMaterial(mat);
-      const csmChain = mat.onBeforeCompile;
-      if (csmChain !== wmChain) {
-        mat.onBeforeCompile = (shader, renderer) => {
-          csmChain(shader, renderer);
-          wmChain(shader, renderer);
-        };
-      }
+      if (mat.onBeforeCompile !== wmChain) csmChain = mat.onBeforeCompile;
     }
+    mat.onBeforeCompile = (shader, renderer) => {
+      csmChain?.(shader, renderer);
+      wmChain(shader, renderer);
+      post?.(shader, renderer);
+    };
     return mat;
+  }
+
+  /**
+   * The surface code has to be spliced in before <lights_physical_fragment>, not
+   * before <lights_fragment_begin> where applyWorldMaterial puts `inject.fragment`.
+   * By the time <lights_fragment_begin> runs, <lights_physical_fragment> has already
+   * copied diffuseColor, roughnessFactor and metalnessFactor into the `PhysicalMaterial`
+   * struct that the BRDF actually reads — so writes to those three from an
+   * `inject.fragment` block are dead code, and the surface renders as the untouched
+   * base material (albedo 1.0, which is how a sunlit beach measures lum_mean 183 and
+   * sat_mean 6). Writes to `normal` do work, which is what makes the bug look like a
+   * shading problem rather than a plumbing one.
+   *
+   * Reported rather than fixed in place: src/gfx/materialCommon.js is shared code
+   * this task does not own.
+   */
+  function injectSurface(shader, glsl) {
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <lights_physical_fragment>',
+      `{\n${glsl}\n}\n#include <lights_physical_fragment>`);
   }
 
   function buildSurfaceMaterial(ctx) {
@@ -994,9 +1059,8 @@ export function create(opts = {}) {
         key: 'terrain-surface',
         uniforms: Object.assign({}, fieldUniforms, surfUniforms),
         pars: SURFACE_PARS + FIELD_GLSL,
-        fragment: SURFACE_FRAG,
       },
-    });
+    }, (shader) => injectSurface(shader, SURFACE_FRAG));
     mat.allowOverride = false;
     return mat;
   }
@@ -1110,18 +1174,13 @@ export function create(opts = {}) {
       const m = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: rough, metalness: 0.0 });
       applyWorldMaterialWithCSM(m, ctx, {
         matId: MAT_ID.ROCK,
-        inject: {
-          key: `terrain-pebble-${rough}`,
-          uniforms: { uTSunDir: surfUniforms.uTSunDir },
-          pars: 'uniform vec3 uTSunDir;',
-          fragment: `
-            // damp stones near the waterline: darker, smoother, faint algae in the shade
-            float wetp = 1.0 - smoothstep(-0.05, 0.55, vWorldPositionWM.y);
-            diffuseColor.rgb *= mix(1.0, 0.44, wetp);
-            roughnessFactor = mix(roughnessFactor, 0.16, wetp * 0.85);
-          `,
-        },
-      });
+        inject: { key: `terrain-pebble-${rough}` },
+      }, (shader) => injectSurface(shader, `
+        // damp stones near the waterline: darker, smoother
+        float wetp = 1.0 - smoothstep(-0.05, 0.55, vWorldPositionWM.y);
+        diffuseColor.rgb *= mix(1.0, 0.40, wetp);
+        roughnessFactor = mix(roughnessFactor, 0.16, wetp * 0.85);
+      `));
       return m;
     };
     const matSmall = mkMat(0.78);

@@ -336,7 +336,6 @@ export function create(opts = {}) {
   let compMat = null, compQuad = null;
   let fogRT = null;
   let W = 0, H = 0, LW = 0, LH = 0;
-  let animT = 0;
 
   const invVP = new THREE.Matrix4();
   const identity = new THREE.Matrix4();
@@ -489,11 +488,22 @@ export function create(opts = {}) {
       1.0 + 0.015 * warmth,
       1.0 - 0.11 * warmth);
 
-    // Deterministic drift: accumulate the engine's own dt, and hold still when the
-    // capture harness freezes the world. The haze is advected by `time.wind` at a small
-    // fraction of the wind speed — dust in a boundary layer lags the free stream, and a
-    // haze bank that slides at 5 m/s reads as a moving texture rather than as air.
-    if (!c.frozen) animT += ctx.clock?.dt ?? 0;
+    // Drift is a pure function of `ctx.clock.t`, never an accumulator.
+    //
+    // This is not a style preference: the capture daemon reuses ONE page for many
+    // captures, and `__HALO__.setTime()` rewinds `clock.t` before each one. An
+    // accumulator that adds `clock.dt` every frame therefore carries every frame ever
+    // rendered by that page into the next capture, and two runs of
+    //   capture --pose ref_00000 --settle 48
+    // differ in the haze pattern by however much wall time the daemon happened to have
+    // been alive. That reproduced as a byte-level diff on the first determinism check
+    // here. Reading `clock.t` — which setTime resets — makes the frame a function of
+    // (pose, time, settle) alone, which is the contract.
+    //
+    // The haze is advected by `time.wind` at a small fraction of the wind speed: dust in
+    // a boundary layer lags the free stream, and a haze bank sliding at the full 5 m/s
+    // reads as a moving texture rather than as air.
+    const animT = c.frozen ? 0 : (ctx.clock?.t ?? 0);
     const wind = ctx.get('time')?.wind;
     const ns = u.uNoiseScale.value;   // noise-space units per world metre
     const drift = 0.08;               // fraction of the wind the haze actually follows

@@ -937,8 +937,12 @@ void main(){
     h -= 0.16 * smoothstep(0.32, 0.0, w2.x);
     h -= 0.13 * smoothstep(0.075, 0.0, w2.y - w2.x);
     h += 0.10 * (tfbm(p * 9.0, P * 9.0, 3) * 0.5 + 0.5);
+    h += 0.07 * (tfbm(p * 26.0, P * 26.0, 2) * 0.5 + 0.5);
   }
-  oCol = vec4(clamp(h * 0.5 + 0.5, 0.0, 1.0), 0.0, 0.0, 1.0);
+  // Both variants land in roughly -0.2 .. +0.75 raw. Encoding that as h*0.5+0.5 wastes
+  // three quarters of the 8-bit range and — worse — leaves the Sobel gradients tiny, so
+  // every derived normal comes out within a degree of flat. Stretch to fill 0..1.
+  oCol = vec4(clamp(h * 1.55 + 0.14, 0.0, 1.0), 0.0, 0.0, 1.0);
 }
 `;
 
@@ -1031,18 +1035,23 @@ mat3 r1 = rotY(0.9), r2 = rotY(2.1), r3 = rotY(-1.35);
 vec4 dA1 = triplanarNH(uNH_A, P,      Ng, 1.0/9.00,  4.0);
 vec4 dA2 = triplanarNH(uNH_A, r1 * P, Ng, 1.0/1.15,  5.0);
 vec4 dB1 = triplanarNH(uNH_B, r2 * P, Ng, 1.0/0.30,  6.0);
-vec3 nB2 = triplanarNormal(uNH_B, r3 * P, Ng, 1.0/0.055, 6.0);
+vec4 dB2 = triplanarNH(uNH_B, r3 * P, Ng, 1.0/0.055, 6.0);
 
 float k = uDetailAmt;
 vec3 nDet = Ng
-  + (dA1.xyz - Ng) * (1.00 * k)
-  + (dA2.xyz - Ng) * (0.95 * k)
-  + (dB1.xyz - Ng) * (0.70 * k)
-  + (nB2      - Ng) * (0.42 * k);
+  + (dA1.xyz - Ng) * (1.05 * k)
+  + (dA2.xyz - Ng) * (1.00 * k)
+  + (dB1.xyz - Ng) * (0.78 * k)
+  + (dB2.xyz - Ng) * (0.48 * k);
 nDet = normalize(nDet);
 
-float hA = dA1.w, hB = dA2.w, hC = dB1.w;
-float h = hA * 0.42 + hB * 0.31 + hC * 0.18 + 0.09;
+// Expand each scale over its useful band before it modulates anything: the raw maps
+// cluster around the middle and an un-stretched height buys almost no albedo variance.
+float hA = smoothstep(0.12, 0.90, dA1.w);
+float hB = smoothstep(0.12, 0.90, dA2.w);
+float hC = smoothstep(0.12, 0.90, dB1.w);
+float hD = smoothstep(0.15, 0.88, dB2.w);
+float h = hA * 0.38 + hB * 0.29 + hC * 0.20 + hD * 0.13;
 
 // ---- macro fields (procedural, so they never tile) ---------------------------
 float m1 = fbm3(P * 0.055, 4);
@@ -1064,9 +1073,10 @@ bed2 = smoothstep(0.0, 0.12, bed2) * (1.0 - smoothstep(0.6, 1.0, bed2));
 // octave multiplies albedo separately rather than through one blended height.
 vec3 alb = uColBase;
 alb *= 1.0 + uMacroAmt * (0.40 * m1 + 0.22 * m2);
-alb *= mix(0.60, 1.34, hA);
-alb *= mix(0.70, 1.26, hB);
-alb *= mix(0.80, 1.20, hC);
+alb *= mix(0.56, 1.38, hA);
+alb *= mix(0.66, 1.30, hB);
+alb *= mix(0.76, 1.24, hC);
+alb *= mix(0.86, 1.15, hD);
 // curvature wear: grime settles in the concavities, edges scrub clean and bright
 float grime = (1.0 - occ) * (0.45 + 0.55 * (1.0 - smoothstep(0.15, 0.62, h)));
 alb = mix(alb, uColGrime, clamp(grime * 0.95, 0.0, 0.82));
@@ -1268,53 +1278,58 @@ export function create(opts = {}) {
       };
 
       /* ---------------- detail maps ---------------- */
-      const A = bakeDetail(ctx, 1024, 0.0, 2.6);
-      const B = bakeDetail(ctx, 1024, 1.0, 2.0);
+      // The Sobel gradient is per-texel, so `strength` must carry the texel-to-world
+      // ratio: at 1024 px a one-texel difference is ~0.005 of the height range, and the
+      // first pass shipped 2.6 here, which flattened every detail normal to within 1°
+      // of the geometric normal. 16/13 puts strong features at 50-70°.
+      const A = bakeDetail(ctx, 1024, 0.0, 16.0);
+      const B = bakeDetail(ctx, 1024, 1.0, 13.0);
       disposables.push(...A.rts, ...B.rts);
 
       /* ---------------- materials ---------------- */
-      // Pale warm limestone. ref/detail/rock_4k.png is markedly lighter and yellower
-      // than default CG rock; the base albedo here is 0.46/0.425/0.345 linear, which
-      // is limestone, not concrete.
+      // Warm limestone. Rock-only boxes in kf_01500 measure R 125 / G 110 / B 82 on a
+      // lit face (lab_b +17, sat 95) — a tan, not the near-neutral pale grey a first
+      // read of the 4K crop suggests. In linear that is an albedo R/B ratio near 2.3,
+      // which is what these numbers encode.
       const matRock = makeRockMaterial(ctx, A.tex, B.tex, {
         key: 'rock-limestone',
-        base: C(0.455, 0.420, 0.338),
-        bright: C(0.640, 0.596, 0.478),
-        grime: C(0.150, 0.133, 0.104),
-        stain: C(0.196, 0.170, 0.124),
-        algae: C(0.052, 0.070, 0.034),
-        moss: C(0.043, 0.082, 0.027),
-        lichen: C(0.255, 0.268, 0.140),
-        bleach: C(0.660, 0.638, 0.560),
-        rough: 0.74, algaeAmt: 1.0, mossAmt: 1.0,
+        base: C(0.355, 0.256, 0.116),
+        bright: C(0.580, 0.448, 0.222),
+        grime: C(0.094, 0.066, 0.031),
+        stain: C(0.132, 0.090, 0.038),
+        algae: C(0.040, 0.050, 0.020),
+        moss: C(0.032, 0.062, 0.019),
+        lichen: C(0.235, 0.230, 0.104),
+        bleach: C(0.520, 0.470, 0.352),
+        rough: 0.76, algaeAmt: 1.0, mossAmt: 1.0,
       });
       // Beach and surf boulders read much darker and greener than the stacks —
       // permanently wet, permanently colonised.
       const matBoulder = makeRockMaterial(ctx, A.tex, B.tex, {
         key: 'rock-boulder',
-        base: C(0.180, 0.166, 0.132),
-        bright: C(0.300, 0.281, 0.226),
-        grime: C(0.058, 0.053, 0.044),
-        stain: C(0.086, 0.078, 0.058),
-        algae: C(0.046, 0.062, 0.030),
-        moss: C(0.040, 0.072, 0.026),
-        lichen: C(0.190, 0.200, 0.108),
-        bleach: C(0.400, 0.390, 0.350),
-        rough: 0.68, algaeAmt: 1.45, mossAmt: 0.5, macro: 1.25,
+        base: C(0.140, 0.112, 0.064),
+        bright: C(0.258, 0.216, 0.132),
+        grime: C(0.040, 0.034, 0.024),
+        stain: C(0.064, 0.052, 0.032),
+        algae: C(0.036, 0.046, 0.019),
+        moss: C(0.030, 0.055, 0.018),
+        lichen: C(0.165, 0.170, 0.082),
+        bleach: C(0.300, 0.284, 0.240),
+        rough: 0.70, algaeAmt: 1.5, mossAmt: 0.5, macro: 1.3,
       });
       // Far stacks and islets: pure silhouette work, so the expensive detail scales
       // are dialled down and AO is flattened — aerial perspective eats it all anyway.
       const matFar = makeRockMaterial(ctx, A.tex, B.tex, {
         key: 'rock-far',
-        base: C(0.455, 0.420, 0.338),
-        bright: C(0.610, 0.570, 0.460),
-        grime: C(0.165, 0.148, 0.116),
-        stain: C(0.200, 0.176, 0.130),
-        algae: C(0.060, 0.078, 0.040),
-        moss: C(0.048, 0.086, 0.030),
-        lichen: C(0.240, 0.252, 0.135),
-        bleach: C(0.640, 0.620, 0.550),
-        rough: 0.76, algaeAmt: 0.8, mossAmt: 0.9, detail: 0.55, ao: 0.7, macro: 0.8,
+        base: C(0.370, 0.272, 0.132),
+        bright: C(0.552, 0.434, 0.230),
+        grime: C(0.108, 0.086, 0.054),
+        stain: C(0.140, 0.106, 0.060),
+        algae: C(0.048, 0.058, 0.026),
+        moss: C(0.040, 0.070, 0.024),
+        lichen: C(0.225, 0.222, 0.104),
+        bleach: C(0.500, 0.458, 0.350),
+        rough: 0.78, algaeAmt: 0.8, mossAmt: 0.9, detail: 0.6, ao: 0.75, macro: 0.85,
       });
       materials.push(matRock, matBoulder, matFar);
 

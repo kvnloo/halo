@@ -437,7 +437,22 @@ export function create(opts = {}) {
     get swimming() { return swimming; },
     get dead() { return dead; },
     get moving() { return bobBlend > 0.08; },
+    /** Step-cycle phase in radians. 2π = one stride = two footfalls; a footfall is
+     *  emitted at every multiple of π, which is also where the vertical bob bottoms
+     *  out. A viewmodel that keeps its own bob accumulator should drive it from this
+     *  (or from `stepRate`) rather than from wall time, otherwise the two cycles beat
+     *  against each other and the gun visibly detaches from the walk. */
     get stepPhase() { return stepPhase; },
+    /** Current d(stepPhase)/dt in rad/s — 0 when not walking. */
+    get stepRate() {
+      if (!grounded || swimming) return 0;
+      const hs = Math.hypot(vel.x, vel.z);
+      if (hs <= 0.35) return 0;
+      const stride = clamp(T.strideBase + T.strideSlope * hs, 1.35, 3.2)
+                     * (crouching ? 0.86 : 1) * (1 + 0.25 * wade);
+      return TAU * hs / stride;
+    },
+    get bobAmount() { return bobBlend; },
     get fov() { return fov; },
     get pointerLocked() { return locked; },
     get captureMode() { return captureMode; },

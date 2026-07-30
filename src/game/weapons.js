@@ -60,6 +60,9 @@ const MOUNT_ROT = { pitch: 0.1658, yaw: 0.1571, roll: 0.1745 };   // 9.5 / 9 / 1
 const ADS_POS = new THREE.Vector3(0.052, -0.092, -0.335);
 const ADS_ROT = { pitch: 0.0524, yaw: 0.0262, roll: 0.0175 };
 
+/** Weapon centre of mass in local space; the sway/lag rig rotates about this. */
+const PIVOT = new THREE.Vector3(0, -0.010, -0.090);
+
 const DEG = Math.PI / 180;
 
 /* ========================================================================== */
@@ -1552,7 +1555,7 @@ export function create(opts = {}) {
       tex.weave = configureTexture(makeWeaveTex(texRand.fork(2), 256), ctx);
       tex.railN = configureTexture(makeRailNormalTex(texRand.fork(3)), ctx, { repeat: false });
 
-      const envInt = ctx.config.weaponEnvInt ?? 1.35;
+      const envInt = ctx.config.weaponEnvInt ?? 0.70;
       try { envRT = buildEnvProbe(ctx, envInt); } catch (e) { console.warn('[weapons] env probe failed', e); }
       const envMap = envRT ? envRT.texture : null;
 
@@ -1598,7 +1601,7 @@ export function create(opts = {}) {
         roughness: 0.10, metalness: 0.0,
         emissive: new THREE.Color(1, 1, 1),
         emissiveMap: counterTex,
-        emissiveIntensity: ctx.config.weaponScreenEmissive ?? 0.60,
+        emissiveIntensity: ctx.config.weaponScreenEmissive ?? 2.30,
         envMapIntensity: 1.0,
       });
       applyWorldMaterial(mats.screen, ctx, { matId: MAT_ID.VIEWMODEL, aerial: false, inject: { key: 'vm_screen' } });
@@ -1701,6 +1704,18 @@ export function create(opts = {}) {
       }
 
       /* ---------------------------------------------------------- wiring */
+      /* three only collects a light when light.layers.test(camera.layers) passes.
+       * Every scene light (CSM sun, sky hemisphere, warm bounce) sits on LAYER.DEFAULT,
+       * and passes/scene.js draws the viewmodel with a camera restricted to
+       * LAYER.VIEWMODEL — so before this the gun received *zero* direct light and was
+       * lit purely by its own IBL: flat, blue, and 26% too bright in the shadows.
+       * Verified with a sunScale=0 A/B: identical frame.
+       * Widening a light's mask is strictly additive — every camera that saw a light
+       * before still sees it — so nothing outside the viewmodel pass changes. */
+      const widenLights = () => c.scene.traverse((o) => { if (o.isLight) o.layers.enableAll(); });
+      widenLights();
+      c.on('engine:ready', widenLights);
+
       root.traverse((o) => { if (o !== root) o.layers.set(LAYER.VIEWMODEL); });
       root.layers.set(LAYER.VIEWMODEL);
       patchForGBuffer(root, { matId: MAT_ID.VIEWMODEL, roughness: 0.46 });
@@ -1826,9 +1841,9 @@ export function create(opts = {}) {
       const swayK = (c.config.weaponSway ?? 1) * 0.35 * DEG;
 
       // idle sway: two incommensurate rates so it never reads as a loop
-      const s1 = 0.60 * Math.sin(T * 2.30) + 0.40 * Math.sin(T * 3.70 + 1.90);
-      const s2 = 0.55 * Math.sin(T * 1.90 + 2.40) + 0.45 * Math.sin(T * 3.10 + 0.60);
-      const s3 = 0.50 * Math.sin(T * 1.60 + 4.10) + 0.50 * Math.sin(T * 2.70 + 2.80);
+      const s1 = 0.66 * Math.sin(T * 2.51) + 0.34 * Math.sin(T * 1.13 + 1.90);
+      const s2 = 0.62 * Math.sin(T * 1.87 + 2.40) + 0.38 * Math.sin(T * 0.97 + 0.60);
+      const s3 = 0.58 * Math.sin(T * 1.44 + 4.10) + 0.42 * Math.sin(T * 2.29 + 2.80);
 
       // walk bob: figure of eight, vertical 1.4 cm / lateral 0.9 cm at full speed
       const bp = st.bobPhase;
@@ -1871,6 +1886,9 @@ export function create(opts = {}) {
 
       _e.set(pitch, yaw, roll, 'YXZ');
       _q.setFromEuler(_e);
+      // pivot the whole rig about the weapon's centre of mass
+      _v2.copy(PIVOT).applyQuaternion(_q);
+      localPos.add(_v2.sub(PIVOT));
       _m.compose(localPos, _q, _v.set(1, 1, 1));
       root.matrix.multiplyMatrices(cam.matrixWorld, _m);
       root.matrixWorldNeedsUpdate = true;

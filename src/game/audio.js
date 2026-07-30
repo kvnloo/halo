@@ -65,22 +65,24 @@ const IR_SPECS = {
   // Open beach: almost no late field, just a short bright wash off the sand and the
   // back-beach berm. Short tau, little HF damping.
   beach: {
-    dur: 0.85, tau: 0.155, rise: 0.006, k0: 0.78, k1: 0.24, gain: 0.80,
+    dur: 0.85, tau: 0.155, rise: 0.006, k0: 0.78, k1: 0.24, gain: 0.80, diff: 1.0,
     early: [{ t: 0.021, g: 0.30, w: 0.004 }, { t: 0.047, g: 0.17, w: 0.005 }],
   },
   // Under the Forerunner span: a hard flat deck 21.5 m overhead and two strut pairs.
   // 2 x 21.5 / 343 = 125 ms slap, plus its first repeat.
   bridge: {
-    dur: 1.45, tau: 0.33, rise: 0.008, k0: 0.66, k1: 0.13, gain: 1.20,
-    early: [{ t: 0.013, g: 0.55, w: 0.003 }, { t: 0.126, g: 0.62, w: 0.006 },
-            { t: 0.252, g: 0.31, w: 0.009 }, { t: 0.378, g: 0.15, w: 0.011 }],
+    dur: 1.45, tau: 0.33, rise: 0.008, k0: 0.66, k1: 0.13, gain: 1.20, diff: 0.70,
+    early: [{ t: 0.013, g: 0.55, w: 0.003 }, { t: 0.126, g: 0.90, w: 0.006 },
+            { t: 0.252, g: 0.42, w: 0.009 }, { t: 0.378, g: 0.20, w: 0.011 }],
   },
-  // Against the cliff: one loud discrete early reflection at ~268 ms and a long,
-  // heavily damped tail.
+  // Against the cliff face at Z = +62: from the spawn that is ~46 m, so 2 x 46 / 343
+  // = 268 ms of flight before the slapback returns. Outdoors there is almost nothing
+  // in between, so the diffuse floor is held well down (`diff`) — otherwise the tail
+  // buries its own echo and the space stops reading as a cliff at all.
   cliff: {
-    dur: 2.10, tau: 0.44, rise: 0.010, k0: 0.58, k1: 0.09, gain: 1.05,
-    early: [{ t: 0.268, g: 0.74, w: 0.010 }, { t: 0.404, g: 0.24, w: 0.012 },
-            { t: 0.536, g: 0.32, w: 0.014 }, { t: 0.802, g: 0.14, w: 0.018 }],
+    dur: 2.10, tau: 0.50, rise: 0.010, k0: 0.58, k1: 0.09, gain: 1.05, diff: 0.30,
+    early: [{ t: 0.268, g: 1.45, w: 0.010 }, { t: 0.404, g: 0.34, w: 0.012 },
+            { t: 0.536, g: 0.62, w: 0.014 }, { t: 0.802, g: 0.26, w: 0.018 }],
   },
 };
 
@@ -166,10 +168,11 @@ function makeIR(ac, spec, rnd) {
   for (let ch = 0; ch < 2; ch++) {
     const d = buf.getChannelData(ch);
     const rise = Math.max(1e-4, spec.rise);
+    const diff = spec.diff ?? 1;
     for (let i = 0; i < n; i++) {
       const t = i / sr;
       const a = Math.exp(-t / spec.tau) * (1 - Math.exp(-t / rise));
-      d[i] = (rnd.next() * 2 - 1) * a;
+      d[i] = (rnd.next() * 2 - 1) * a * diff;
     }
     for (const r of spec.early) {
       // Skew the two channels apart so the early field is decorrelated (wide), not
@@ -1094,6 +1097,8 @@ export function create(opts = {}) {
   let oceanOk = true;
   let shieldWasUp = true;
   let updMs = 0;
+  /** Live drivers, for the debug UI and for verifying the ocean sync is really on. */
+  const dbg = { boom: 0, hiss: 0, gust: 0, oceanSynced: false, env: null };
 
   const busOff = [];
 
@@ -1376,6 +1381,7 @@ export function create(opts = {}) {
 
         /* --- surf ------------------------------------------------------- */
         const { boom, hiss } = surfEnvelope(ambT, c, listenerPos[0], listenerPos[2]);
+        dbg.boom = boom; dbg.hiss = hiss; dbg.gust = gust;
         // Loudest at the waterline; falls off inland and with height.
         const dz = Math.abs(listenerPos[2] - WATERLINE_Z);
         const near = lerp(1.0, 0.30, smoothstep(4, 120, dz)) * lerp(1.0, 0.62, smoothstep(2, 26, listenerPos[1]));

@@ -42,6 +42,28 @@ actually owns:
 
 Raw data: `ref/roi_signatures.json`.
 
+### A caveat about regions — read this before chasing a number
+
+Regions are **fixed screen rectangles**, not semantic masks. The `sky` crop is simply
+the top-left of the frame; in most reference frames that is open sky, but in
+`kf_00720` it contains the cliff, and in `kf_01500` it contains a sea stack. The
+published targets are averaged over five frames, so they are a fair aim for a
+*finished* scene at a matched pose — and misleading for a half-built one.
+
+Concretely: measuring the `sky` region of a render that has a sky but no terrain
+against a reference frame whose `sky` region is half cliff compares two different
+things, and the delta will be dominated by the missing geometry rather than by
+anything the sky module did wrong.
+
+So:
+
+- While your subsystem is the *only* thing in the frame, use the region measurement to
+  track your own before/after, and treat the absolute delta to the reference as a
+  loose upper bound, not a target.
+- Only trust the absolute numbers once the scene is complete and the pose is matched.
+- If a number looks alarming, **look at both crops** before believing it:
+  `tools/roi.py` writes them out, and the Read tool will show them to you.
+
 ## What these numbers are telling you
 
 **The ground is the hardest part, not the sky.** `shoreline` and `water` carry the most

@@ -103,6 +103,18 @@ export function create() {
   const _cands = [];
   const _seen = new Set();
 
+  /** True only if the collider carries the fields its own type requires. */
+  function validCollider(c) {
+    if (!c || typeof c !== 'object') return false;
+    switch (c.type) {
+      case 'sphere': return !!c.center?.isVector3 && Number.isFinite(c.radius);
+      case 'box': return !!c.box?.isBox3 && !!c.box.min && !!c.box.max;
+      case 'capsule':
+      case 'cylinder': return !!c.a?.isVector3 && !!c.b?.isVector3 && Number.isFinite(c.radius);
+      default: return false;
+    }
+  }
+
   function computeAabb(c) {
     const box = new THREE.Box3();
     if (c.type === 'sphere') {
@@ -216,8 +228,21 @@ export function create() {
     },
 
     /* --------------------------------------------------------- statics */
+    /** Rejects malformed colliders rather than throwing. Colliders arrive from half a
+     *  dozen independently-authored modules; one bad entry must not take down the
+     *  world. Returns null and warns instead. */
     addStatic(c) {
-      if (c._registered) return c.id;
+      if (c?._registered) return c.id;
+      if (!validCollider(c)) {
+        if (!addStatic._warned) { addStatic._warned = new Set(); }
+        const k = `${c?.type}`;
+        if (!addStatic._warned.has(k)) {
+          addStatic._warned.add(k);
+          console.warn(`[physics] ignoring malformed collider (type="${c?.type}") — `
+            + `see docs/API.md for the required fields per type`);
+        }
+        return null;
+      }
       c.id = nextId++;
       c.mask = c.mask ?? MASK.WORLD;
       c.aabb = c.aabb || computeAabb(c);

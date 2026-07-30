@@ -130,12 +130,25 @@ export class Engine {
     for (let i = 0; i < n; i++) {
       const m = this.modules[i];
       onProgress(i / n, m.name);
-      if (m.init) {
-        const t0 = performance.now();
-        await m.init(this.ctx);
-        m._initMs = performance.now() - t0;
+      // One module throwing must not take down the whole build. Subsystems are authored
+      // independently and land at different times; a half-finished module should be
+      // reported and skipped, exactly like a missing one, so everything else can still
+      // be looked at and measured.
+      try {
+        if (m.init) {
+          const t0 = performance.now();
+          await m.init(this.ctx);
+          m._initMs = performance.now() - t0;
+        }
+        if (m.resize) m.resize(this.ctx.size.w, this.ctx.size.h, this.ctx);
+      } catch (e) {
+        m._failed = e;
+        m.enabled = false;
+        (this.failedModules ||= []).push({ name: m.name, error: String(e?.stack || e) });
+        console.error(`[engine] module "${m.name}" failed to init and was disabled:\n`, e);
+        // Unhook it so update/prerender never touch a half-built module.
+        m.update = m.prerender = m.resize = undefined;
       }
-      if (m.resize) m.resize(this.ctx.size.w, this.ctx.size.h, this.ctx);
     }
     onProgress(1, 'ready');
     this.initialised = true;

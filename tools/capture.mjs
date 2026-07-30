@@ -13,7 +13,7 @@
  */
 import puppeteer from 'puppeteer';
 import { spawn } from 'node:child_process';
-import { writeFileSync, mkdirSync, existsSync, openSync, closeSync, unlinkSync, readdirSync, statSync } from 'node:fs';
+import { writeFileSync, readFileSync, mkdirSync, existsSync, openSync, closeSync, unlinkSync, readdirSync, statSync } from 'node:fs';
 import { dirname, resolve, join as pjoin } from 'node:path';
 import { tmpdir } from 'node:os';
 import net from 'node:net';
@@ -101,11 +101,95 @@ async function waitForServer(url, ms = 60000) {
   throw new Error('vite did not come up at ' + url);
 }
 
+
+/* ------------------------------------------------------------ capture daemon --- */
+/**
+ * Delegate to the shared capture daemon when one is up (or can be started). It holds a
+ * single vite + Chrome for the whole machine, so memory stays O(1) in the number of
+ * concurrent agents instead of O(N). Any failure falls through to the standalone path
+ * below, so this is strictly an optimisation - it can never be the reason a build fails.
+ */
+const PORT_FILE = '/tmp/halo-captured.port';
+
+async function daemonPort() {
+  try {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (existsSync(PORT_FILE)) {
+      const p = readFileSync(PORT_FILE, 'utf8').trim();
+      try {
+        const r = await fetch(`http://127.0.0.1:${p}/health`, { signal: AbortSignal.timeout(2500) });
+        if (r.ok) return p;
+      } catch { }
+      try { unlinkSync(PORT_FILE); } catch { }   // stale
+    }
+    if (attempt === 0 && !process.env.HALO_NO_DAEMON) {
+      // start it detached and wait briefly for it to publish its port
+      try {
+        const child = spawn('node', ['tools/captured.mjs'],
+          { cwd: ROOT, detached: true, stdio: 'ignore' });
+        child.unref();
+      } catch { return null; }
+      for (let i = 0; i < 90; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
+        if (existsSync(PORT_FILE)) break;
+      }
+    } else return null;
+  }
+  return null;
+  } catch { return null; }
+}
+
+async function viaDaemon(poses, all = false) {
+  const port = await daemonPort();
+  if (!port) return null;
+  try {
+    const r = await fetch(`http://127.0.0.1:${port}/capture`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        poses, all, w: OPT.w, h: OPT.h, settle: OPT.settle, time: OPT.time,
+        seed: OPT.seed, only: OPT.only, skip: OPT.skip, video: OPT.video,
+      }),
+      // nine poses in one page load legitimately takes minutes under load
+      signal: AbortSignal.timeout(Math.max(OPT.timeout, (all ? 9 : (poses?.length || 1)) * 120000)),
+    });
+    if (!r.ok) return null;
+    const out = await r.json();
+    return out.ok ? out : null;
+  } catch { return null; }
+}
+
 async function main() {
+  // Fast path: a shared daemon already holds a vite + Chrome. No semaphore needed -
+  // the daemon bounds its own concurrency.
+  if (!OPT.port && !process.env.HALO_NO_DAEMON) {
+    {
+      const d = await viaDaemon(OPT.all ? null : [OPT.pose], OPT.all);
+      if (d) {
+        const files = [];
+        for (const [pose, urls] of Object.entries(d.shots)) {
+          urls.forEach((du, i) => {
+            const file = OPT.out && urls.length === 1
+              ? OPT.out
+              : `${OPT.outdir}/${pose}${urls.length > 1 ? '_' + String(i).padStart(4, '0') : ''}.png`;
+            const abs = resolve(ROOT, file);
+            mkdirSync(dirname(abs), { recursive: true });
+            writeFileSync(abs, Buffer.from(du.split(',')[1], 'base64'));
+            files.push(file);
+          });
+          process.stderr.write(`captured ${pose} (daemon)\n`);
+        }
+        if (d.missing?.length) console.error('[capture] modules not loaded: ' + d.missing.join(' | '));
+        console.log(JSON.stringify({ ok: true, via: 'daemon', files, stats: d.stats, warnings: d.warnings || [] }, null, 2));
+        return;
+      }
+    }
+  }
+
   await acquireSlot();          // bounded concurrency: see the semaphore above
   const port = OPT.port || await freePort();
   const server = spawn('node', ['node_modules/vite/bin/vite.js', '--port', String(port), '--strictPort', '--host', '127.0.0.1'],
-    { cwd: ROOT, stdio: OPT.verbose ? 'inherit' : 'ignore', env: { ...process.env, NODE_ENV: 'development' } });
+    { cwd: ROOT, stdio: OPT.verbose ? 'inherit' : 'ignore', env: { ...process.env, NODE_ENV: 'development', HALO_NO_HMR: '1' } });
   const base = `http://127.0.0.1:${port}`;
   const cleanup = () => { try { server.kill('SIGKILL'); } catch {} };
   process.on('exit', cleanup); process.on('SIGINT', () => { cleanup(); process.exit(1); });

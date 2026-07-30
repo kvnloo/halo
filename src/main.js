@@ -99,12 +99,16 @@ api.freeze = (v = true) => { engine.ctx.config.frozen = !!v; return v; };
 
 api.screenshot = () => canvas.toDataURL('image/png');
 
+api.failedModules = () => engine.failedModules || [];
+
 api.stats = () => ({
   ...engine.stats,
   frame: engine.clock.frame,
   t: engine.clock.t,
   gpu: engine.caps.renderer,
-  modules: engine.modules.map((m) => ({ name: m.name, ms: Math.round((m._initMs || 0) * 10) / 10 })),
+  modules: engine.modules.map((m) => ({ name: m.name, ms: Math.round((m._initMs || 0) * 10) / 10,
+    failed: m._failed ? String(m._failed).slice(0, 200) : undefined })),
+  failedModules: engine.failedModules || [],
 });
 
 api.setConfig = (k, v) => { engine.ctx.config[k] = v; engine.ctx.emit('config', { k, v }); return v; };

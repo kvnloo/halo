@@ -547,6 +547,8 @@ uniform mat4  uBridgeInv;
 uniform vec3  uAlloyDark;
 uniform vec3  uAlloyLight;
 uniform vec3  uAlloyWorn;
+uniform vec3  uTintWarm;
+uniform vec3  uTintCool;
 uniform vec3  uDustCol;
 uniform vec3  uEmisCol;
 uniform vec3  uBounceCol;
@@ -644,14 +646,31 @@ const ALLOY_FRAG = /* glsl */`
   dN += (tU * 0.9063 + tV * -0.4226) * (Jd.z * gd * 0.5 * uSeam);
 
   // --- base alloy ----------------------------------------------------------
-  // Weathered alloy is *cloudy*: broad tonal patches at several scales, not noise.
-  float mott = fbm2(uvp * 0.115, 4) * 0.5 + 0.5;
-  float mott2 = fbm2(uvp * 0.52 + 31.0, 4) * 0.5 + 0.5;
-  float mott3 = fbm2(uvp * 1.9 + 71.0, 3) * 0.5 + 0.5;
-  vec3 alb = mix(uAlloyDark, uAlloyLight, clamp(mott * 1.15 - 0.08, 0.0, 1.0));
-  alb *= 0.80 + 0.42 * mott2;                       // plate-scale value break-up
-  alb *= 0.90 + 0.20 * mott3;
-  alb *= 0.80 + 0.42 * cell;                        // panel-to-panel value step
+  // Weathered alloy is *cloudy*. Zoomed into kf_00000, the fascia is not a tinted
+  // grey with a seam grid drawn on it — it is mineral staining about 1-3 m across,
+  // pale patches against dark ones at nearly 2:1 in value, with the hue drifting
+  // *independently* of the value: some patches khaki (lab_b +5), some cold mauve
+  // (lab_b -5), green the minimum channel in all of them. That decorrelation is
+  // what makes it read as weathering rather than as lighting, and it is where the
+  // region's chroma comes from — sat_mean is the mean of *per-pixel* saturation,
+  // so it is bought with variety, not with a stronger tint on one uniform colour.
+  // (Measured: one flat tinted grey renders sat 11 however far the tint is pushed.)
+  float mott  = fbm2(uvp * 0.105, 4) * 0.5 + 0.5;        // ~10 m: which plate is light
+  float mott2 = fbm2(uvp * 0.44 + 31.0, 4) * 0.5 + 0.5;  // ~2.3 m: the staining itself
+  float mott3 = fbm2(uvp * 1.45 + 71.0, 3) * 0.5 + 0.5;  // ~0.7 m: patch edges
+  // fbm hardly ever leaves [0.35, 0.65], so each octave band has to be expanded
+  // before it reads as tone rather than as a faint haze over one flat grey.
+  float tone = clamp((mott - 0.5) * 1.75 + (mott2 - 0.5) * 2.30
+                   + (mott3 - 0.5) * 0.85 + 0.5, 0.0, 1.0);
+  vec3 alb = mix(uAlloyDark, uAlloyLight, tone);
+  alb *= 0.66 + 0.70 * cell;                        // panel-to-panel value step
+  // The hue field is the *difference* of two octave bands the tone already paid for,
+  // where the tone is their weighted sum — so hue and value decorrelate for free
+  // rather than for another four-octave fbm (measured: the extra fbm cost 0.5 ms/frame
+  // at diag_bridge and moved sat by 0.0).
+  float hue = clamp((mott3 - mott) * 2.1 + 0.5, 0.0, 1.0);
+  hue = mix(hue, hash12(vec2(Jv.y, Ju.y) * 0.77 + part * 8.3 + 4.4), 0.45);
+  alb *= mix(uTintCool, uTintWarm, hue);
   float rough = mix(0.35, 0.62, hash11(Ju.y * 2.3 + Jv.y * 5.7 + 1.9));
   rough += (mott2 - 0.5) * 0.14;
 
@@ -664,6 +683,9 @@ const ALLOY_FRAG = /* glsl */`
   float grain = vnoise2(uvp * 23.0) - 0.5;
   alb *= 1.0 + grain * 0.10 * lod;
   rough += grain * 0.05 * lod;
+  // 30 cm warm/cool speckle. Oxidation is patchy in hue as well as in value, and
+  // this is the band that survives to the pixel at 40-80 m where the deck sits.
+  alb.rb *= 1.0 + vec2(1.0, -1.0) * (vnoise2(uvp * 3.1 + 5.0) - 0.5) * 0.16 * lod;
 
   // --- vertical water streaking below every horizontal edge ---------------
   // The single strongest weathering cue in the reference: hard-edged dark runs
@@ -689,9 +711,14 @@ const ALLOY_FRAG = /* glsl */`
     float up = clamp(wN.y, 0.0, 1.0);
     float near = mix(0.35, 1.0, smoothstep(104.0, 6.0, bp.z));
     float dn = fbm2(vec2(bp.z * 0.31, lp.x * 0.55), 4) * 0.5 + 0.5;
-    float d = up * up * (0.18 + 0.82 * dn) * near * uDust;
-    d = clamp(d, 0.0, 0.80);
-    alb = mix(alb, uDustCol, d);
+    // Dust lies in drifts, not as a wash. A uniform 60% mix toward one ochre was
+    // erasing the plate structure on every upward face — which is exactly where
+    // the deck reads flattest in a capture. Expanded so bare alloy shows through
+    // where it has blown clear, capped lower, and its own value follows the plate
+    // underneath (thin dust over dark metal is dark dust).
+    float d = up * up * clamp((dn - 0.5) * 2.4 + 0.42, 0.0, 1.0) * near * uDust;
+    d = clamp(d, 0.0, 0.62);
+    alb = mix(alb, uDustCol * (0.70 + 0.60 * tone), d);
     rough = mix(rough, 0.95, d * 0.9);
   }
 
@@ -702,8 +729,12 @@ const ALLOY_FRAG = /* glsl */`
     float edge = smoothstep(0.04, 0.30, 1.0 - mx);
     float wn = vnoise2(uvp * 2.7) * 0.6 + vnoise2(uvp * 11.0) * 0.4;
     float wear = edge * smoothstep(0.18, 0.72, wn);
-    alb = mix(alb, uAlloyWorn, wear * 0.75);
-    rough = mix(rough, 0.16, wear * 0.75);
+    // The bright line along a Forerunner chamfer in the reference is *specular* —
+    // a polished-back roughness catching the sun — not a white paint stripe. Lean
+    // on the roughness drop and keep the albedo lift modest, or every rib in the
+    // coffer grid turns into a lit filament and the soffit loses its silhouette.
+    alb = mix(alb, uAlloyWorn, wear * 0.55);
+    rough = mix(rough, 0.16, wear * 0.80);
   }
 
   // --- recess ambient occlusion -------------------------------------------
@@ -807,20 +838,57 @@ export function create(opts = {}) {
   let mesh = null, mat = null;
   let haze = null, hazeMat = null;
   let hazeItems = [];
+  /**
+   * Alloy palette — linear albedo, measured off the reference rather than invented.
+   *
+   * The exposure key (`tonemap.keyedExposure`) puts a horizontal Lambertian surface
+   * of albedo 0.18 on code 128, so a sunlit deck reads its own albedo directly. The
+   * reference deck top reads 84-102, i.e. an effective albedo of ~0.11-0.14 once the
+   * dust layer is included — weathered alloy that has been rained on for 100,000
+   * years, not the 0.20+ of clean metal.
+   *
+   * The hue matters as much as the value. Every pure-alloy crop in kf_00000 has
+   * **green as its minimum channel** (lab_a +0.8 to +6.9), with lab_b swinging from
+   * -6 on cold mauve plates to +13 on the khaki soffit. So the family is a
+   * desaturated mauve-taupe, tinted per panel toward khaki or toward mauve.
+   */
+  const PALETTE = {
+    uAlloyDark: [0.076, 0.053, 0.056],   // lum 0.058  — stained / streaked plates
+    uAlloyLight: [0.206, 0.148, 0.152],  // lum 0.161  — clean plates
+    uAlloyWorn: [0.246, 0.202, 0.206],   // chamfer wear; specular does most of it
+    uDustCol: [0.205, 0.141, 0.078],     // dry beach dust, lum 0.150, warm ochre
+  };
   const uniforms = {
     uBridgeInv: { value: new THREE.Matrix4() },
-    uAlloyDark: { value: new THREE.Color(0.088, 0.084, 0.083) },
-    uAlloyLight: { value: new THREE.Color(0.205, 0.194, 0.183) },
-    uAlloyWorn: { value: new THREE.Color(0.330, 0.318, 0.300) },
-    uDustCol: { value: new THREE.Color(0.300, 0.248, 0.166) },
+    uAlloyDark: { value: new THREE.Color(...PALETTE.uAlloyDark) },
+    uAlloyLight: { value: new THREE.Color(...PALETTE.uAlloyLight) },
+    uAlloyWorn: { value: new THREE.Color(...PALETTE.uAlloyWorn) },
+    // per-panel hue swing, luminance-neutral so it does not fight the value step
+    uTintWarm: { value: new THREE.Color(1.10, 0.99, 0.74) },
+    uTintCool: { value: new THREE.Color(0.94, 0.96, 1.24) },
+    uDustCol: { value: new THREE.Color(...PALETTE.uDustCol) },
     uEmisCol: { value: new THREE.Color().setHex(0x7fd8ff, THREE.SRGBColorSpace) },
-    uBounceCol: { value: new THREE.Color(1.00, 0.72, 0.42) },
-    uEmisGain: { value: 2.2 },
+    uBounceCol: { value: new THREE.Color(1.00, 0.70, 0.38) },
+    // Accents in daylight, not lights. The strips have to survive a darker alloy
+    // without becoming the brightest thing on the bridge.
+    uEmisGain: { value: 1.15 },
     uSeam: { value: 1.0 },
     uStreak: { value: 1.0 },
     uDust: { value: 1.0 },
-    uBounce: { value: 0.75 },
+    uBounce: { value: 0.95 },
   };
+
+  /** `--config alloyGain=0.8` scales the whole albedo family, for the scheduled
+   *  post-Phase-3 grade calibration. Resolved once per frame; costs nothing. */
+  let alloyGain = 1;
+  function applyAlloyGain(g) {
+    if (g === alloyGain) return;
+    alloyGain = g;
+    for (const k in PALETTE) {
+      const c = PALETTE[k];
+      uniforms[k].value.setRGB(c[0] * g, c[1] * g, c[2] * g);
+    }
+  }
 
   const _m = new THREE.Matrix4();
   const _q = new THREE.Quaternion();
@@ -1005,6 +1073,7 @@ export function create(opts = {}) {
     update(dt, ctx) { },
 
     prerender(ctx) {
+      applyAlloyGain(ctx.config.alloyGain ?? 1);
       if (!haze) return;
       const time = ctx.get('time');
       const cam = ctx.camera;

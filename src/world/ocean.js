@@ -233,6 +233,14 @@ const OCEAN_COMMON = /* glsl */`
 const float OC_G = 9.81;
 const float OC_TAU = 6.283185307;
 
+/** Maximum vertical run-up above still water, in metres. Hunt's formula for this slope
+ *  (tan b ~ 0.084, H 0.7 m, L0 28 m -> Iribarren 0.53) gives R2% ~ 0.37 m. NOTHING the
+ *  ocean draws or reports may sit higher than this above the local seabed, and every
+ *  land gate in this module is measured against it. Without it the swash surge — which
+ *  is gated on a depth that is clamped to zero on land, and therefore carries no
+ *  information there — floods the entire map. */
+const float OC_RUNUP = 0.40;
+
 uniform vec4 uWaveA[NW];    // dir.x, dir.z, amplitude0, wavelength0
 uniform vec4 uWaveB[NW];    // omega, steepness, phase, 1/wavelength0
 uniform vec4 uChop[NC];     // dir.x, dir.z, amplitude0, wavelength0
@@ -259,7 +267,7 @@ float oc_depth(vec2 p){ return max(uSeaLevel - oc_seabedY(p), 0.0); }
 /* ---------------------------------------------------------------- shoaling ---- */
 /** Everything a shoaled wave needs at one point: wavenumber, amplitude after the
  *  breaker clip, phase skew, and how much amplitude the clip removed (= breaking). */
-struct OcWave { float k; float A; float Q; float skew; float brk; };
+struct OcWave { float k; float A; float Q; float skew; float brk; float Ab; };
 
 OcWave oc_wave(int i, float h){
   OcWave w;
@@ -292,6 +300,13 @@ OcWave oc_wave(int i, float h){
   w.brk = clamp((A - Ac) / max(A, 1e-4), 0.0, 1.0);
   w.A = Ac;
   w.k = k;
+  /* The clip removes real energy, and deleting it is what left the surf zone
+   * geometrically flat: by the time a wave is in the breaker line the model had already
+   * zeroed the thing that should be drawing the crest. Carry the removed amplitude
+   * forward as a BORE instead — a body of water riding on top of the still level with a
+   * steep shoreward face and a flat back. A bore cannot be taller than the water it is
+   * running over, hence the 0.60*h cap (which also makes it exactly zero on land). */
+  w.Ab = clamp(A - Ac, 0.0, 0.60 * h);
   // steepness ramps with shoaling; hard-clamped so the trochoid never self-intersects
   w.Q = min(b.y * (1.0 + 2.1 * w.brk + 1.3 * clamp(Ks - 1.0, 0.0, 1.5)), 0.92 / max(w.k * w.A * float(NW) * 0.30, 1e-3));
   // sawtooth the phase: steep front face, long flat back — a pitched breaker, not a sine
@@ -314,7 +329,13 @@ float oc_swash(vec2 p, float h, out float front){
   float s = sin(ph);
   // asymmetric: uprush occupies ~1/3 of the cycle
   float up = pow(clamp(s * 0.5 + 0.5, 0.0, 1.0), 0.55);
-  float shore = smoothstep(2.6, 0.0, h);
+  // `h` is max(seaLevel - bed, 0), so it is identically 0 over every dry pixel in the
+  // world and smoothstep(2.6, 0.0, h) evaluates to 1.0 out to infinity inland. Gating
+  // on it alone put +0.36 m of surge on the whole land mass. The second factor is the
+  // one that matters: it measures the bed's SIGNED elevation relative to still water
+  // and kills the surge at the Hunt run-up height above the local waterline contour.
+  float above = oc_seabedY(p) - uSeaLevel;
+  float shore = smoothstep(2.6, 0.0, h) * smoothstep(OC_RUNUP, -0.06, above);
   front = clamp(cos(ph), 0.0, 1.0) * shore;
   return (up - 0.42) * 0.62 * shore;
 }
@@ -330,7 +351,9 @@ vec3 oc_surface(vec2 p, float h, float lodAmp, out vec3 tx, out vec3 tz, out flo
     vec4 a = uWaveA[i]; vec4 b = uWaveB[i];
     OcWave w = oc_wave(i, h);
     float A = w.A * lodAmp;
-    if (A < 1.0e-4) continue;
+    // NB: test the bore too. A fully clipped band has A == 0 and is precisely the band
+    // that should be drawing a roller; skipping it here is what deleted the surf zone.
+    if (A + w.Ab * lodAmp < 1.0e-4) continue;
     vec2 D = a.xy;
     float th = w.k * dot(D, p) - b.x * uTime + b.z;
     float sk = sin(th);
@@ -340,6 +363,18 @@ vec3 oc_surface(vec2 p, float h, float lodAmp, out vec3 tx, out vec3 tz, out flo
     P.y  += A * ct;
     P.xz -= D * (w.Q * A * st);
     float kA = w.k * A * dth;
+    /* the broken part of the wave, as a roller sitting on the crest phase */
+    float Ab = w.Ab * lodAmp;
+    if (Ab > 1.0e-4){
+      float bp = clamp(ct * 0.5 + 0.5, 0.0, 1.0);
+      float bore = bp * bp * sqrt(bp);            // ~bp^2.5: narrow, locked to the crest
+      P.y += Ab * bore * 0.85;
+      // d(bore)/d(theta) = 2.5*bp^1.5 * d(bp)/d(theta), d(bp)/d(theta) = -0.5*st*dth
+      float dbd = 2.5 * bp * sqrt(bp) * (-0.5 * st * dth);
+      float kAb = w.k * Ab * 0.85 * dbd;
+      tx.y += kAb * D.x;
+      tz.y += kAb * D.y;
+    }
     // dP/dx and dP/dz of the trochoid
     tx.x -= w.Q * kA * D.x * D.x * ct;
     tx.z -= w.Q * kA * D.x * D.y * ct;
@@ -351,9 +386,15 @@ vec3 oc_surface(vec2 p, float h, float lodAmp, out vec3 tx, out vec3 tz, out flo
     // A wave aerates as it pitches forward, not over its whole profile: without this
     // window the depth-limited clip (which is nonzero everywhere inside the surf zone)
     // fills the entire bay with foam instead of drawing a breaker line.
+    // Crest indicator, and breaking confined to the pitching face of the wave. The
+    // window used to be smoothstep(0.55, 0.95) and the source was then cubed in the
+    // sim and cubed AGAIN at shading time — three independent suppressors stacked on
+    // one term, which is why the bay had no breaker line at all (frac>180 in the water
+    // crop measured 0.0001 against the reference's 0.0495). One window, no cube, and
+    // the gain is tuned once against that measurement.
     float c01 = ct * 0.5 + 0.5;
     crest += c01 * A;
-    brk = max(brk, w.brk * smoothstep(0.55, 0.95, c01) * step(0.02, A));
+    brk = max(brk, w.brk * smoothstep(0.35, 0.85, c01) * step(0.006, A + w.Ab));
   }
   float front;
   float sw = oc_swash(p, h, front);
@@ -465,19 +506,21 @@ void main(){
   wet  *= exp(-uDt / 7.5);
 
   /* --- inject: breaking crests --------------------------------------------------
-   * brk is how much amplitude the depth-limited clip removed. That is nonzero over
-   * the whole surf zone, but a wave only *aerates* right at the crest as it pitches,
-   * so the source is raised to a power: the difference between a plausible breaker
-   * line and a bay filled with milk. */
+   * brk is how much amplitude the depth-limited clip removed, already confined to the
+   * pitching face by the crest window inside oc_surface. It is NOT cubed here: the
+   * spatial confinement is the window's job, and stacking a cube on top of it (plus a
+   * third cube at shading time) is what suppressed the breaker line to nothing. */
   vec3 tx, tz; float brk, crest;
   vec3 S = oc_surface(p, h, 1.0, tx, tz, brk, crest);
-  foam += pow(brk, 3.0) * uFoamGain * uDt * 1.75;
+  foam += brk * brk * uFoamGain * uDt * 3.4;
 
   /* --- inject: the swash sheet -------------------------------------------------- */
-  float col = S.y - oc_seabedY(p);
-  float sheet = smoothstep(0.16, 0.012, col) * step(0.0, col);
-  foam += sheet * uDt * 0.55;
-  wet   = max(wet, step(0.005, col));
+  float bed = oc_seabedY(p);
+  float land = step(bed, uSeaLevel + OC_RUNUP);   // 0 on dry land, 1 in the swash/sea
+  float col = S.y - bed;
+  float sheet = smoothstep(0.20, 0.012, col) * step(0.0, col) * land;
+  foam += sheet * uDt * 0.85;
+  wet   = max(wet, step(0.005, col) * land);
 
   /* --- inject: waves hitting rock ------------------------------------------------
    * A stack standing in 3 m of water throws the whole incident wave straight up. The
@@ -719,7 +762,13 @@ void main(){
   float viewDist = length(toCam);
   vec3 V = toCam / max(viewDist, 1e-4);
 
+  /* Hard land gate, before any shading. The column test below is necessary but not
+   * sufficient: it only asks whether the displaced surface happens to sit above the
+   * bed at this instant, so a metre of noise in the bathymetry (or any future change
+   * to the wave model) can pond water in an inland hollow. This asks the question that
+   * actually matters — is this pixel above the maximum run-up? — and costs one compare. */
   float bedY = oc_seabedY(vFlat);
+  if (bedY > uSeaLevel + OC_RUNUP) discard;
   float column = P.y - bedY;
   if (column < -0.035) discard;
 
@@ -869,13 +918,20 @@ void main(){
   vec3 R = reflect(-V, N);
   /* A facet steeper than the view depression sends the reflected ray *below* the
    * horizon, where it meets the sea again at grazing and comes back as a second,
-   * dimmer reflection over the deep-water colour. Clamping those rays up instead
-   * flattens the back of every crest into the same bright sky the front already
-   * shows, and costs most of the surface's contrast. */
-  float below = clamp(-R.y * 8.0, 0.0, 1.0);
-  vec3 Rs = vec3(R.x, abs(R.y) + 0.002, R.z);
+   * dimmer reflection over the deep-water colour. The old code folded those rays back
+   * up with abs(R.y) and then blended only 45% of the dark term in, so the back face of
+   * every crest was merely-dimmed bright sky — which erased exactly the light/dark
+   * banding that fills kf_01800 and is most of what lum_std measures. */
+  float below = clamp(-R.y * 9.0, 0.0, 1.0);
+  vec3 deepBody = uScatterCol * (uSunColor * uSunIntensity * 0.048 * lightIn + uSkyAmbient * 0.75);
+  // Sample the cube with the TRUE reflected direction, clamped to the horizon rather
+  // than mirrored through it; the below-horizon case is handled explicitly further down.
+  vec3 Rs = vec3(R.x, max(R.y, 0.0) + 0.002, R.z);
   vec3 refl = texture(tSky, Rs).rgb;
-  {
+  // The screen tap is only valid for rays that actually leave the water. Downward rays
+  // used to project to a point above the horizon and fetch sky, which is how the cloud
+  // deck ended up painted across the surf at full size.
+  if (R.y > 0.0){
     vec4 ci = uViewProj * vec4(Rs, 0.0);
     if (ci.w > 1e-6){
       vec2 uvi = (ci.xy / ci.w) * 0.5 + 0.5;
@@ -896,8 +952,8 @@ void main(){
       }
     }
   }
-  vec3 deepBody = uScatterCol * (uSunColor * uSunIntensity * 0.048 * lightIn + uSkyAmbient * 0.75);
-  refl = mix(refl, mix(deepBody, refl * 0.72, 0.55), below);
+  // Dark term dominant, not a 55% lean on merely-dimmed sky.
+  refl = mix(refl, mix(refl * 0.55, deepBody, 0.75), below);
   if (uUseSSR > 0.5 && viewDist < 165.0 && R.y < 0.32){
     float t = 0.30, dt = 0.30;
     vec3 hitC = vec3(0.0); float hit = 0.0;
@@ -924,15 +980,19 @@ void main(){
     }
     refl = mix(refl, hitC, hit);
   }
-  // rough water scatters the reflection toward the ambient
-  refl = mix(refl, uHorizonColor, clamp(rough * 1.5, 0.0, 0.55));
+  /* Rough water scatters a little of the reflection toward the ambient. The fraction
+   * is the solid angle of the filtered lobe, i.e. ~alpha^2, NOT a linear function of
+   * roughness: at rough 0.37 the old line replaced 55% of the reflection with one flat
+   * constant, which is a global contrast eraser on the term that carries most of the
+   * surface's detail. A GGX lobe of alpha 0.2 averages in a couple of percent. */
+  refl = mix(refl, uHorizonColor, clamp(rough * rough * 1.3, 0.0, 0.12));
 
   /* ---- Fresnel ------------------------------------------------------------------ */
   float ndv = clamp(dot(N, V), 0.0, 1.0);
   float F = 0.02 + 0.98 * pow(1.0 - ndv, 5.0);
-  F = mix(F, clamp(F * 1.05, 0.0, 1.0), 1.0);
-  // a rough surface never reaches a perfect grazing mirror
-  F *= mix(1.0, 0.82, clamp(rough * 2.2, 0.0, 1.0));
+  // No roughness knock-down here: the microfacet shadowing that a rough grazing surface
+  // suffers belongs in the specular G term (where it already is), and applying it a
+  // second time to the whole reflection lobe just flattened the grazing contrast.
 
   /* ---- sun glitter -------------------------------------------------------------
    * Anisotropic GGX whose alphas are the sub-pixel slope variances computed above. The

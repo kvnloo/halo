@@ -235,10 +235,22 @@ vec3 tCell(vec2 p){
   return vec3(f1, f2, hash12(best + 3.7));
 }
 
+/** Ellipsoid cap of a stone whose radius is r cell units: 1 at the crown, 0 at the
+ *  rim. This is the shape both the displacement and the splat use, so a stone that
+ *  stands proud of the sand is also shaded as one. */
+float tStoneCap(float f1, float r){
+  float d = clamp(f1 / max(r, 0.02), 0.0, 1.0);
+  return sqrt(max(1.0 - d * d, 0.0));
+}
+
 /** Shared by the displacement and the splat so stone shading tracks stone geometry. */
 float tCobbleMask(vec2 P, float alongshore, float y){
-  float m = alongshore * smoothstep(-0.16, 0.30, fbm2(P * 0.42 + 61.0, 3));
-  return m * (1.0 - smoothstep(3.6, 6.4, y));
+  // A cobble beach is a PAVEMENT: stones everywhere, denser in drifts. The old form
+  // was smoothstep(-0.16, 0.30, fbm) with no floor, which left the whole near field
+  // at zero — the foreground rendered as bare sand with no stones in it at all, and
+  // took lum_std and edge_density down with it. Floor 0.28, drifts to 1.18.
+  float m = alongshore * (0.28 + 0.90 * smoothstep(-0.30, 0.25, fbm2(P * 0.42 + 61.0, 3)));
+  return m * (1.0 - smoothstep(4.8, 7.6, y));
 }
 
 /* ---- the layers, cheapest first. lod gates the expensive ones by clipmap level. */
@@ -289,27 +301,45 @@ float tHeight(vec2 P, int lod){
     y += cm * 0.13;
   }
 
+  /* Relief finer than 2x the level's own lattice cannot be resolved by it; asking for
+   * it does not add detail, it adds aliasing that measures as high lap_var against a
+   * shallow spectral_slope. Level spacings are 3 / 6 / 12 cm for lod 3 / 3 / 2, so the
+   * 22 cm pavement is the only cobble scale lod 2 can carry and the 9 cm shingle and
+   * 16 cm ripples belong to lod 3. */
+  float cob = 0.0;
   if (lod >= 2){
-    float cob = tCobbleMask(P, sh.w, y);
-    // two cobble scales: 22 cm pavement, 9 cm shingle
+    cob = tCobbleMask(P, sh.w, y);
+    // 22 cm cobble pavement — the scale that survives a 12 cm lattice.
+    //
+    // The profile is an ellipsoid cap over a per-stone radius, NOT (1 - k*F1) run
+    // through a smoothstep. That old form only left the floor where F1 < 0.24, which
+    // is 13% of the area, and the cubic crushed it further: mean relief came out at
+    // 3 mm against a nominal 11 cm, so the pavement was mathematically present and
+    // visually absent. Every stone here now stands 4-12 cm proud, which is what the
+    // reference's edge_density and lum_std on 'sand' are actually made of.
     vec3 w1 = tCell(P * 4.6 + 13.0);
-    float c1 = clamp(1.0 - w1.x * 2.05, 0.0, 1.0); c1 = c1 * c1 * (3.0 - 2.0 * c1);
+    float c1 = tStoneCap(w1.x, 0.34 + 0.16 * w1.z);
+    y += c1 * (0.045 + 0.078 * w1.z) * cob * uTDetail;
+  }
+
+  if (lod >= 3){
+    // 9 cm shingle packed between the pavement stones
     vec3 w2 = tCell(P * 11.3 + 41.0);
-    float c2 = clamp(1.0 - w2.x * 1.95, 0.0, 1.0); c2 = c2 * c2 * (3.0 - 2.0 * c2);
-    y += (c1 * (0.030 + 0.055 * w1.z) + c2 * 0.014) * cob * uTDetail;
+    float c2 = tStoneCap(w2.x, 0.36 + 0.14 * w2.z);
+    y += c2 * 0.020 * cob * uTDetail;
 
     // wind ripples: crests perpendicular to the wind, only on damp/dry sand, and
     // patchy — an unbroken corduroy across the whole beach is a desert, not a shore
     float dry = smoothstep(0.10, 0.85, y) * (1.0 - smoothstep(4.6, 7.0, y));
-    float patch = smoothstep(-0.22, 0.28, fbm2(P * 0.20 + 133.0, 3));
+    // NB: 'patch' is a reserved word in GLSL ES 3.00 — naming this variable that made
+    // all three terrain materials fail to compile, so the beach did not render at all.
+    float ripPatch = smoothstep(-0.22, 0.28, fbm2(P * 0.20 + 133.0, 3));
     float rw = fbm2(P * 0.34 + 5.0, 3);
     float ph = dot(P, uTWind) * 39.0 + rw * 5.2;
     float rip = sin(ph) * 0.62 + sin(ph * 0.41 + rw * 2.0) * 0.38;
-    y += rip * 0.013 * dry * patch * (1.0 - cob * 0.8) * uTDetail;
-  }
-
-  if (lod >= 3){
-    y += (vnoise2(P * 46.0) - 0.5) * 0.0075 * uTDetail;
+    y += rip * 0.013 * dry * ripPatch * (1.0 - cob * 0.8) * uTDetail;
+    // the old 2.2 cm value-noise term that used to sit here was below the Nyquist of
+    // every level it ran on (3 and 6 cm); it produced no relief, only vertex fizz.
   }
   return y;
 }
@@ -526,6 +556,7 @@ uniform vec3  uTWetCol;
 uniform vec3  uTRockCol;
 uniform float uTWetLevel;
 uniform float uTSpecBoost;
+uniform float uTDbg;
 varying vec3 vTWorldNormal;
 varying float vTLevelSpacing;
 
@@ -592,15 +623,20 @@ const SURFACE_FRAG = /* glsl */`
               * smoothstep(-17.5, -13.0, P.y) * (1.0 - smoothstep(-4.0, 0.5, P.y));
   float rockW = clamp(shelf * 0.9 + smoothstep(0.42, 0.72, slope), 0.0, 1.0);
 
-  /* ---------------- multi-scale surface -------------------------------------- */
-  float mipFade = clamp(1.0 - (dist - 14.0) / 46.0, 0.0, 1.0);
+  /* ---------------- multi-scale surface --------------------------------------
+   * mipFade starts at 5 m, not 14: the 3 mm grain normal is what makes the whole
+   * beach read as one uniform sheet of sandpaper, and a uniformly speckled plane
+   * measures a high lap_var against a *shallow* spectral_slope — broadband high
+   * frequency with nothing underneath it. Structure has to come from the metre
+   * scales below, not from grain. */
+  float mipFade = clamp(1.0 - (dist - 7.0) / 29.0, 0.0, 1.0);
 
   vec4 micro = textureNoTile(tTSandMicro, P * (1.0 / 0.32), 0.55);
   vec4 meso  = texture(tTSandMeso, P * (1.0 / 3.6));
   vec4 meso2 = texture(tTSandMeso, P * (1.0 / 13.0) + 0.37);
   vec4 grav  = textureNoTile(tTGravel, P * (1.0 / 1.35), 0.5);
 
-  vec3 nMicro = tDecodeN(micro, 1.15 * (0.35 + 0.65 * mipFade));
+  vec3 nMicro = tDecodeN(micro, 0.88 * (0.24 + 0.76 * mipFade));
   vec3 nMeso  = tDecodeN(meso, 0.85);
   vec3 nMeso2 = tDecodeN(meso2, 0.55);
   vec3 nDet = tBlendN(tBlendN(nMeso, nMeso2), nMicro);
@@ -613,11 +649,11 @@ const SURFACE_FRAG = /* glsl */`
   // wind ripples as a normal, taking over from the geometry beyond ~6 m
   {
     float dryM = smoothstep(0.10, 0.85, wp.y) * (1.0 - smoothstep(4.2, 6.5, wp.y));
-    float take = smoothstep(2.0, 9.0, dist) * dryM * (1.0 - wet);
+    float take = smoothstep(1.5, 5.0, dist) * (1.0 - smoothstep(45.0, 95.0, dist)) * dryM * (1.0 - wet);
     float rw = fbm2(P * 0.34 + 5.0, 3);
     float ph = dot(P, uTWind) * 39.0 + rw * 5.2;
     float d1 = cos(ph) * 39.0 * 0.62 + cos(ph * 0.41 + rw * 2.0) * 16.0 * 0.38;
-    vec2 g = uTWind * d1 * 0.021 * take;
+    vec2 g = uTWind * d1 * 0.030 * take;
     nDet = tBlendN(nDet, normalize(vec3(-g, 1.0)));
   }
 
@@ -631,59 +667,100 @@ const SURFACE_FRAG = /* glsl */`
   vec3 B = cross(T, nw);
   vec3 nOut = normalize(T * nDet.x + B * nDet.y + nw * nDet.z);
 
-  /* ---------------- albedo ---------------------------------------------------- */
+  /* ---------------- albedo ----------------------------------------------------
+   * Values are linear reflectance, not "a colour that looks like sand". Dry quartz
+   * beach sand is ~0.22, a warm mid-tone; damp sand ~0.13 and cooler because the
+   * water film kills the diffuse back-scatter; saturated sand ~0.07 and specular.
+   * Authoring these at 0.5-0.7, as a paint program encourages, is what makes a beach
+   * render as a white sheet with the chroma washed out of it.
+   *
+   * The modulations are deliberately weighted toward the LOW frequencies. 'tone'
+   * (8-46 m drifts) swings +-60%; grain (3 mm) only +-16%. The reference's 'sand'
+   * region sits at spectral_slope -2.37 with lum_std 31.5 — most of its energy is at
+   * the metre scale and above. Loading the variance into grain instead gives the
+   * opposite: lap_var high, slope shallow, lum_std and local_contrast both low. */
   float grainA = micro.a;
   float mesoA  = meso.a * 0.6 + meso2.a * 0.4;
-  // Macro tone carries the low-frequency energy the spectral slope is made of: broad
-  // pale drifts against darker, damper, shell-poor ground, tens of metres across.
-  float tone   = (0.58 + 0.84 * mac.r) * (0.86 + 0.28 * meso2.a);
+  float tone   = (0.40 + 1.22 * mac.r) * (0.80 + 0.42 * meso2.a);
+  // 4-16 m drifts. The 46 m macro tile barely changes across the visible beach at
+  // eye height, so on its own it contributes almost nothing to lum_std; this is the
+  // band that does. Low frequency by construction, so it costs no aliasing.
+  tone *= 0.64 + 0.72 * (fbm2(P * 0.085 + 401.0, 4) * 0.5 + 0.5);
 
   vec3 dry  = uTDryCol * tone
-            * (0.70 + 0.60 * grainA)
-            * (0.78 + 0.44 * mesoA);
-  vec3 damp = dry * vec3(0.52, 0.505, 0.515);
-  vec3 wetC = uTWetCol * tone * (0.85 + 0.30 * grainA);
+            * (0.84 + 0.32 * grainA)
+            * (0.78 + 0.56 * mesoA);
+  // damp sand is darker AND cooler: the water film removes the warm multiple
+  // scattering between grains that gives dry sand its yellow cast
+  vec3 damp = dry * vec3(0.50, 0.52, 0.585);
+  vec3 wetC = uTWetCol * tone * (0.88 + 0.24 * grainA);
 
-  vec3 alb = mix(dry, damp, smoothstep(0.02, 0.45, wet));
-  alb = mix(alb, wetC, smoothstep(0.35, 0.92, wet));
+  /* The wet/dry line is the strongest value contrast on the beach — a 3x step over a
+   * few centimetres of run-up, not a slow gradient. Narrow ramps. */
+  vec3 alb = mix(dry, damp, smoothstep(0.03, 0.28, wet));
+  alb = mix(alb, wetC, smoothstep(0.44, 0.76, wet));
+
+  /* Damp patches on the dry berm: 3-9 m pools of retained moisture, well above the
+   * swash limit, where the sand last held water. On a real beach these carry more
+   * mid-scale value contrast than anything except the stones, and without them the
+   * berm is a flat plane no matter what the grain is doing. */
+  {
+    float dp = smoothstep(0.34, 0.88, mac.g * 0.50 + (fbm2(P * 0.30 + 209.0, 3) * 0.5 + 0.5) * 0.72)
+             * (1.0 - smoothstep(1.5, 4.6, wp.y)) * (1.0 - wet);
+    // a second, broader stain at 10-30 m: last week's high tide, not last hour's swash
+    float dp2 = smoothstep(0.40, 0.90, mac.g * 0.62 + (fbm2(P * 0.075 + 71.0, 3) * 0.5 + 0.5) * 0.60)
+              * (1.0 - smoothstep(2.6, 6.0, wp.y));
+    alb = mix(alb, alb * vec3(0.60, 0.60, 0.635), dp * 0.80);
+    alb = mix(alb, alb * vec3(0.74, 0.735, 0.755), dp2 * 0.85);
+  }
+
+  /* Stone tone at range, from the mip-filtered gravel bake. The analytic cell field
+   * below is exact but has no derivatives to filter with, so it aliases into fizz
+   * past a few metres; this carries the same statistics out to the horizon with
+   * proper mip and anisotropy behind it. */
+  float gravFar = clamp(cobD, 0.0, 1.0) * smoothstep(8.0, 22.0, dist);
+  alb = mix(alb, mix(vec3(0.0200, 0.0168, 0.0134), vec3(0.186, 0.146, 0.102), grav.a) * tone,
+            gravFar * smoothstep(0.14, 0.58, grav.b) * 0.90);
 
   /* Cobble pavement. Two layers of the SAME cell field the vertex shader displaced,
-   * so every stone that stands proud of the sand is also shaded as a stone. Beyond
-   * the range where the clipmap resolves them the field keeps going as pure albedo +
-   * normal, so the statistics do not cliff at the geometry's edge. */
+   * so every stone that stands proud of the sand is also shaded as a stone. Stones
+   * are DARKER than the sand they sit in — basalt and wet-stained limestone against a
+   * 0.22 quartz pavement — and that value step is where the reference's lum_std comes
+   * from. Coverage is broad enough to read as a pavement rather than as speckle. */
   float cobShade = 0.0;
   float stoneTop = 0.0;
   if (cobD > 0.004) {
+    float nearC = clamp(1.0 - (dist - 14.0) / 17.0, 0.0, 1.0);
     vec3 cA = tCell(P * 4.6 + 13.0);
-    float mA = clamp(1.0 - cA.x * 2.05, 0.0, 1.0);
-    float sA = smoothstep(0.06, 0.42, mA) * clamp(cobD, 0.0, 1.0);
-    vec3 colA = mix(vec3(0.0085, 0.0080, 0.0076), vec3(0.285, 0.252, 0.205), pow(cA.z, 1.25));
+    float mA = tStoneCap(cA.x, 0.34 + 0.16 * cA.z);
+    float sA = smoothstep(0.06, 0.42, mA) * clamp(cobD * 1.25, 0.0, 1.0) * nearC;
+    vec3 colA = mix(vec3(0.0102, 0.0086, 0.0070), vec3(0.228, 0.176, 0.120), pow(cA.z, 1.30));
     colA = mix(colA, colA * vec3(0.58, 0.70, 0.58), smoothstep(0.45, 0.92, wet) * 0.75);
     alb = mix(alb, colA * tone, sA * 0.97);
 
     vec3 cB = tCell(P * 11.3 + 41.0);
-    float mB = clamp(1.0 - cB.x * 1.95, 0.0, 1.0);
-    float sB = smoothstep(0.10, 0.50, mB) * clamp(cobD, 0.0, 1.0) * (1.0 - sA * 0.7)
-             * clamp(1.0 - (dist - 5.0) / 16.0, 0.0, 1.0);
-    vec3 colB = mix(vec3(0.014, 0.0132, 0.0125), vec3(0.300, 0.268, 0.220), pow(cB.z, 1.15));
+    float mB = tStoneCap(cB.x, 0.36 + 0.14 * cB.z);
+    float sB = smoothstep(0.10, 0.46, mB) * clamp(cobD * 1.15, 0.0, 1.0) * (1.0 - sA * 0.7)
+             * clamp(1.0 - (dist - 6.0) / 10.0, 0.0, 1.0);
+    vec3 colB = mix(vec3(0.0165, 0.0140, 0.0112), vec3(0.226, 0.176, 0.122), pow(cB.z, 1.20));
     alb = mix(alb, colB * tone, sB * 0.92);
 
     // the sand between the stones is shaded, damper and darker
-    cobShade = clamp(cobD, 0.0, 1.0) * (smoothstep(0.30, 0.02, mA) * 0.55 + smoothstep(0.34, 0.05, mB) * 0.25);
+    cobShade = clamp(cobD, 0.0, 1.0) * (smoothstep(0.26, 0.01, mA) * 0.62 + smoothstep(0.30, 0.03, mB) * 0.28);
     stoneTop = max(sA, sB);
     // detail normal from the same cells, so the lighting agrees with the silhouette
     float e = 0.012;
     vec2 gA = vec2(tCell((P + vec2(e, 0.0)) * 4.6 + 13.0).x - cA.x,
                    tCell((P + vec2(0.0, e)) * 4.6 + 13.0).x - cA.x) / e;
-    nDet = tBlendN(nDet, normalize(vec3(gA * 0.055 * clamp(cobD, 0.0, 1.0), 1.0)));
+    nDet = tBlendN(nDet, normalize(vec3(gA * 0.085 * clamp(cobD, 0.0, 1.0) * nearC, 1.0)));
   }
-  alb *= 1.0 - cobShade * 0.40;
+  alb *= 1.0 - cobShade * 0.34;
 
   // organic strandline: dark weed and shell wrack in a band above the swash
   {
-    float band = exp(-pow((wp.y - swashTop - 0.22) * 4.5, 2.0));
-    float w = band * smoothstep(0.45, 0.9, mac.a) * smoothstep(0.4, 0.8, micro.a);
-    alb = mix(alb, vec3(0.045, 0.042, 0.028), w * 0.55);
+    float band = exp(-pow((wp.y - swashTop - 0.22) * 3.4, 2.0));
+    float w = band * smoothstep(0.34, 0.86, mac.a) * smoothstep(0.34, 0.76, micro.a);
+    alb = mix(alb, vec3(0.038, 0.036, 0.024), w * 0.72);
   }
 
   // rock shelf albedo + algae stain
@@ -693,11 +770,16 @@ const SURFACE_FRAG = /* glsl */`
     alb = mix(alb, rc, rockW);
   }
 
-  /* ---------------- roughness ------------------------------------------------- */
-  float rough = mix(0.94, 0.13, smoothstep(0.30, 0.95, wet));
+  /* ---------------- roughness -------------------------------------------------
+   * Dry sand is as rough as a surface gets; saturated sand is a wet film at ~0.12
+   * and starts mirroring the sky, which is the other half of why the wet/dry line
+   * reads so hard in the reference. Must stay in step with buildGBufferMaterial(). */
+  float rough = mix(0.94, 0.12, smoothstep(0.30, 0.95, wet));
   rough = mix(rough, 0.055, sheet);
   rough = mix(rough, mix(0.72, 0.34, rockT.a), rockW);
   rough = mix(rough, 0.62, smoothstep(0.20, 0.60, grav.b) * clamp(cobD, 0.0, 1.0) * (1.0 - wet * 0.6));
+  // wave-polished stone tops are smoother than the sand around them
+  rough = mix(rough, 0.46, stoneTop * 0.55);
   rough = clamp(rough - (grainA - 0.5) * 0.05, 0.04, 1.0);
 
   /* ---------------- occlusion -------------------------------------------------- */
@@ -708,6 +790,23 @@ const SURFACE_FRAG = /* glsl */`
   ao = clamp(ao, 0.22, 1.0);
 
   diffuseColor.rgb = alb * ao;
+  if (uTDbg > 0.5) {
+    // 1 = flat uTDryCol, no texture, no AO; 2 = flat 0.18 grey. Diagnostic only:
+    // tells you what the light + tonemap + grade chain does to a known albedo.
+    diffuseColor.rgb = uTDbg > 2.5 ? vec3(0.0) : (uTDbg > 1.5 ? vec3(0.18) : uTDryCol);
+    // 4..7 visualise the masks that decide where anything happens
+    if (uTDbg > 3.5 && uTDbg < 4.5) diffuseColor.rgb = vec3(clamp(cobD, 0.0, 1.0)) * 0.5;
+    if (uTDbg > 4.5 && uTDbg < 5.5) diffuseColor.rgb = vec3(wet) * 0.5;
+    if (uTDbg > 5.5 && uTDbg < 6.5) diffuseColor.rgb = vec3(tone) * 0.25;
+    if (uTDbg > 6.5 && uTDbg < 7.5) diffuseColor.rgb = vec3(clamp(sh.w, 0.0, 2.0)) * 0.25;
+    if (uTDbg > 7.5 && uTDbg < 8.5) diffuseColor.rgb = vec3(smoothstep(0.40, 0.12, tCell(P * 4.6 + 13.0).x)) * 0.4;
+    // 9 = 1 m checkerboard + red every 10 m: a scale bar on the ground
+    if (uTDbg > 8.5) {
+      float ck = mod(floor(P.x) + floor(P.y), 2.0);
+      diffuseColor.rgb = mix(vec3(0.05), vec3(0.5), ck);
+      if (mod(floor(P.x * 0.1) + floor(P.y * 0.1), 2.0) > 0.5) diffuseColor.rgb *= vec3(1.0, 0.35, 0.35);
+    }
+  }
   roughnessFactor = rough;
   metalnessFactor = 0.0;
   normal = normalize((viewMatrix * vec4(nOut, 0.0)).xyz);
@@ -763,11 +862,19 @@ export function create(opts = {}) {
     uTHorizon: { value: new THREE.Vector3(0.30, 0.34, 0.40) },
     uTSunRad: { value: new THREE.Vector3(6, 5.6, 5) },
     uTSunDir: { value: new THREE.Vector3(0.6, 0.66, -0.45) },
-    uTDryCol: { value: new THREE.Vector3(0.300, 0.204, 0.114) },
-    uTWetCol: { value: new THREE.Vector3(0.052, 0.041, 0.031) },
-    uTRockCol: { value: new THREE.Vector3(0.085, 0.079, 0.070) },
+    // Linear reflectance, measured values, not picked colours:
+    //   dry beach sand         0.20-0.25, warm      -> 0.322 / 0.196 / 0.116  (Y 0.217)
+    //   saturated sand         ~0.07, cooler        -> 0.072 / 0.060 / 0.048
+    //   weathered limestone    0.30-0.40 dry, less wet
+    // `damp` is derived from dry in the shader (x0.50/0.52/0.585 -> ~0.125, cooler).
+    uTDryCol: { value: new THREE.Vector3(0.322, 0.196, 0.116) },
+    uTWetCol: { value: new THREE.Vector3(0.072, 0.060, 0.048) },
+    // the tide-pool shelf is permanently damp and algae-stained, so it sits well
+    // below dry limestone's 0.30-0.40
+    uTRockCol: { value: new THREE.Vector3(0.150, 0.140, 0.122) },
     uTWetLevel: { value: 0.42 },
     uTSpecBoost: { value: 1.0 },
+    uTDbg: { value: 0.0 },
   };
 
   /* ================================================ CPU field (mirrors FIELD_GLSL) */
@@ -1130,7 +1237,7 @@ export function create(opts = {}) {
           // roughness and material id must agree with the surface pass or SSR and
           // the TAA clamp will disagree with what was actually shaded
           float wet = 1.0 - smoothstep(-0.06, 0.42, vWP.y);
-          float rough = mix(0.94, 0.13, smoothstep(0.30, 0.95, wet));
+          float rough = mix(0.94, 0.12, smoothstep(0.30, 0.95, wet));
           float mid = mix(${MAT_ID.TERRAIN_SAND}.0, ${MAT_ID.TERRAIN_WET}.0, step(0.5, wet));
           oNormalRough = vec4(n * 0.5 + 0.5, rough);
           oMotionId    = vec4((cur - prev) * 0.5, mid / 255.0, 1.0);
@@ -1216,8 +1323,8 @@ export function create(opts = {}) {
             const nrm = normal(px, pz, new THREE.Vector3());
             if (nrm.y < 0.72) continue;
             const r = cr.next();
-            const big = r > 0.90;
-            const sc = big ? cr.range(0.20, 0.95) : cr.range(0.035, 0.19);
+            const big = r > 0.962;
+            const sc = big ? cr.range(0.16, 0.46) : cr.range(0.035, 0.18);
             (big ? large : small).push({ x: px, y, z: pz, s: sc, r: cr });
           }
         }
@@ -1445,6 +1552,8 @@ export function create(opts = {}) {
         if (k === 'terrainDetail') fieldUniforms.uTDetail.value = v;
         if (k === 'terrainWetLevel') surfUniforms.uTWetLevel.value = v;
         if (k === 'terrainSpec') surfUniforms.uTSpecBoost.value = v;
+        if (k === 'terrainDbg') surfUniforms.uTDbg.value = v;
+        if (k === 'terrainEnvInt' && surfMat) surfMat.envMapIntensity = v;
         if (k === 'terrainDryCol') surfUniforms.uTDryCol.value.fromArray(v);
         if (k === 'terrainWetCol') surfUniforms.uTWetCol.value.fromArray(v);
       });

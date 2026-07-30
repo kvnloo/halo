@@ -62,11 +62,44 @@ import { Pass, fsMaterial, FullScreenQuad, makeRT } from '../RenderPipeline.js';
  * `ctx.config.exposure` always holds the resolved number (bloom reads it). Writing a
  * number to it from outside pins it; writing `null` returns it to auto.
  *
+ * ### The pin used to last exactly one frame
+ *
+ * That one slot is both the input (the pin) and the output (the published number), so
+ * "did somebody write this, or did we?" can only be answered by remembering what we
+ * wrote. The previous version answered it with `v !== published` **and then immediately
+ * republished the pin into the same slot**, which made the pin indistinguishable from
+ * our own output on the very next frame. A pin was therefore honoured on frame 0 and
+ * silently discarded from frame 1 onward:
+ *
+ *     node tools/capture.mjs --pose ref_00000 --config exposure=0.15 --settle 40 --out a.png
+ *     node tools/capture.mjs --pose ref_00000 --config exposure=2.0  --settle 40 --out b.png
+ *     cmp a.png b.png     # byte-identical, and identical to no pin at all
+ *
+ * A 13x exposure range with *zero* measured effect. Anyone tuning through this control
+ * was tuning nothing, which is exactly the "pinned exposure vs keyedExposure()
+ * interaction" that `docs/KNOWN_ISSUES.md` 8b suspected. The fix is to **latch** the pin
+ * in a variable of our own (`pin` below) instead of re-deriving intent from the shared
+ * slot every frame: an outside write latches, a non-number releases, and our own value
+ * coming back around changes nothing. Comparison is by relative epsilon rather than
+ * bit-equality so that a debug UI or harness round-tripping `ctx.config` through JSON
+ * cannot have its own echo mistaken for a pin and freeze exposure.
+ *
+ * The other half of 8b — `exposureEV` dropping luminance by 10x between -0.8 and -1.6 —
+ * does **not** reproduce. Swept 0 to -2 in quarter stops at `ref_00000`, lum_mean falls
+ * 110.52 / 103.35 / 96.26 / 89.29 / 82.46 / 75.81 / 69.35 / 63.10 / 57.09, a per-step
+ * ratio of 0.935 drifting to 0.905 as AgX's toe compresses. Monotonic, no cliff. The
+ * archived `lum 13.2, sat 98.8, lap_var 8` is a near-black *flat* frame: lap_var 8 means
+ * there was no image at any exposure, which is a frame that failed to render, not one
+ * that was exposed down. Treat 8b's EV table as stale — its EV 0 row (148.4) no longer
+ * holds either, the albedo work has since moved it to 110.5.
+ *
  * ## Config
  *
  *   exposure        number    resolved linear scene->sensor multiplier. Write a number
  *                             to pin it; write null to re-derive from the lighting rig.
  *   exposureEV      number    stops added on top of whichever exposure is in force
+ *   exposureTrimEV  number    stops folded into the *keyed* exposure only (see KEY_TRIM_EV).
+ *                             Ignored while a pin is in force, because a pin is absolute.
  *   tonemapper      string    'agx' | 'aces' | 'reinhard' | 'none'
  *   tonemapWhite    number    extended-Reinhard white point, in exposed linear units
  *   agxLook         [s,o,p,sat]  AgX look: slope, offset, power, saturation (neutral = [1,0,1,1])
@@ -366,6 +399,56 @@ export function keyedExposure(ctx, cache = { lights: null, frames: 0, warned: fa
   return Math.PI / Math.max(E, 1e-6);
 }
 
+/**
+ * Exposure compensation applied to the *keyed* exposure, in stops. Fitted, not chosen.
+ *
+ * `keyedExposure()` above is pure photography: it puts an 18% Lambertian card on AgX's
+ * middle grey and it has no opinion about this particular clip. The reference is a game
+ * capture with its own exposure and its own grade, so the two only coincide by accident.
+ * This constant is the measured difference, and it is kept separate from the key so the
+ * physics stays legible and so zeroing it (`ctx.config.exposureTrimEV = 0`) recovers the
+ * textbook value exactly.
+ *
+ * ### How it was fitted
+ *
+ * `ref_00000`, `--settle 40`, sweeping `exposureEV` around the keyed value. Whole-frame
+ * targets from `docs/TARGETS.md` are lum_mean 107.8, p50 105, p99 221, shadow_frac 0.050,
+ * highlight_frac 0.007.
+ *
+ *      EV     lum_mean   p50   p99   shadow_frac  highlight_frac
+ *     +0.50    124.99    129   219      0.0441       0.0059
+ *     +0.25    117.75    121   214      0.0493       0.0042
+ *      0.00    110.52    114   209      0.0548       0.0030
+ *     -0.125   106.92    110   207      0.0565       0.0025
+ *     -0.25    103.35    106   204      0.0576       0.0021
+ *     -0.50     96.26     98   198      0.0653       0.0013
+ *
+ * **The five targets do not have a common solution, and cannot.** The bulk terms want
+ * about -0.2 stops (lum_mean alone -0.10, p50 alone -0.28); the tail terms want +0.2 to
+ * +0.7 (shadow_frac +0.22, p99 +0.6, highlight_frac +0.7). That is not a disagreement
+ * about exposure, it is the histogram being too *narrow*: our lum_std is 40 against the
+ * reference's 52.3 and our lap_var 239 against 463. Exposure slides a histogram, it does
+ * not widen one, so no single number can hit both a median and a 99th percentile that are
+ * 12 codes further apart than ours. The tails belong to the albedo/lighting/grade work
+ * (see `docs/KNOWN_ISSUES.md` 8 — sat_mean is still 36 against a target of 84).
+ *
+ * So this is fitted to the two terms exposure actually controls, by least squares on the
+ * relative error of lum_mean and p50 against the local slopes (28.9 and 29.3 codes/stop):
+ *
+ *      0.030687 + 0.149749 * EV = 0   ->   EV = -0.205
+ *
+ * Measured with the trim in force (`ref_00000`, `--settle 48`): lum_mean 104.73, p50 107
+ * against targets 107.8 and 105 — relative error 2.8% / 1.9%, down from 2.5% / 8.6%.
+ * Setting `ctx.config.exposureTrimEV = 0` reproduces the untrimmed 110.52 / 114 exactly.
+ *
+ * **What this number assumes:** the albedos as of this fit. Other modules are lowering
+ * them concurrently and each pass of that work moves lum_mean far more than this trim
+ * does — the same sweep measured lum_mean 148.4 at EV 0 when `KNOWN_ISSUES` 8 was
+ * written and 110.5 a few hours later. Re-fit with the sweep above whenever the albedo
+ * work lands; do not treat -0.2 as a constant of nature. It is worth 5.8 codes.
+ */
+export const KEY_TRIM_EV = -0.2;
+
 /* ------------------------------------------------------------------ the shader */
 
 const glslMat3 = (m) => `mat3(${[0, 1, 2].map((c) => [0, 1, 2].map((r) => m[r][c].toFixed(12)).join(', ')).join(',\n            ')})`;
@@ -517,23 +600,73 @@ export function create(opts = {}) {
 
   const expCache = { lights: null, frames: 0, warned: false };
   let published = NaN;          // the last value this pass wrote into ctx.config.exposure
+  let pin = null;               // latched external pin; null = auto (keyed)
+  let lastGood = null;          // last finite positive exposure, so a bad frame degrades
 
   /** Exposed-linear thresholds that matter, in display codes. Constant, computed once. */
   const CODE_LIN = { 200: exposedLinearForCode(200), 224: exposedLinearForCode(224), 240: exposedLinearForCode(240), 252: exposedLinearForCode(252) };
 
   /**
+   * "Is this number a copy of the one we published, or did somebody write it?"
+   *
+   * Relative epsilon, not `===`. `ctx.config` gets round-tripped through JSON by the
+   * debug UI and by `tools/captured.mjs`, and a re-serialised copy of our own output
+   * differing in the last bit would otherwise read as an external pin and freeze the
+   * exposure at whatever the key happened to be on that frame — a bug that would only
+   * show up as "exposure stopped tracking time of day", hours later.
+   *
+   * The cost is that a pin within 1e-6 relative of the current auto value is ignored.
+   * That pin is a no-op by definition, so nothing is lost.
+   */
+  const sameNumber = (a, b) =>
+    Number.isFinite(a) && Number.isFinite(b) &&
+    Math.abs(a - b) <= 1e-6 * Math.max(Math.abs(a), Math.abs(b), 1e-12);
+
+  /**
    * Resolve the exposure for this frame.
    *
-   * Idempotent by construction: it reads only live scene state, never its own previous
-   * output. If someone outside has written a number into `ctx.config.exposure` that is
-   * not the number we last published, that write is an explicit pin and wins;
-   * `ctx.config.exposure = null` releases the pin.
+   * The pin lives in `pin`, not in `ctx.config.exposure`. The config slot is the
+   * *published* value — it has to be, because bloom reads it to convert its
+   * display-referred knee back to scene-linear — so intent cannot also be stored there.
+   * Deriving intent from the shared slot is what made a pin evaporate after one frame;
+   * see the "The pin used to last exactly one frame" note in the file header.
+   *
+   * Transitions:
+   *   finite number > 0, not ours  ->  latch it as the pin (logged once)
+   *   finite number > 0, ours      ->  no change; keeps whatever mode is in force
+   *   anything else (null, NaN, 0) ->  release the pin, back to keyedExposure()
+   *
+   * Still idempotent: with no external writes it reads only live scene state and never
+   * its own previous output.
    */
   function resolveExposure(ctx) {
     const c = ctx.config;
     const v = c.exposure;
-    const pinned = typeof v === 'number' && Number.isFinite(v) && v > 0 && v !== published;
-    const e = pinned ? v : keyedExposure(ctx, expCache);
+
+    if (typeof v === 'number' && Number.isFinite(v) && v > 0) {
+      if (!sameNumber(v, published) && !sameNumber(v, pin)) {
+        pin = v;
+        console.info('[tonemap] exposure pinned to ' + v.toPrecision(6)
+          + ' — set ctx.config.exposure = null to return to the keyed value');
+      }
+    } else if (pin !== null) {
+      pin = null;
+      console.info('[tonemap] exposure pin released; back to the keyed value');
+    }
+
+    // The trim rides on the keyed value only. A pin is an absolute request for a
+    // specific sensor gain — silently multiplying it by 0.87 would make the pin lie,
+    // and the pin is the control people reach for when they want a known number.
+    const trim = Number.isFinite(c.exposureTrimEV) ? c.exposureTrimEV : KEY_TRIM_EV;
+    let e = pin !== null
+      ? pin
+      : keyedExposure(ctx, expCache) * Math.pow(2, Math.min(Math.max(trim, -32), 32));
+    // A rig that briefly reports zero irradiance (a light being rebuilt, env mid-bake)
+    // must not publish Infinity into a slot bloom multiplies by. Hold the last good
+    // number for that frame instead of emitting something that poisons the pipeline.
+    if (!(Number.isFinite(e) && e > 0)) e = lastGood ?? 1;
+    lastGood = e;
+
     c.exposure = e;
     published = e;
     p.exposure = e;
@@ -549,6 +682,7 @@ export function create(opts = {}) {
     if (c.agxLook === undefined) c.agxLook = [1, 0, 1, 1];
     if (c.tonemapGuard === undefined) c.tonemapGuard = true;
     if (c.tonemapProbe === undefined) c.tonemapProbe = false;
+    if (c.exposureTrimEV === undefined) c.exposureTrimEV = KEY_TRIM_EV;
     // Not resolved here on purpose — `lighting` has not finished wiring its intensities
     // when pipeline.init runs. resolveExposure() runs per frame and gets the truth.
     if (c.exposure === undefined) c.exposure = null;
@@ -636,8 +770,15 @@ export function create(opts = {}) {
     const u = mat.uniforms;
     const exposure = resolveExposure(ctx);
     const mode = c.tonemapper in MODES ? c.tonemapper : 'agx';
-    const total = exposure * MODE_GAIN[mode] * Math.pow(2, c.exposureEV || 0);
+    // `c.exposureEV || 0` is deliberately the same expression bloom uses to reconstruct
+    // this gain (bloom.js `exposureGain`), so the two can never disagree for any value a
+    // human would type. The clamp only catches ±Infinity / absurd pokes, which would
+    // otherwise reach the shader as a non-finite uniform and white or black the frame.
+    const evGain = Math.pow(2, Math.min(Math.max(c.exposureEV || 0, -32), 32));
+    const raw = exposure * MODE_GAIN[mode] * evGain;
+    const total = Number.isFinite(raw) ? Math.min(Math.max(raw, 0), 1e6) : 1;
     u.uExposure.value = total;
+    p.exposureTotal = total;
     u.uMode.value = MODES[mode];
     u.uWhite.value = c.tonemapWhite ?? 6.0;
     u.uGuard.value = (c.tonemapGuard ?? true) ? 1 : 0;

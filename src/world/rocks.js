@@ -58,8 +58,10 @@ import { fbm2, ridged2, hash2 } from '../core/Rand.js';
  *
  * ------------------------------------------------------------------ material
  *
- * Pale warm limestone, not grey CG rock — see ref/detail/rock_4k.png, which is far
- * lighter and yellower than the usual default. Tri-planar, whiteout normal blending
+ * Iron-stained warm limestone, not grey CG rock — see ref/detail/rock_4k.png. The
+ * reference `rock` region is *more* saturated than the sand (86.6 against 69.0), so
+ * the rock is what carries the colour in that frame; authoring it as a near-neutral
+ * pale grey is a large part of why an earlier build read as washed out. Tri-planar, whiteout normal blending
  * (`triplanarNormal` / `triWeights` from src/gfx/glsl/noise.js) over two procedurally
  * baked detail sets sampled at four scales: 9 m, 1.15 m, 0.30 m and 0.055 m tiles.
  * With 1024² maps that resolves relief down to ~2 mm, so the 2 cm requirement is met
@@ -69,9 +71,10 @@ import { fbm2, ridged2, hash2 } from '../core/Rand.js';
  *   - curvature wear      bright exposed rock on convex edges, dark grime in concavities
  *   - vertical staining   runoff streaks running down from ledges (ridged3 stretched 25:1)
  *   - bedding             albedo + roughness banding keyed to world y with a warp
- *   - damp / algae zone   dark olive band around the tide line, patchy, heavier on
- *                         up-facing and sheltered surfaces
- *   - wet zone            below y ≈ 0: albedo × 0.48, roughness 0.13 -> specular
+ *   - damp / tide band    the biggest tonal event on the silhouette: below the splash
+ *                         line the rock drops from ~0.33 to ~0.07 linear, with a weed
+ *                         mat in the lower half of the band
+ *   - wet zone            below y ≈ 0: roughness 0.31 and a raised F0 -> sheen
  *   - moss + lichen       on up-facing surfaces near the crown only
  *
  * Everything goes through `applyWorldMaterial`, so sun, CSM shadows and aerial
@@ -999,8 +1002,9 @@ function bakeDetail(ctx, size, variant, strength) {
 const ROCK_PARS = NOISE_GLSL + TRIPLANAR_GLSL + /* glsl */`
 uniform sampler2D uNH_A;
 uniform sampler2D uNH_B;
-uniform vec3  uColBase, uColBright, uColGrime, uColStain, uColAlgae, uColMoss, uColLichen, uColBleach;
+uniform vec3  uColBase, uColBright, uColGrime, uColStain, uColDamp, uColAlgae, uColMoss, uColLichen, uColBleach;
 uniform float uRough, uAlgaeAmt, uMossAmt, uWetY, uDetailAmt, uAOAmt, uMacroAmt;
+uniform float uSpecF0, uSpecF90;
 varying vec3 vWNrmRK;
 varying vec4 vRockRK;
 
@@ -1071,12 +1075,20 @@ bed2 = smoothstep(0.0, 0.12, bed2) * (1.0 - smoothstep(0.6, 1.0, bed2));
 // lum 67-111 with lum_std 33-64 and lap_var 860-3900. That variance is the whole
 // game — it has to come from independent modulation at every scale, so each detail
 // octave multiplies albedo separately rather than through one blended height.
+//
+// The *bright* half of that chain used to run to 1.38*1.30*1.24*1.15 = 2.56x, and on
+// top of a macro term reaching 1.43x the top decile of every stack was multiplied by
+// 3.7 — which is how a 0.36 limestone ended up rendering as bleached bone. Rock does
+// not have a 3.7x dynamic range in reflectance; it has a wide *dark* tail (shadowed
+// pits, grime, damp) and a narrow bright one. The dark side is kept, the bright side
+// is capped near 1.9x, and the level lost is put back into the base colour where it
+// is under one number instead of four multiplied ones.
 vec3 alb = uColBase;
-alb *= 1.0 + uMacroAmt * (0.40 * m1 + 0.22 * m2);
-alb *= mix(0.56, 1.38, hA);
-alb *= mix(0.66, 1.30, hB);
-alb *= mix(0.76, 1.24, hC);
-alb *= mix(0.86, 1.15, hD);
+alb *= 1.0 + uMacroAmt * (0.34 * m1 + 0.19 * m2);
+alb *= mix(0.60, 1.24, hA);
+alb *= mix(0.70, 1.20, hB);
+alb *= mix(0.80, 1.16, hC);
+alb *= mix(0.88, 1.10, hD);
 // curvature wear: grime settles in the concavities, edges scrub clean and bright
 float grime = (1.0 - occ) * (0.45 + 0.55 * (1.0 - smoothstep(0.15, 0.62, h)));
 alb = mix(alb, uColGrime, clamp(grime * 0.95, 0.0, 0.82));
@@ -1089,17 +1101,34 @@ alb = mix(alb, uColStain, stainMask * 0.55);
 alb *= 1.0 - 0.20 * bed - 0.11 * bed2;
 
 // ---- tide zone ---------------------------------------------------------------
+// The single biggest tonal event on a sea stack's silhouette. In the reference the
+// rock below the splash line is *much* darker than the dry rock above it — a soaked,
+// weed-colonised band of roughly 0.10 linear against 0.36 dry — and the boundary is
+// what stops the stack reading as one pale monolith. The old mask topped out around
+// 0.19 of a mix, which is invisible; this one is a real band.
 float yn = 0.62 * fbm3(P * vec3(0.16, 0.55, 0.16), 3) + 0.30 * fbm3(P * vec3(0.9, 2.2, 0.9), 2);
 float yw = P.y - uWetY + yn * 1.5;
-float wet   = smoothstep(1.05, -0.25, yw);
-float algae = smoothstep(4.3, 0.7, yw) * smoothstep(-3.4, -1.2, yw);
-algae *= (0.34 + 0.66 * smoothstep(-0.25, 0.55, Ng.y));
+float wet = smoothstep(1.15, -0.35, yw);
+
+// broad damp band: soaked rock, strongest at the waterline, gone by ~5 m up
+float damp = smoothstep(5.0, 0.15, yw);
+damp *= 0.74 + 0.26 * smoothstep(-0.35, 0.50, Ng.y);      // undersides stay damp too
+damp *= 0.66 + 0.34 * smoothstep(-0.40, 0.35, m2);   // reuse the macro octave: no extra fbm3
+damp *= 0.78 + 0.22 * (1.0 - cvx);                        // sun-scrubbed arêtes dry first
+alb = mix(alb, uColDamp, clamp(damp * uAlgaeAmt * 0.95, 0.0, 0.95));
+
+// weed / algae mat concentrated in the lower half of that band
+float algae = smoothstep(3.2, 0.1, yw) * smoothstep(-3.6, -1.4, yw);
+algae *= (0.45 + 0.55 * smoothstep(-0.25, 0.55, Ng.y));
 algae *= (0.52 + 0.48 * (1.0 - occ));
-algae *= 0.45 + 0.55 * smoothstep(-0.35, 0.35, fbm3(P * 0.42 + 31.0, 3));
+algae *= 0.35 + 0.65 * smoothstep(-0.35, 0.35, fbm3(P * 0.42 + 31.0, 3));
 algae *= uAlgaeAmt;
-alb = mix(alb, uColAlgae, clamp(algae, 0.0, 0.92));
-// salt-bleached supratidal band just above the algae
-float bleach = exp(-pow((yw - 4.4) / 2.6, 2.0)) * 0.30 * cvx * smoothstep(0.3, 0.8, h);
+alb = mix(alb, uColAlgae, clamp(algae * 0.95, 0.0, 0.94));
+
+// salt-bleached supratidal band just above the algae. Bleached limestone is *pale
+// warm*, not grey: a neutral bleach colour here was quietly desaturating the brightest
+// and most visible band on every stack.
+float bleach = exp(-pow((yw - 4.6) / 2.4, 2.0)) * 0.26 * cvx * smoothstep(0.3, 0.8, h);
 alb = mix(alb, uColBleach, bleach);
 
 // ---- moss / lichen on the crown ---------------------------------------------
@@ -1107,13 +1136,18 @@ float up = smoothstep(0.10, 0.68, Ng.y);
 float mottle = smoothstep(-0.22, 0.30, fbm3(P * 0.26 + 71.0, 4));   // 'patch' is reserved in GLSL ES 3.00
 float moss = crn * up * mottle * (0.45 + 0.55 * (1.0 - occ)) * uMossAmt;
 alb = mix(alb, uColMoss, clamp(moss, 0.0, 0.9));
-float lich = crn * 0.45 * smoothstep(0.45, 0.95, h) * smoothstep(0.0, 0.5, fbm3(P * 0.7 + 5.0, 3));
-alb = mix(alb, uColLichen, lich * uMossAmt * 0.30);
+// Lichen is not only a crown feature: on a real stack the ochre crusts colonise every
+// dry up-facing ledge and bedding step from the supratidal band to the top. Keeping it
+// on the crown alone threw away the one warm high-chroma accent the rock has.
+float lichZone = max(crn, 0.55 * up * smoothstep(4.0, 8.5, yw));
+float lich = lichZone * 0.50 * smoothstep(0.42, 0.95, h) * smoothstep(0.0, 0.5, fbm3(P * 0.7 + 5.0, 3));
+alb = mix(alb, uColLichen, clamp(lich * uMossAmt * 0.42, 0.0, 0.55));
 
 // under an overhang: dry, dusty, no growth, and genuinely darker
 alb = mix(alb, alb * vec3(0.66, 0.645, 0.635), shl * 0.72);
-// wet rock loses most of its diffuse
-alb *= mix(1.0, 0.46, wet);
+// wet rock loses diffuse — but uColDamp has already taken the tone down, so this is
+// only the last bit of specular-dominated darkening, not a second full halving.
+alb *= mix(1.0, 0.66, wet);
 
 // ---- ambient occlusion (floor kept off zero: the reference p01 is 17, never 0) --
 float ao = mix(1.0, 0.36 + 0.64 * occ, uAOAmt);
@@ -1127,7 +1161,7 @@ diffuseColor.a = 1.0;
 float rgh = uRough * (0.84 + 0.38 * (1.0 - h));
 rgh = mix(rgh, 0.55, algae * 0.55);
 rgh = mix(rgh, 0.78, bed * 0.30);
-rgh = mix(rgh, 0.215, wet);          // damp limestone, not a mirror
+rgh = mix(rgh, 0.31, wet);           // damp porous limestone, not a mirror
 roughnessFactor = clamp(rgh, 0.10, 1.0);
 
 normal = normalize((viewMatrix * vec4(nDet, 0.0)).xyz);
@@ -1141,6 +1175,22 @@ normal = normalize((viewMatrix * vec4(nDet, 0.0)).xyz);
 material.diffuseColor = diffuseColor.rgb;
 material.diffuseContribution = diffuseColor.rgb * (1.0 - metalnessFactor);
 material.roughness = min(max(roughnessFactor, 0.0525) + geometryRoughness, 1.0);
+
+// ---- specular -----------------------------------------------------------------
+// three gives every non-metal a flat F0 = 0.04 with F90 = 1.0. Against a bright sky
+// probe that is a neutral white sheen laid over the whole rock, and it is measurable:
+// a capture with the rock palette forced to black still reads sRGB 36/37/45 with
+// aerial perspective off, all of it indirect specular. Porous chalky carbonate is not
+// a clean dielectric interface — it is conventionally authored nearer specular 0.3
+// (F0 0.025), and the grazing term of a microporous surface never reaches unity:
+// the 'interface' is a statistical mix of grains, pores and dust, so the Fresnel
+// edge peak is suppressed. Measured effect: -6 sRGB on the black-albedo floor.
+// Wet rock goes the other way: that is the entire visual point of a wet rock.
+float sF0  = mix(uSpecF0, 0.038, wet);
+float sF90 = mix(uSpecF90, 0.80, wet);
+material.specularColor = vec3(sF0);
+material.specularColorBlended = mix(vec3(sF0), diffuseColor.rgb, metalnessFactor);
+material.specularF90 = sF90;
 `;
 
 const ROCK_VERT_PARS = /* glsl */`
@@ -1162,7 +1212,8 @@ vRockRK = aRock;
 }
 `;
 
-const C = (r, g, b) => new THREE.Color(r, g, b);
+const PAL = [1, 1, 1];   // calibration probe scale — must be [1,1,1] in shipped builds
+const C = (r, g, b) => new THREE.Color(r * PAL[0], g * PAL[1], b * PAL[2]);
 
 function makeRockMaterial(ctx, texA, texB, o) {
   const mat = new THREE.MeshStandardMaterial({
@@ -1175,6 +1226,7 @@ function makeRockMaterial(ctx, texA, texB, o) {
     uColBright: { value: o.bright },
     uColGrime: { value: o.grime },
     uColStain: { value: o.stain },
+    uColDamp: { value: o.damp },
     uColAlgae: { value: o.algae },
     uColMoss: { value: o.moss },
     uColLichen: { value: o.lichen },
@@ -1186,6 +1238,8 @@ function makeRockMaterial(ctx, texA, texB, o) {
     uDetailAmt: { value: o.detail ?? 1.0 },
     uAOAmt: { value: o.ao ?? 1.0 },
     uMacroAmt: { value: o.macro ?? 1.0 },
+    uSpecF0: { value: o.specF0 ?? 0.025 },
+    uSpecF90: { value: o.specF90 ?? 0.45 },
   };
   // ------------------------------------------------------------------ ordering
   // `applyWorldMaterial` installs its onBeforeCompile and THEN calls
@@ -1287,48 +1341,68 @@ export function create(opts = {}) {
       disposables.push(...A.rts, ...B.rts);
 
       /* ---------------- materials ---------------- */
-      // Warm limestone. Rock-only boxes in kf_01500 measure R 125 / G 110 / B 82 on a
-      // lit face (lab_b +17, sat 95) — a tan, not the near-neutral pale grey a first
-      // read of the 4K crop suggests. In linear that is an albedo R/B ratio near 2.3,
-      // which is what these numbers encode.
+      //
+      // Iron-stained warm limestone. Two numbers set these:
+      //
+      // 1. Level. Pale coastal limestone is ~0.32-0.40 *luminance* reflectance. The
+      //    base below is 0.362, and because the detail chain now averages 0.85 rather
+      //    than 0.96 the surface mean lands near 0.31 — a warm mid-tone, which is what
+      //    a sunlit stack is. It is emphatically not a white surface; the previous
+      //    numbers averaged 0.27 but had a 3.7x bright tail that clipped to bone.
+      //
+      // 2. Hue. The reference rock region is *more* saturated than the sand (sat 86.6
+      //    against 69.0) — the rock is what carries the colour in that frame. Getting
+      //    that relationship the right way round means a genuinely ochre albedo, B/R
+      //    near 0.16, not the 0.33 a photograph of grey limestone would suggest. Two
+      //    things justify going that far: coastal karst is limonite-stained (goethite
+      //    has almost no blue reflectance), and — measured, see reports/rocks.md — this
+      //    build lays a neutral additive veil of sRGB 68/74/85 over rock at 37 m from
+      //    aerial inscatter plus probe specular, which subtracts chroma the albedo has
+      //    to supply in the first place.
       const matRock = makeRockMaterial(ctx, A.tex, B.tex, {
         key: 'rock-limestone',
-        base: C(0.355, 0.256, 0.116),
-        bright: C(0.580, 0.448, 0.222),
-        grime: C(0.094, 0.066, 0.031),
-        stain: C(0.132, 0.090, 0.038),
-        algae: C(0.040, 0.050, 0.020),
-        moss: C(0.032, 0.062, 0.019),
-        lichen: C(0.235, 0.230, 0.104),
-        bleach: C(0.520, 0.470, 0.352),
+        base: C(0.558, 0.330, 0.070),
+        bright: C(0.762, 0.516, 0.148),
+        grime: C(0.086, 0.060, 0.026),
+        stain: C(0.158, 0.082, 0.022),
+        damp: C(0.062, 0.049, 0.027),
+        algae: C(0.048, 0.056, 0.022),
+        moss: C(0.036, 0.068, 0.020),
+        lichen: C(0.300, 0.285, 0.105),
+        bleach: C(0.720, 0.545, 0.235),
         rough: 0.76, algaeAmt: 1.0, mossAmt: 1.0,
       });
       // Beach and surf boulders read much darker and greener than the stacks —
-      // permanently wet, permanently colonised.
+      // permanently wet, permanently colonised. Darker, but not the near-black chips
+      // the first pass produced: a sunlit beach cobble is a mid-dark warm grey, and
+      // 0.115 luminance reflectance rendered as coal against the sand.
       const matBoulder = makeRockMaterial(ctx, A.tex, B.tex, {
         key: 'rock-boulder',
-        base: C(0.140, 0.112, 0.064),
-        bright: C(0.258, 0.216, 0.132),
-        grime: C(0.040, 0.034, 0.024),
-        stain: C(0.064, 0.052, 0.032),
-        algae: C(0.036, 0.046, 0.019),
-        moss: C(0.030, 0.055, 0.018),
-        lichen: C(0.165, 0.170, 0.082),
-        bleach: C(0.300, 0.284, 0.240),
+        base: C(0.284, 0.179, 0.052),
+        bright: C(0.428, 0.294, 0.098),
+        grime: C(0.048, 0.034, 0.018),
+        stain: C(0.082, 0.050, 0.018),
+        damp: C(0.044, 0.036, 0.021),
+        algae: C(0.040, 0.050, 0.020),
+        moss: C(0.030, 0.058, 0.018),
+        lichen: C(0.195, 0.190, 0.078),
+        bleach: C(0.380, 0.318, 0.180),
         rough: 0.70, algaeAmt: 1.5, mossAmt: 0.5, macro: 1.3,
       });
       // Far stacks and islets: pure silhouette work, so the expensive detail scales
-      // are dialled down and AO is flattened — aerial perspective eats it all anyway.
+      // are dialled down and AO is flattened. Aerial perspective eats most of the
+      // chroma at that range, so these start with more of it than the near rock.
       const matFar = makeRockMaterial(ctx, A.tex, B.tex, {
         key: 'rock-far',
-        base: C(0.370, 0.272, 0.132),
-        bright: C(0.552, 0.434, 0.230),
-        grime: C(0.108, 0.086, 0.054),
-        stain: C(0.140, 0.106, 0.060),
-        algae: C(0.048, 0.058, 0.026),
-        moss: C(0.040, 0.070, 0.024),
-        lichen: C(0.225, 0.222, 0.104),
-        bleach: C(0.500, 0.458, 0.350),
+        base: C(0.588, 0.338, 0.068),
+        bright: C(0.755, 0.508, 0.150),
+        grime: C(0.110, 0.078, 0.034),
+        stain: C(0.162, 0.094, 0.032),
+        damp: C(0.072, 0.056, 0.031),
+        algae: C(0.055, 0.062, 0.026),
+        moss: C(0.044, 0.074, 0.024),
+        lichen: C(0.290, 0.278, 0.104),
+        bleach: C(0.710, 0.540, 0.238),
         rough: 0.78, algaeAmt: 0.8, mossAmt: 0.9, detail: 0.6, ao: 0.75, macro: 0.85,
       });
       materials.push(matRock, matBoulder, matFar);

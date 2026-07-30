@@ -1,1 +1,3 @@
 {"tag":"baseline-empty","n":1,"score":0,"axes":{"structure":0,"grade":0,"perceptual":0,"detail":0,"geometry":0,"spectrum":0},"perf":{"fps":0,"ms":0,"drawCalls":14,"tris":14}}
+{"tag":"latest","n":9,"score":22.24,"axes":{"structure":3.74,"grade":0,"perceptual":2.07,"detail":56.64,"geometry":62.52,"spectrum":82.27},"perf":{"fps":0,"ms":0,"drawCalls":592,"tris":12760765}}
+{"tag":"latest","n":9,"score":22.24,"axes":{"structure":3.74,"grade":0,"perceptual":2.07,"detail":56.64,"geometry":62.52,"spectrum":82.27},"perf":{"fps":0,"ms":0,"drawCalls":592,"tris":12760765}}

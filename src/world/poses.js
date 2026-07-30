@@ -38,6 +38,23 @@ export const POSES = {
   // Turning back east: bridge silhouette against bright sky, cliff on the right.
   ref_02220: { pos: [-30.0, 1.74, 4.0], rot: [-1.0, 96.0, 0], fov: 78 },
 
+  /* -------------------------------------------------------- showcase poses */
+  // A curated tour of the level, one pose per thing worth looking at. These are for
+  // `tools/previewsheet.mjs`; they are NOT scored, so they can be retuned freely as the
+  // scene fills in. Keep the names semantic — they become the captions on the sheet.
+  shot_beach_establishing: { pos: [12.0, 1.74, 24.0], rot: [-3.0, 296.0, 0], fov: 78 },
+  shot_forerunner_bridge:  { pos: [-2.0, 2.20, 8.0], rot: [12.0, 78.0, 0], fov: 78 },
+  shot_bridge_underside:   { pos: [-14.0, 1.80, 2.0], rot: [34.0, 84.0, 0], fov: 82 },
+  shot_hero_stack:         { pos: [-16.0, 1.74, -8.0], rot: [6.0, 332.0, 0], fov: 74 },
+  shot_stack_gauntlet:     { pos: [-34.0, 1.74, -34.0], rot: [4.0, 348.0, 0], fov: 78 },
+  shot_shoreline:          { pos: [-22.0, 1.30, -4.0], rot: [-11.0, 318.0, 0], fov: 70 },
+  shot_tide_pools:         { pos: [-44.0, 1.55, -2.0], rot: [-22.0, 300.0, 0], fov: 72 },
+  shot_water_edge:         { pos: [-30.0, 0.85, -12.0], rot: [-6.0, 4.0, 0], fov: 68 },
+  shot_cliff_vegetation:   { pos: [24.0, 2.40, 30.0], rot: [22.0, 40.0, 0], fov: 78 },
+  shot_sky_ring:           { pos: [-10.0, 1.74, 4.0], rot: [30.0, 326.0, 0], fov: 82 },
+  shot_weapon_detail:      { pos: [8.0, 1.74, 18.0], rot: [-14.0, 292.0, 0], fov: 58 },
+  shot_overview:           { pos: [30.0, 46.0, 62.0], rot: [-26.0, 318.0, 0], fov: 72 },
+
   /* ------------------------------------------------------------ diagnostics */
   // Not matched to the reference; used to isolate one subsystem at a time.
   diag_sky:    { pos: [0, 12, 0], rot: [18, 300, 0], fov: 78 },

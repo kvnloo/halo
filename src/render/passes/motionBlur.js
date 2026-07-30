@@ -37,27 +37,37 @@ import { Pass, fsMaterial, makeRT, FullScreenQuad } from '../RenderPipeline.js';
  * runs a 0.06 m near plane against a 12 km far plane, and any absolute epsilon that
  * resolves a gun barrel is meaningless at a sea stack 400 m out.
  *
- * ## The viewmodel must not smear — and today it cannot be detected
+ * ## The viewmodel must not smear
  *
  * A ghosting weapon is an instant tell: the gun is rigidly attached to the camera, so
  * when the player turns it is the one thing on screen that is *not* moving relative to
  * the eye, while every velocity vector around it is enormous.
  *
- * Detection is by `MAT_ID.VIEWMODEL` (8) in `gbuffer.textures[1].b`, which is the
- * contract in docs/ARCHITECTURE.md, and it is applied in three places: the tile
- * reduction (so the gun's own velocity never dilates a tile), the per-tap weight (so the
- * gun cannot smear onto the world or the world onto the gun), and a whole-pixel bypass.
+ * Suppression is applied in three places — the tile reduction (so the gun's own velocity
+ * never dilates a neighbour's tile), the per-tap weight (so the gun cannot paint the
+ * world and the world cannot paint the gun), and a whole-pixel bypass — and it uses
+ * three tests, in decreasing order of principle and increasing order of whether they
+ * currently fire:
  *
- * **This is currently inert, and that is a scene-pass bug, not a bug here.**
- * `src/render/passes/scene.js` renders the G-buffer pre-pass from `LAYER.OPAQUE` and
- * `LAYER.DEFAULT` only; the viewmodel is drawn last, from its own camera, on
- * `LAYER.VIEWMODEL`, and never reaches MRT1. So a viewmodel pixel carries whatever
- * velocity the *world behind it* had, which during a turn is the largest velocity in the
- * frame. `mbNearSuppressM` is a second line of defence — anything closer to the eye than
- * 0.35 m is treated as viewmodel — but it depends on the depth buffer, which has its own
- * problem (see the note on `scene.js` in the report accompanying this pass). Both guards
- * are wired and both will start working the moment the viewmodel appears in the G-buffer;
- * neither can be tested until it does.
+ *  1. `MAT_ID.VIEWMODEL` (8) in `gbuffer.textures[1].b`. This is the contract in
+ *     docs/ARCHITECTURE.md and `weapons.js` honours it — it calls `patchForGBuffer(root,
+ *     { matId: MAT_ID.VIEWMODEL })`. It is nonetheless **unreachable today**, because
+ *     `scene.js` renders the G-buffer pre-pass with only `LAYER.OPAQUE` and
+ *     `LAYER.DEFAULT` enabled and the viewmodel is on `LAYER.VIEWMODEL`. Neither file is
+ *     wrong on its own; the layer is simply never drawn into MRT1.
+ *  2. `drawnAfterPrepass` — depth written, no G-buffer coverage. Verified by capture
+ *     (`dofDebug 1` at `ref_01500`): the depth texture contains the weapon and nothing
+ *     else, because `scene.js` step 7 calls `renderer.clearDepth()` on a target whose
+ *     depth attachment *is* `pipe.depthTex`, then draws the viewmodel. So today this is
+ *     an exact test, and it is exact for a structural reason rather than by luck: the
+ *     viewmodel is the only thing in the engine drawn after the pre-pass. It goes vacuous
+ *     the moment (1) starts working.
+ *  3. `mbNearSuppressM`, a raw near-distance guard. Note that it does **not** catch the
+ *     viewmodel today and is not expected to: the weapon is rasterised by a camera with a
+ *     0.002-12 m frustum, so a fragment at 0.3 m writes a depth that reads as ~9 m when
+ *     decoded with the main camera's 0.06-12000 m near/far. It is kept for a viewmodel
+ *     that is one day drawn by the main camera, and its uselessness in the present
+ *     configuration is recorded here so nobody mistakes it for the working guard.
  *
  * ## Shutter
  *
@@ -99,9 +109,35 @@ import { Pass, fsMaterial, makeRT, FullScreenQuad } from '../RenderPipeline.js';
  *   mbTestVelocity   [x,y]   px/frame injected uniformly, for validating the filter on
  *                            a static capture. Diagnostic only; 0 in every real frame.
  *
- * Cost at 1920x1080: tileMax 0.02 ms + neighbourMax 0.01 ms + reconstruct 0.31 ms while
- * something is actually moving, 0.05 ms when nothing is (the early-out is uniform across
- * whole tiles, so it costs one texture fetch and a branch) => **0.34 ms worst case**.
+ *
+ * ## Cost
+ *
+ * **Estimated, not profiled.** These numbers are derived, not measured, and the
+ * distinction is stated because this project rejects numbers whose provenance is not
+ * given. The GPU was saturated by a dozen concurrent capture sessions throughout this
+ * task, so a toggle-off/toggle-on timing run would have measured contention. The basis
+ * is the one hard measurement available for this chain: `grade.js` records **0.18 ms**
+ * for a full-screen RGBA16F pass at 1920x1080 doing one texture fetch plus four
+ * texelFetch from a cache-resident LUT, and **0.14 ms** for its dither stage doing a
+ * single fetch. Both are bandwidth-bound (8.3 MB read + 8.3 MB write), so in this chain
+ * a full-res pass costs ~0.14 ms of floor and additional taps that hit L1/L2 are close
+ * to free; a half-res pass costs ~a quarter of that.
+ *
+ * A real profiling pass on a quiet GPU is owed and should be run before anyone trusts
+ * these to two decimal places.
+ *
+ * tileMax (two reductions into 96x1080 then 96x54) ~0.03 ms; neighbourMax ~0.01 ms;
+ * reconstruct ~0.16 ms when nothing moves (the early-out is uniform across whole tiles,
+ * so it degenerates to the full-res floor plus one fetch) and ~0.40 ms when the whole
+ * frame is in motion. **~0.20 ms typical, ~0.44 ms during a full-screen fast turn.**
+ *
+ * The known optimisation, deliberately not taken in this pass: fold `velocityUV` into a
+ * full-res setup target packing (vel.xy, linearZ, viewmodelFlag) into one RGBA16F, so
+ * each of the 11 reconstruction taps becomes two coherent fetches along a line instead
+ * of two fetches plus three mat4 products plus a branch. That trades one extra full-res
+ * write for a much cheaper and much less divergent inner loop. It is a rewrite of a
+ * verified pass for an unmeasured performance concern, which is the wrong trade for a
+ * breadth pass - do it when there is a profile that says it matters.
  */
 
 /* ------------------------------------------------------------- velocity library */
@@ -121,12 +157,29 @@ uniform vec2  uRes;
 
 const float MATID_VIEWMODEL = 8.0;
 
+/* The contract test: MAT_ID.VIEWMODEL in MRT1.b. Correct, and currently unreachable —
+ * see the header. */
 bool isViewmodel(vec4 g1){
   return g1.a > 0.5 && abs(g1.b * 255.0 - MATID_VIEWMODEL) < 0.5;
 }
 
-vec2 velocityUV(vec2 uv, out vec4 g1){
+/* The test that actually fires today: a pixel that carries a depth value but no G-buffer
+ * coverage was drawn AFTER the pre-pass. In this engine exactly one thing is, and it is
+ * structural rather than incidental — scene.js step 7 clears depth and draws
+ * LAYER.VIEWMODEL from its own camera, and nothing else in the frame runs after that.
+ * Sky writes no depth; transparent and effects draw before the clear, so whatever depth
+ * they wrote is gone. Cleared depth reads exactly 1.0, so the sky is not caught.
+ *
+ * This becomes vacuous the moment scene.js renders LAYER.VIEWMODEL into the G-buffer
+ * (everything with depth would then also have coverage) and isViewmodel takes over. It is
+ * a bridge, and it is labelled as one. */
+bool drawnAfterPrepass(vec4 g1, float rawDepth){
+  return g1.a <= 0.5 && rawDepth < 0.999999;
+}
+
+vec2 velocityUV(vec2 uv, out vec4 g1, out float rawDepth){
   g1 = texture(tGbuf1, uv);
+  rawDepth = texture(tDepth, uv).r;
   vec2 v;
   if (g1.a > 0.5) {
     // The viewmodel is rigidly attached to the eye: zero, always, and it is excluded
@@ -135,9 +188,10 @@ vec2 velocityUV(vec2 uv, out vec4 g1){
     // KNOWN_ISSUES #1: MRT1.rg carries the current jitter. Cancel it locally.
     v = g1.rg + 0.5 * uJitter;
   } else {
-    // No coverage: sky, or a hole. Camera-only velocity from depth.
-    float d = texture(tDepth, uv).r;
-    vec4 wp4 = uInvVPJit * vec4(uv * 2.0 - 1.0, d * 2.0 - 1.0, 1.0);
+    if (drawnAfterPrepass(g1, rawDepth)) return vec2(0.0);        // viewmodel, as above
+    // No coverage and no depth: sky. Camera-only velocity, reconstructed at the far
+    // plane, which is pure rotational parallax — exactly what a sky should have.
+    vec4 wp4 = uInvVPJit * vec4(uv * 2.0 - 1.0, rawDepth * 2.0 - 1.0, 1.0);
     vec3 wp = wp4.xyz / wp4.w;
     vec4 cc = uCurrVP * vec4(wp, 1.0);
     vec4 pc = uPrevVP * vec4(wp, 1.0);
@@ -164,8 +218,8 @@ void main(){
   for (int i = 0; i < int(uTile); i++) {
     vec2 uv = (vec2(float(x0 + i), float(y)) + 0.5) / uRes;
     if (uv.x > 1.0) break;
-    vec4 g1;
-    vec2 v = velocityUV(uv, g1);
+    vec4 g1; float rawD;
+    vec2 v = velocityUV(uv, g1, rawD);
     float l = dot(v, v);
     if (l > bestLen) { bestLen = l; best = v; }
   }
@@ -274,9 +328,9 @@ float tapJitter(){
 
 void main(){
   vec3 src = texture(tSrc, vUv).rgb;
-  vec4 g1X;
-  vec2 vXuv = velocityUV(vUv, g1X);
-  float zX = linearZ(texture(tDepth, vUv).r);
+  vec4 g1X; float rawX;
+  vec2 vXuv = velocityUV(vUv, g1X, rawX);
+  float zX = linearZ(rawX);
 
   vec2 vN = texture(tNeighbour, vUv).rg * uRes * uHalfShutter;   // px, half-extent
   vec2 vX = vXuv * uRes * uHalfShutter;
@@ -289,8 +343,10 @@ void main(){
 
   float lenVN = min(length(vN), uMaxPx);
   // The viewmodel is rigid in eye space; it must never smear, and it must never be
-  // smeared onto. Depth guard is the fallback for a viewmodel with no material id.
-  bool vmX = isViewmodel(g1X) || (zX < uNearSuppress);
+  // smeared onto. Three tests, in order of how principled they are and inverse order of
+  // whether they currently fire: the material id (the contract), "drawn after the
+  // pre-pass" (structural, and the one that works today), and a raw near-distance guard.
+  bool vmX = isViewmodel(g1X) || drawnAfterPrepass(g1X, rawX) || (zX < uNearSuppress);
   if (lenVN < uMinPx || vmX) { oCol = vec4(src, 1.0); return; }
 
   vN = vN * (lenVN / max(length(vN), 1e-5));
@@ -311,11 +367,12 @@ void main(){
     vec2 uvY = vUv + offPx * uTexel;
     if (uvY.x < 0.0 || uvY.x > 1.0 || uvY.y < 0.0 || uvY.y > 1.0) continue;
 
-    vec4 g1Y;
-    vec2 vYuv = velocityUV(uvY, g1Y);
-    if (isViewmodel(g1Y)) continue;                  // the gun does not paint the world
+    vec4 g1Y; float rawY;
+    vec2 vYuv = velocityUV(uvY, g1Y, rawY);
+    // The gun does not paint the world, and the world does not paint the gun.
+    if (isViewmodel(g1Y) || drawnAfterPrepass(g1Y, rawY)) continue;
 
-    float zY = linearZ(texture(tDepth, uvY).r);
+    float zY = linearZ(rawY);
     float lenVY = min(length(vYuv * uRes * uHalfShutter), uMaxPx);
     float dist = length(offPx);
 

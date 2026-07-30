@@ -159,7 +159,7 @@ const PLACE_GLSL = /* glsl */`
 attribute vec3 aPos;
 attribute vec4 aOri;   // yaw, tilt, scaleY, scaleXZ
 attribute vec4 aVar;   // windPhase, tint, flutter, stiffBias
-attribute vec2 aVeg2;  // seg (0 anchored .. 1 tip), jit
+attribute vec3 aVeg2;  // seg (0 anchored .. 1 tip), jit, ao (0 buried .. 1 exposed)
 
 uniform vec3  uCamPos;
 uniform vec2  uLod;         // (fade start, fade end) in metres
@@ -168,7 +168,9 @@ uniform float uDensity;     // 0..1 global density multiplier
 
 varying float vSeg;
 varying float vTint;
-varying float vFacing;
+varying float vJit;
+varying float vAO;
+varying vec2  vVegUv;
 
 /** Stochastic distance thinning. Returns the surviving instance's width boost. */
 float vegLod(out float alive){
@@ -290,11 +292,15 @@ function makeVegMaterial(ctx, U, o) {
   });
   mat.userData.veg = uni;
 
+  // Per-instance tint alone gives every leaf on one tree the same colour, which reads
+  // as a flat cut-out; folding in the per-sprig jitter is what puts the light/dark
+  // mottling of a real crown into the mass.
   const fragBody = o.fragment || `
-    diffuseColor.rgb *= mix(uColA, uColB, vTint) * mix(uBaseAO, 1.0, vSeg);
+    float vegT = fract(vTint + vJit * 0.71);
+    diffuseColor.rgb *= mix(uColA, uColB, vegT) * mix(uBaseAO, 1.0, vAO);
   `;
 
-  mat.onBeforeCompile = (shader) => {
+  const vegHook = (shader) => {
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>',
         `#include <common>\n${WIND_GLSL}\n${PLACE_GLSL}\nuniform float uGBufPass;\nuniform mat4 uPrevViewProj;\nvarying vec4 vVegCur;\nvarying vec4 vVegPrev;\n`)
@@ -306,7 +312,10 @@ function makeVegMaterial(ctx, U, o) {
                   + aPos * (1.0 - vegAlive);
         vec3 objectNormal = vegN;
         vSeg  = aVeg2.x;
+        vJit  = aVeg2.y;
+        vAO   = aVeg2.z;
         vTint = aVar.y;
+        vVegUv = uv;
       `)
       .replace('#include <begin_vertex>', `
         vec3 transformed = vegP;
@@ -321,18 +330,36 @@ function makeVegMaterial(ctx, U, o) {
                    + aPos * (1.0 - vegAlive);
         }
         vVegPrev = uPrevViewProj * vec4(vegPrevW, 1.0);
-        vFacing = 0.0;
       `);
 
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>',
-        `#include <common>\n${GBUF_PARS_FRAG}\n${TRANS_PARS}\nvarying float vSeg;\nvarying float vTint;\nvarying float vFacing;\n${o.fragPars || ''}\n`)
+        `#include <common>\n${GBUF_PARS_FRAG}\n${TRANS_PARS}\nvarying float vSeg;\nvarying float vTint;\nvarying float vJit;\nvarying float vAO;\nvarying vec2 vVegUv;\n${o.fragPars || ''}\n`)
       .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>\n${GBUF_EMIT}`)
       .replace('#include <aomap_fragment>', `#include <aomap_fragment>\n${TRANS_EMIT}`)
       .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>\n${fragBody}`);
   };
 
-  applyWorldMaterial(mat, ctx, {
+  // ---------------------------------------------------------------------------
+  // Hook order matters, and the obvious order does not work.
+  //
+  // `applyWorldMaterial()` finishes by calling `lighting.registerMaterial()`, which
+  // calls three's `CSM.setupMaterial()` — and that **assigns** `material.onBeforeCompile`
+  // instead of chaining it. So a material set up the obvious way loses every injection
+  // applyWorldMaterial just made, its own aerial-perspective chunk included, and the
+  // symptom is silent: the shader compiles, it just has no aerial and no custom code.
+  // (Verified here: `mat.userData.shader` was never assigned, because the hook that
+  // assigns it had been overwritten before the first compile.)
+  //
+  // Registering with CSM *first* and hiding `lighting` from applyWorldMaterial makes the
+  // chain come out right: applyWorldMaterial -> (csm -> vegHook). CSM only adds uniforms
+  // in its hook — its GLSL arrives through the global ShaderChunk override — so nothing
+  // downstream fights over an include token.
+  ctx.get('lighting')?.registerMaterial?.(mat);
+  const csmHook = mat.onBeforeCompile;
+  mat.onBeforeCompile = (shader, renderer) => { csmHook?.call(mat, shader, renderer); vegHook(shader, renderer); };
+  const noLighting = { get: (n, req) => (n === 'lighting' ? null : ctx.get(n, req)) };
+  applyWorldMaterial(mat, noLighting, {
     matId: MAT_ID.FOLIAGE,
     inject: { key: `veg${_matSeq++}:${o.key || ''}`, uniforms: uni },
   });
@@ -375,9 +402,9 @@ function makeVegDepthMaterial(U, o) {
         vec3 vegN;
         vec3 transformed = vegPlace(position, vegW, uWindT, vegN, normal) * vegAlive
                          + aPos * (1.0 - vegAlive);
-        vSeg = aVeg2.x; vTint = aVar.y; vFacing = 0.0;
+        vSeg = aVeg2.x; vJit = aVeg2.y; vAO = aVeg2.z; vTint = aVar.y; vVegUv = uv;
       `);
-    // vSeg/vTint/vFacing are declared by PLACE_GLSL as varyings; depth_frag does not
+    // vSeg/vTint/vVegUv are declared by PLACE_GLSL as varyings; depth_frag does not
     // read them, which is legal — an unread varying is simply dropped by the linker.
   };
   mat.customProgramCacheKey = () => `vegdepth:${o.key || ''}`;
@@ -391,9 +418,9 @@ function makeVegDepthMaterial(U, o) {
 class GeoBuf {
   constructor() { this.p = []; this.n = []; this.uv = []; this.s = []; this.idx = []; }
   get count() { return this.p.length / 3; }
-  vert(px, py, pz, nx, ny, nz, u, v, seg, jit) {
+  vert(px, py, pz, nx, ny, nz, u, v, seg, jit, ao = 1) {
     this.p.push(px, py, pz); this.n.push(nx, ny, nz);
-    this.uv.push(u, v); this.s.push(seg, jit);
+    this.uv.push(u, v); this.s.push(seg, jit, ao);
     return this.count - 1;
   }
   tri(a, b, c) { this.idx.push(a, b, c); }
@@ -403,7 +430,7 @@ class GeoBuf {
     g.setAttribute('position', new THREE.Float32BufferAttribute(this.p, 3));
     g.setAttribute('normal', new THREE.Float32BufferAttribute(this.n, 3));
     g.setAttribute('uv', new THREE.Float32BufferAttribute(this.uv, 2));
-    g.setAttribute('aVeg2', new THREE.Float32BufferAttribute(this.s, 2));
+    g.setAttribute('aVeg2', new THREE.Float32BufferAttribute(this.s, 3));
     g.setIndex(this.idx);
     return g;
   }
@@ -546,42 +573,61 @@ function finishTexture(mips, ctx, alphaRef) {
   return tex;
 }
 
-/** 2x2 atlas of leaf-cluster cards: canopy sprigs, scrub, ivy, moss. */
+/**
+ * 2x2 atlas of leaf-cluster cards: canopy sprigs, scrub, ivy, moss.
+ *
+ * The leaves are deliberately small relative to the tile (~6% of it) and there are a lot
+ * of them. The first version used leaves three times that size and the canopy read as
+ * torn paper — at the distances that matter here a card is 15-40 px across, so a leaf has
+ * to be 1-3 px for the mass to read as foliage rather than as blobs. Wide per-leaf
+ * luminance variation is what puts real high-frequency energy into the crown.
+ */
 function makeLeafAtlas(rand, ctx, S = 512) {
   const buf = new Float32Array(S * S * 4);
   const T = S / 2;
   for (let ty = 0; ty < 2; ty++) {
     for (let tx = 0; tx < 2; tx++) {
       const ox = tx * T, oy = ty * T;
-      const nLeaf = 68 + Math.floor(rand.next() * 26);
-      // a stem armature so the cluster reads as a sprig, not a spatter
-      const stems = 3 + Math.floor(rand.next() * 3);
+      // a branching stem armature, so the cluster reads as a sprig, not a spatter
+      const stems = 4 + Math.floor(rand.next() * 3);
       const pts = [];
       for (let s = 0; s < stems; s++) {
-        const a = -Math.PI * 0.5 + rand.sym(1.15);
-        const l = T * (0.30 + 0.16 * rand.next());
-        const bx = ox + T * 0.5 + rand.sym(T * 0.10);
-        const by = oy + T * 0.88;
-        for (let k = 0; k <= 6; k++) {
-          const t = k / 6;
-          pts.push([bx + Math.cos(a) * l * t + rand.sym(T * 0.05 * t),
-            by + Math.sin(a) * l * t * 1.05 + rand.sym(T * 0.04 * t), t]);
+        const a = -Math.PI * 0.5 + rand.sym(1.05);
+        const l = T * (0.40 + 0.22 * rand.next());
+        const bx = ox + T * 0.5 + rand.sym(T * 0.09);
+        const by = oy + T * 0.93;
+        for (let k = 1; k <= 9; k++) {
+          const t = k / 9;
+          const px = bx + Math.cos(a) * l * t + rand.sym(T * 0.06 * t);
+          const py = by + Math.sin(a) * l * t * 1.02 + rand.sym(T * 0.05 * t);
+          pts.push([px, py, t]);
+          // side shoots carry the outer leaves and make the silhouette feathery
+          if (k > 3 && rand.next() < 0.55) {
+            const sa = a + (rand.next() < 0.5 ? 1 : -1) * rand.range(0.5, 1.25);
+            const sl = l * rand.range(0.16, 0.38);
+            for (let j = 1; j <= 4; j++) {
+              pts.push([px + Math.cos(sa) * sl * (j / 4), py + Math.sin(sa) * sl * (j / 4),
+                Math.min(1, t + 0.1 * j)]);
+            }
+          }
         }
       }
+      const nLeaf = 230 + Math.floor(rand.next() * 70);
       for (let i = 0; i < nLeaf; i++) {
         const anchor = pts[Math.floor(rand.next() * pts.length)];
-        const spread = T * (0.05 + 0.16 * (1 - anchor[2]));
+        const spread = T * (0.022 + 0.055 * (1 - anchor[2] * 0.6));
         const cx = anchor[0] + rand.sym(spread);
-        const cy = anchor[1] + rand.sym(spread * 0.85);
-        if (cx < ox + 5 || cx > ox + T - 5 || cy < oy + 5 || cy > oy + T - 5) continue;
-        const len = T * (0.075 + 0.075 * rand.next());
-        const wid = len * (0.42 + 0.26 * rand.next());
+        const cy = anchor[1] + rand.sym(spread);
+        if (cx < ox + 3 || cx > ox + T - 3 || cy < oy + 3 || cy > oy + T - 3) continue;
+        const len = T * (0.038 + 0.036 * rand.next());
+        const wid = len * (0.40 + 0.30 * rand.next());
         const ang = rand.range(0, Math.PI * 2);
-        // olive / khaki, R ~= G, B about half — measured off the reference
-        const v = 0.55 + 0.45 * rand.next();
-        const yellow = 0.86 + 0.20 * rand.next();
+        // olive / khaki, R ~= G with B about half — measured off the reference. The
+        // 0.34..1.0 value range is the interior-shadow to sunlit-face spread.
+        const v = 0.34 + 0.66 * Math.pow(rand.next(), 0.75);
+        const yellow = 0.84 + 0.24 * rand.next();
         drawLeaf(buf, S, S, cx, cy, len, wid, ang,
-          0.90 * v * yellow, 0.96 * v, 0.50 * v * (1.10 - 0.25 * yellow));
+          0.92 * v * yellow, 0.98 * v, 0.48 * v * (1.10 - 0.25 * yellow));
       }
     }
   }
@@ -606,19 +652,19 @@ function makeVineStrip(rand, ctx, W = 128, H = 512) {
       buf[i + 3] = Math.max(buf[i + 3], a);
     }
   }
-  const n = 116;
+  const n = 340;
   for (let i = 0; i < n; i++) {
     const t = Math.pow(i / n, 0.92);
-    const y = 12 + t * (H - 26);
+    const y = 8 + t * (H - 18);
     const wob = Math.sin(t * 11.0) * W * 0.055 + Math.sin(t * 4.3 + 1.1) * W * 0.045;
     const side = (i % 2 === 0) ? 1 : -1;
-    const taper = 1 - 0.55 * t;
-    const len = W * (0.13 + 0.07 * rand.next()) * taper;
-    const wid = len * (0.62 + 0.24 * rand.next());
-    const ang = side > 0 ? rand.range(0.15, 1.05) : Math.PI - rand.range(0.15, 1.05);
-    const cxx = cx + wob + side * len * 0.55;
-    const v = 0.44 + 0.40 * rand.next();
-    drawLeaf(buf, W, H, cxx, y + rand.sym(3), len, wid, ang,
+    const taper = 1 - 0.62 * t;
+    const len = W * (0.075 + 0.055 * rand.next()) * taper;
+    const wid = len * (0.66 + 0.26 * rand.next());
+    const ang = side > 0 ? rand.range(0.20, 1.15) : Math.PI - rand.range(0.20, 1.15);
+    const cxx = cx + wob + side * len * (0.35 + 0.5 * rand.next());
+    const v = 0.34 + 0.52 * rand.next();
+    drawLeaf(buf, W, H, cxx, y + rand.sym(4), len, wid, ang,
       0.82 * v, 0.94 * v, 0.42 * v);
   }
   return finishTexture(buildAlphaMips(buf, W, H, 0.5), ctx, 0.5);
@@ -643,7 +689,7 @@ function bladeGeometry(seg = 4, curve = 0.42, tipW = 0.10) {
       const bend = (s === 0 ? -0.55 : 0.55);
       const nx = bend;
       const l = Math.hypot(nx, -ny, nz);
-      gb.vert(x, t, z, nx / l, -ny / l, nz / l, s, t, t, 0);
+      gb.vert(x, t, z, nx / l, -ny / l, nz / l, s, t, t, 0, t);
     }
   }
   for (let i = 0; i < seg; i++) {
@@ -669,7 +715,7 @@ function vineGeometry(seg = 11, planes = 2) {
       for (let s = 0; s < 2; s++) {
         const off = (s === 0 ? -half : half);
         gb.vert(dx * (off + drift * 0.35), y, dz * (off + drift * 0.35),
-          -dz, 0.12, dx, s, t, t, (pl * 0.37 + t * 0.21) % 1);
+          -dz, 0.12, dx, s, t, t, (pl * 0.37 + t * 0.21) % 1, 0.30 + 0.70 * t);
       }
     }
     for (let i = 0; i < seg; i++) {
@@ -690,38 +736,39 @@ function cardGeometry(planes = 2, tile = 0, tiles = 2, lean = 0.0) {
     const nx = -dz, nz = dx;
     const b = gb.count;
     const sk = lean;
-    gb.vert(-dx * 0.5, 0, -dz * 0.5, nx, 0.45, nz, tu, tv + ts, 0.0, p * 0.31);
-    gb.vert(dx * 0.5, 0, dz * 0.5, nx, 0.45, nz, tu + ts, tv + ts, 0.0, p * 0.31);
-    gb.vert(dx * 0.5 + sk, 1, dz * 0.5, nx, 0.45, nz, tu + ts, tv, 1.0, p * 0.31);
-    gb.vert(-dx * 0.5 + sk, 1, -dz * 0.5, nx, 0.45, nz, tu, tv, 1.0, p * 0.31);
+    gb.vert(-dx * 0.5, 0, -dz * 0.5, nx, 0.45, nz, tu, tv + ts, 0.0, p * 0.31, 0.28);
+    gb.vert(dx * 0.5, 0, dz * 0.5, nx, 0.45, nz, tu + ts, tv + ts, 0.0, p * 0.31, 0.28);
+    gb.vert(dx * 0.5 + sk, 1, dz * 0.5, nx, 0.45, nz, tu + ts, tv, 1.0, p * 0.31, 1.0);
+    gb.vert(-dx * 0.5 + sk, 1, -dz * 0.5, nx, 0.45, nz, tu, tv, 1.0, p * 0.31, 1.0);
     gb.quad(b, b + 1, b + 2, b + 3);
   }
   return gb;
 }
 
-/** Moss/scrub clump: a squashed dome of leaf cards plus a drooping skirt. */
-function clumpGeometry(rand, cards = 7, tiles = 2) {
+/**
+ * Moss / scrub clump: a squashed dome of leaf cards.
+ * Normals are blended toward the dome-outward direction for the same reason the tree
+ * sprigs are — a mat of cards with card normals shades flat, and the moss crowns in
+ * kf_01500 are one of the strongest light-to-dark reads in the frame.
+ */
+function clumpGeometry(rand, cards = 8, tiles = 2) {
   const gb = new GeoBuf();
   for (let i = 0; i < cards; i++) {
-    const a = (i / cards) * Math.PI * 2 + rand.sym(0.35);
-    const r = 0.30 + 0.26 * rand.next();
-    const h = 0.42 + 0.55 * rand.next();
-    const droop = (i % 3 === 0) ? -0.30 - 0.30 * rand.next() : 0.0;
-    const tile = Math.floor(rand.next() * tiles * tiles);
-    const tu = (tile % tiles) / tiles, tv = Math.floor(tile / tiles) / tiles, ts = 1 / tiles;
-    const cx = Math.cos(a) * r * 0.55, cz = Math.sin(a) * r * 0.55;
-    const ux = Math.cos(a + 1.5708), uz = Math.sin(a + 1.5708);
-    const s = 0.42 + 0.24 * rand.next();
-    const jit = rand.next();
-    const b = gb.count;
-    const nyv = 0.72;
-    gb.vert(cx - ux * s, droop, cz - uz * s, Math.cos(a) * 0.6, nyv, Math.sin(a) * 0.6, tu, tv + ts, 0.05, jit);
-    gb.vert(cx + ux * s, droop, cz + uz * s, Math.cos(a) * 0.6, nyv, Math.sin(a) * 0.6, tu + ts, tv + ts, 0.05, jit);
-    gb.vert(cx + ux * s + Math.cos(a) * r * 0.5, h, cz + uz * s + Math.sin(a) * r * 0.5,
-      Math.cos(a) * 0.6, nyv, Math.sin(a) * 0.6, tu + ts, tv, 1.0, jit);
-    gb.vert(cx - ux * s + Math.cos(a) * r * 0.5, h, cz - uz * s + Math.sin(a) * r * 0.5,
-      Math.cos(a) * 0.6, nyv, Math.sin(a) * 0.6, tu, tv, 1.0, jit);
-    gb.quad(b, b + 1, b + 2, b + 3);
+    const a = (i / cards) * Math.PI * 2 + rand.sym(0.45);
+    const rr = 0.18 + 0.34 * rand.next();
+    const se = -0.10 + 0.95 * Math.pow(rand.next(), 0.55);
+    const ce = Math.sqrt(Math.max(0, 1 - se * se));
+    const px = Math.cos(a) * ce * rr, pz = Math.sin(a) * ce * rr, py = se * 0.55;
+    emitSprig(gb, rand, px, py + 0.2, pz, 0.62 + 0.42 * rand.next(),
+      Math.min(1, 0.25 + py * 1.5), tiles, px, py * 1.7 + 0.5, pz, 2,
+      0.30 + 0.70 * Math.min(1, Math.max(0, se * 0.9 + 0.35)));
+  }
+  // a short skirt of down-turned cards so the clump does not float on its base
+  for (let i = 0; i < Math.max(2, cards >> 1); i++) {
+    const a = (i / (cards >> 1)) * Math.PI * 2 + rand.sym(0.6);
+    const px = Math.cos(a) * 0.42, pz = Math.sin(a) * 0.42;
+    emitSprig(gb, rand, px, -0.05 - 0.3 * rand.next(), pz, 0.52 + 0.3 * rand.next(),
+      0.12, tiles, px * 2.0, -0.4, pz * 2.0, 1, 0.16);
   }
   return gb;
 }
@@ -758,7 +805,7 @@ function emitTube(gb, pts, radii, segs, seg0, seg1) {
       const ny = ref.y * Math.cos(a) + bi.y * Math.sin(a);
       const nz = ref.z * Math.cos(a) + bi.z * Math.sin(a);
       ring.push(gb.vert(p.x + nx * r, p.y + ny * r, p.z + nz * r,
-        nx, ny, nz, s / segs * 3, t * 4, seg, 0));
+        nx, ny, nz, s / segs * 3, t * 4, seg, 0, 1));
     }
     rings.push(ring);
   }
@@ -770,27 +817,55 @@ function emitTube(gb, pts, radii, segs, seg0, seg1) {
   }
 }
 
-function emitSprig(gb, rand, cx, cy, cz, size, seg, tiles, flat) {
-  const planes = 3;
+/**
+ * A leaf sprig: `planes` randomly-oriented quads through one point.
+ *
+ * Two details matter more than the geometry.
+ *
+ * 1. **Random plane orientation.** The first version used two vertical quads plus one
+ *    horizontal, and the horizontal ones all went edge-on together at grazing angles,
+ *    which drew coherent bright streaks across the top of the crown. Random axes have
+ *    no shared degenerate view.
+ *
+ * 2. **The normal is blended toward the canopy-outward direction** (`ox,oy,oz`). A card's
+ *    true normal is meaningless for a leaf mass; using it makes a crown shade like a pile
+ *    of shuffled cards — uniformly mid-grey from every angle, which is exactly how the
+ *    first render came out. Blending 72% toward "away from the canopy centre" makes the
+ *    crown shade as the rounded volume it is meant to represent: lit on top, dark
+ *    underneath, and with a rim where the sun grazes it.
+ */
+function emitSprig(gb, rand, cx, cy, cz, size, seg, tiles, ox, oy, oz, planes = 3, ao = 1) {
   const jit = rand.next();
+  const ol = Math.hypot(ox, oy, oz) || 1;
+  const oux = ox / ol, ouy = oy / ol, ouz = oz / ol;
   for (let p = 0; p < planes; p++) {
     const tile = Math.floor(rand.next() * tiles * tiles);
     const tu = (tile % tiles) / tiles, tv = Math.floor(tile / tiles) / tiles, ts = 1 / tiles;
-    const a = (p / planes) * Math.PI + rand.sym(0.4);
-    let ax = Math.cos(a), az = Math.sin(a), ay = 0;
-    let bx = 0, by = 1, bz = 0;
-    if (p === planes - 1 && flat) { by = 0.18; bx = -az * 0.98; bz = ax * 0.98; }
-    const s = size * (0.78 + 0.44 * rand.next());
+    // random orthonormal pair: `a` across the card, `b` up it
+    const th = rand.range(0, Math.PI * 2), ph = Math.acos(rand.range(-1, 1));
+    const ax = Math.sin(ph) * Math.cos(th), ay = Math.cos(ph) * 0.55, az = Math.sin(ph) * Math.sin(th);
+    // bias the card's "up" toward world up so sprigs still hang the right way
+    let bx = -ax * 0.25, by = 1, bz = -az * 0.25;
+    const bd = ax * bx + ay * by + az * bz;
+    bx -= ax * bd; by -= ay * bd; bz -= az * bd;
+    const bl = Math.hypot(bx, by, bz) || 1;
+    bx /= bl; by /= bl; bz /= bl;
+    const s = size * (0.72 + 0.56 * rand.next());
     const hx = ax * s * 0.5, hy = ay * s * 0.5, hz = az * s * 0.5;
     const vx = bx * s, vy = by * s, vz = bz * s;
-    const nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+    let nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
     const nl = Math.hypot(nx, ny, nz) || 1;
+    nx = nx / nl * 0.28 + oux * 0.72;
+    ny = ny / nl * 0.28 + ouy * 0.72;
+    nz = nz / nl * 0.28 + ouz * 0.72;
+    const ml = Math.hypot(nx, ny, nz) || 1;
+    nx /= ml; ny /= ml; nz /= ml;
     const b = gb.count;
-    const ox = cx - vx * 0.45, oy = cy - vy * 0.45, oz = cz - vz * 0.45;
-    gb.vert(ox - hx, oy - hy, oz - hz, nx / nl, ny / nl, nz / nl, tu, tv + ts, seg, jit);
-    gb.vert(ox + hx, oy + hy, oz + hz, nx / nl, ny / nl, nz / nl, tu + ts, tv + ts, seg, jit);
-    gb.vert(ox + hx + vx, oy + hy + vy, oz + hz + vz, nx / nl, ny / nl, nz / nl, tu + ts, tv, seg, jit);
-    gb.vert(ox - hx + vx, oy - hy + vy, oz - hz + vz, nx / nl, ny / nl, nz / nl, tu, tv, seg, jit);
+    const qx = cx - vx * 0.5, qy = cy - vy * 0.5, qz = cz - vz * 0.5;
+    gb.vert(qx - hx, qy - hy, qz - hz, nx, ny, nz, tu, tv + ts, seg, jit, ao);
+    gb.vert(qx + hx, qy + hy, qz + hz, nx, ny, nz, tu + ts, tv + ts, seg, jit, ao);
+    gb.vert(qx + hx + vx, qy + hy + vy, qz + hz + vz, nx, ny, nz, tu + ts, tv, seg, jit, ao);
+    gb.vert(qx - hx + vx, qy - hy + vy, qz - hz + vz, nx, ny, nz, tu, tv, seg, jit, ao);
     gb.quad(b, b + 1, b + 2, b + 3);
   }
 }
@@ -860,28 +935,44 @@ function buildTree(rand, P) {
   for (const t of tips) { cx += t.p.x; cy += t.p.y; cz += t.p.z; }
   cx /= tips.length; cy /= tips.length; cz /= tips.length;
 
+  // A lumpy radius field: without it the crown is a smooth ellipse, and a smooth ellipse
+  // is the one thing a real tree never is. Six harmonics in azimuth, two in elevation.
+  const lump = (a, e) =>
+    0.80 + 0.13 * Math.sin(a * 2.0 + P.lumpSeed)
+    + 0.10 * Math.sin(a * 3.7 - P.lumpSeed * 1.7)
+    + 0.07 * Math.sin(a * 6.1 + e * 3.0)
+    + 0.06 * Math.sin(e * 4.0 + a * 1.3);
+
   for (const t of tips) {
     const n = P.sprigsPerTip;
     for (let i = 0; i < n; i++) {
       const a = rand.range(0, Math.PI * 2), r = P.tipCluster * Math.sqrt(rand.next());
-      emitSprig(leaves, rand,
-        t.p.x + Math.cos(a) * r, t.p.y + rand.sym(P.tipCluster * 0.55) + P.sprigLift,
-        t.p.z + Math.sin(a) * r,
-        P.sprigSize, t.seg, P.tiles, true);
+      const px = t.p.x + Math.cos(a) * r;
+      const py = t.p.y + rand.sym(P.tipCluster * 0.5) + P.sprigLift;
+      const pz = t.p.z + Math.sin(a) * r;
+      emitSprig(leaves, rand, px, py, pz, P.sprigSize, t.seg, P.tiles,
+        px - cx, (py - cy) * (P.canopyR / P.canopyH) + 0.6, pz - cz, 3, 0.55);
     }
   }
+  // Shell fill on a squashed, lumpy spheroid. Density is biased to the upper surface —
+  // the reference crown is dense and flat on top and thins out underneath, where the
+  // branch structure shows through.
   for (let i = 0; i < P.shellSprigs; i++) {
     const a = rand.range(0, Math.PI * 2);
-    const u = Math.sqrt(rand.next());
-    const rr = P.canopyR * u;
-    // top surface of an oblate dome, dented by a coarse wobble
-    const dome = Math.sqrt(Math.max(0, 1 - u * u));
-    const wob = 0.82 + 0.36 * Math.sin(a * 3.1 + u * 6.0) * (0.4 + 0.6 * rand.next());
-    const y = cy + P.canopyH * dome * wob - P.canopyH * 0.18;
-    emitSprig(leaves, rand,
-      cx + Math.cos(a) * rr, y, cz + Math.sin(a) * rr,
-      P.sprigSize * (0.85 + 0.4 * rand.next()),
-      0.86 + 0.14 * u, P.tiles, true);
+    // elevation biased upward: -0.45 .. 1 in sin(elev)
+    const se = -0.45 + 1.45 * Math.pow(rand.next(), 0.62);
+    const ce = Math.sqrt(Math.max(0, 1 - se * se));
+    // 30% sit inside the shell so no sky punches through the middle
+    const depth = rand.next() < 0.30 ? rand.range(0.52, 0.86) : rand.range(0.90, 1.06);
+    const k = lump(a, se) * depth;
+    const dx = Math.cos(a) * ce * P.canopyR * k;
+    const dz = Math.sin(a) * ce * P.canopyR * k;
+    const dy = se * P.canopyH * k;
+    emitSprig(leaves, rand, cx + dx, cy + dy, cz + dz,
+      P.sprigSize * (0.80 + 0.5 * rand.next()),
+      0.80 + 0.20 * Math.min(1, k), P.tiles,
+      dx, dy * (P.canopyR / P.canopyH) + 0.35 * P.canopyR, dz, 3,
+      Math.min(1, Math.max(0.10, (depth - 0.45) / 0.55)) * (0.45 + 0.55 * (se * 0.5 + 0.5)));
   }
   return { branch, leaves, canopy: { x: cx, y: cy, z: cz, r: P.canopyR } };
 }
@@ -1034,12 +1125,10 @@ export function create(opts = {}) {
         transColor: lin(0, 0, 0), transScale: 0.0, transPower: 1.0,
         windAmp: 0.055, flutter: 0.35, segScale: 1.0, baseAO: 1.0,
         lod: [900, 1400], widthGrow: 0.0,
-        fragPars: NOISE_GLSL + `
-          varying vec3 vWorldPositionWM;
-        `,
+        fragPars: NOISE_GLSL,
         fragment: `
           // fibrous, twisted bark. vUv.x runs around the branch, vUv.y along it.
-          vec2 bu = vUv * vec2(1.0, 1.0);
+          vec2 bu = vVegUv;
           float fib = fbm2(vec2(bu.x * 26.0 + bu.y * 2.6, bu.y * 5.0), 4);
           float rid = ridged2(vec2(bu.x * 13.0 + bu.y * 1.7, bu.y * 3.1), 4);
           float fis = smoothstep(0.42, 0.86, rid);
@@ -1121,21 +1210,23 @@ export function create(opts = {}) {
       /* ================================================================== *
        *  Trees
        * ================================================================== */
+      // Proportions read off kf_00720: canopy width ~= total tree height, the fork sits
+      // a little over half way up, and the crown is roughly 2.4x wider than it is tall.
       const heroP = {
-        trunkLen: 8.2, trunkR: 0.92, trunkLean: 0.42, flare: 1.15, taper: 0.42,
-        maxDepth: 3, splits: [3, 2, 2], spread: [0.62, 0.62, 0.55],
-        lift: [0.10, 0.02, 0.05], flatten: 0.34, lenFall: 0.62, radFall: 0.55,
+        trunkLen: 8.6, trunkR: 1.05, trunkLean: 0.52, flare: 1.35, taper: 0.46,
+        maxDepth: 3, splits: [3, 2, 2], spread: [0.60, 0.60, 0.52],
+        lift: [0.12, 0.04, 0.06], flatten: 0.32, lenFall: 0.60, radFall: 0.54,
         segStep: [0.34, 0.28, 0.22, 0.16],
-        sprigsPerTip: 5, tipCluster: 1.5, sprigSize: 3.0, sprigLift: 0.35,
-        shellSprigs: 190, canopyR: 8.4, canopyH: 3.1, tiles: 2,
+        sprigsPerTip: 12, tipCluster: 1.9, sprigSize: 1.45, sprigLift: 0.35,
+        shellSprigs: 700, canopyR: 8.6, canopyH: 3.6, lumpSeed: 1.7, tiles: 2,
       };
       const smallP = {
-        trunkLen: 4.6, trunkR: 0.40, trunkLean: 0.55, flare: 0.85, taper: 0.46,
-        maxDepth: 2, splits: [3, 2], spread: [0.70, 0.62],
-        lift: [0.12, 0.06], flatten: 0.40, lenFall: 0.60, radFall: 0.52,
+        trunkLen: 4.8, trunkR: 0.46, trunkLean: 0.62, flare: 0.95, taper: 0.50,
+        maxDepth: 2, splits: [3, 2], spread: [0.68, 0.60],
+        lift: [0.14, 0.06], flatten: 0.38, lenFall: 0.58, radFall: 0.52,
         segStep: [0.40, 0.32, 0.22],
-        sprigsPerTip: 4, tipCluster: 0.9, sprigSize: 1.9, sprigLift: 0.2,
-        shellSprigs: 74, canopyR: 4.2, canopyH: 1.9, tiles: 2,
+        sprigsPerTip: 8, tipCluster: 1.1, sprigSize: 0.92, sprigLift: 0.2,
+        shellSprigs: 300, canopyR: 4.3, canopyH: 2.0, lumpSeed: 4.1, tiles: 2,
       };
 
       const species = [buildTree(rand.fork(11), heroP), buildTree(rand.fork(12), smallP)];
@@ -1362,37 +1453,50 @@ export function create(opts = {}) {
       const vineGeo = vineGeometry(11, 2);
       const vineInst = new Instances();
       const vr = rand.fork(61);
-      // cliff: anchor at the lip, hang into the undercut
-      for (let i = 0, t = 0; i < CFG.vineStrands * 0.62 && t < 90000; t++) {
+      /* A curtain is a *cluster*, not a uniform fringe. In kf_00720 and kf_01500 the
+       * vines hang in two or three discrete falls per stack, each a tight fan whose
+       * strands are longest in the middle and taper to nothing at the sides. Scattering
+       * strands evenly round the rim gives a row of identical dreadlocks, which is what
+       * the first pass looked like. */
+      const curtain = (ax, ay, az, nx, nz, span, maxLen, n) => {
+        const yaw = Math.atan2(nx, nz);
+        for (let i = 0; i < n; i++) {
+          const u = vr.range(-1, 1);
+          const fall = Math.pow(Math.max(0, 1 - u * u), 0.55);
+          const px = ax - nz * u * span, pz = az + nx * u * span;
+          vineInst.add(px, ay - vr.next() * 0.7, pz,
+            yaw + vr.sym(0.55), vr.sym(0.10),
+            maxLen * (0.22 + 0.78 * fall) * (0.7 + 0.6 * vr.next()),
+            0.28 + 0.42 * vr.next(),
+            bakePhase(px, pz, vr.next()), vr.next(), 1.0, 0.0);
+        }
+      };
+
+      // cliff: curtains hanging out of the undercut, anchored on the steepest faces
+      for (let i = 0, t = 0; i < 26 && t < 30000; t++) {
         const x = vr.range(-158, 188), z = vr.range(52, 74);
         const s = world.sample(x, z);
         if (s.slope < 0.80) continue;
-        if (s.y < 20 || s.y > 62) continue;
-        if (vr.next() > 0.55) continue;
+        if (s.y < 22 || s.y > 60) continue;
         const n = s.normal;
-        const len = 2.4 + 7.5 * Math.pow(vr.next(), 1.4);
-        vineInst.add(x + n.x * 0.5, s.y + 0.4, z + n.z * 0.5,
-          Math.atan2(n.x, n.z) + vr.sym(0.7), vr.sym(0.12),
-          len, 0.55 + 0.9 * vr.next(),
-          bakePhase(x, z, vr.next()), vr.next(), 1.0, 0.0);
+        const nl = Math.hypot(n.x, n.z) || 1;
+        curtain(x + n.x * 0.6, s.y + 0.5, z + n.z * 0.6, n.x / nl, n.z / nl,
+          1.6 + 2.6 * vr.next(), 3.0 + 5.0 * vr.next(), 22 + Math.floor(vr.next() * 20));
         i++;
       }
-      // stacks: a curtain off the rim, heaviest on one side (they read as one mass)
+      // stacks: two or three falls off the rim, on one favoured side
       for (const id of stacks) {
         const L = landmarkOf(id);
         if (!L) continue;
-        const n = Math.round(CFG.vineStrands * 0.38 / stacks.length);
+        const nFalls = 2 + Math.floor(vr.next() * 2);
         const favour = vr.range(0, 6.2831);
-        for (let i = 0; i < n; i++) {
-          let a = favour + vr.sym(1.15);
-          if (vr.next() < 0.30) a = vr.range(0, 6.2831);
-          const rr = L.radius * (0.94 + 0.10 * vr.next());
+        for (let f = 0; f < nFalls; f++) {
+          const a = favour + vr.sym(1.5);
+          const rr = L.radius * (0.93 + 0.08 * vr.next());
           const x = L.x + Math.cos(a) * rr, z = L.z + Math.sin(a) * rr;
-          const len = 3.0 + 9.0 * Math.pow(vr.next(), 1.5);
-          vineInst.add(x, L.topY - 1.2 - vr.next() * 4.5, z,
-            a + 1.5708 + vr.sym(0.5), vr.sym(0.10),
-            len, 0.7 + 1.2 * vr.next(),
-            bakePhase(x, z, vr.next()), vr.next(), 1.0, 0.0);
+          curtain(x, L.topY - 1.6 - vr.next() * 2.5, z, Math.cos(a), Math.sin(a),
+            1.4 + 2.2 * vr.next(), 3.5 + 6.5 * vr.next(),
+            26 + Math.floor(vr.next() * 26));
         }
       }
       addMesh(vineGeo.toGeometry(), matVine, vineInst, 12, false, null);

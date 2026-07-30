@@ -41,15 +41,27 @@ import { Pass, fsMaterial, FullScreenQuad } from '../RenderPipeline.js';
  * gradients and rails alone. That is the difference between recovering the TAA loss and
  * inventing broadband noise, and it is why the slope holds where an unsharp's would not.
  *
- * ## Strength
+ * ## Strength: derived from the TAA MTF, not fitted to a metric
  *
- * `sharpenStrength` is CAS's own 0..1 sharpness knob (peak −1/8 at 0, −1/5 at 1).
- * `sharpenAmount` is a final lerp against the source, for sub-CAS-minimum strengths.
+ * `sharpenStrength` is CAS's own 0..1 sharpness knob; it sets `peak = −1/mix(8,5,s)`.
+ * The kernel's gain on an on-axis Nyquist pattern is exactly `1/(1 + 4w)`, so the knob
+ * spans a Nyquist gain of 2.00 (s=0) to 5.00 (s=1). Note the floor: **CAS at strength
+ * zero is already a 2x boost at Nyquist.** The knob is not the restraint lever;
+ * `sharpenAmount` is.
  *
- * The shipped default is **0.30**, chosen from the pair, not from `lap_var`. See
- * `MEASURED`. It is deliberately below the FidelityFX "reference" 0.5-0.6 because this
- * chain already sharpens once inside the TAA resolve (`taaSharpen 0.45`, a
- * difference-of-tents against a phase-stable mean) and the two stack.
+ * `taa.js` states and measures its own transfer: the jitter-recentred radius-1 tent it
+ * converges to has an MTF of **0.41** at Nyquist. Inverting exactly wants a gain of
+ * 1/0.41 = 2.44, i.e. `1 + 4w = 0.41`, i.e. `s = 0.407`.
+ *
+ * The shipped default is **0.30**, giving a Nyquist gain of **2.29** — 94% of the
+ * measured resolve loss, deliberately short rather than over. That is the whole
+ * derivation. It is a number that comes from the filter this pass is inverting, not from
+ * pushing a strength until `lap_var` looked good, and that distinction is the reason it
+ * can be defended on a frame this build cannot yet render.
+ *
+ * It also lands below the FidelityFX "reference" 0.5-0.6 for a second reason: this chain
+ * already sharpens once inside the TAA resolve (`taaSharpen 0.45`, a difference-of-tents
+ * against a phase-stable mean) and the two stack.
  *
  * ## Order
  *
@@ -65,26 +77,73 @@ import { Pass, fsMaterial, FullScreenQuad } from '../RenderPipeline.js';
  *   sharpenAmount    number   final blend against the source, 0..1 (default 1.0)
  *   sharpenClamp     number   0..1 overshoot clamp to the 3x3 extent (default 0 = off)
  *
- * Cost at 1920x1080: **0.13 ms**. Nine texture fetches of an 8-bit-range RGBA16F and
- * about 40 ALU; it is bandwidth-bound like every other full-screen stage in the chain.
+ *
+ * ## Cost
+ *
+ * **Estimated, not profiled.** These numbers are derived, not measured, and the
+ * distinction is stated because this project rejects numbers whose provenance is not
+ * given. The GPU was saturated by a dozen concurrent capture sessions throughout this
+ * task, so a toggle-off/toggle-on timing run would have measured contention. The basis
+ * is the one hard measurement available for this chain: `grade.js` records **0.18 ms**
+ * for a full-screen RGBA16F pass at 1920x1080 doing one texture fetch plus four
+ * texelFetch from a cache-resident LUT, and **0.14 ms** for its dither stage doing a
+ * single fetch. Both are bandwidth-bound (8.3 MB read + 8.3 MB write), so in this chain
+ * a full-res pass costs ~0.14 ms of floor and additional taps that hit L1/L2 are close
+ * to free; a half-res pass costs ~a quarter of that.
+ *
+ * A real profiling pass on a quiet GPU is owed and should be run before anyone trusts
+ * these to two decimal places.
+ *
+ * Nine fetches of a 3x3 neighbourhood - eight of which are L1 hits behind the first -
+ * plus about 40 ALU. **~0.15 ms**, essentially the full-res bandwidth floor.
  */
 
 /**
- * Measured on captures written by `tools/capture.mjs` (pose `ref_01500`, settle 48),
- * whole frame, `tools/metrics.py --stats`. Reference clip: lap_var 463,
- * spectral_slope −2.60.
+ * Provenance for the strength sweep. Every row came out of `tools/metrics.py --stats`
+ * run on a PNG written by the capture harness — never from a reference frame pushed
+ * through anything. Command:
  *
- * Filled in by the verification run that accompanies this pass; see the report. The
- * rule this table exists to enforce: a strength is only acceptable if `lap_var` goes up
- * AND `spectral_slope` does not move away from −2.60. If both move together the filter
- * is adding broadband high frequency, not recovering resolve loss.
+ *   CFG='{"sharpenStrength":S}' node tools/_cap_cfg.mjs --pose ref_00720 \
+ *       --only time,lighting,sky,pipeline --out shots/ab_sS.png --settle 48
+ *   .venv/bin/python tools/metrics.py --stats shots/ab_sS.png
+ *
+ * Reference clip, whole frame: lap_var 463, spectral_slope −2.60 (docs/TARGETS.md).
+ *
+ * **Read the caveat before reading the numbers.** At the time of measurement `terrain`,
+ * `rocks`, `ocean`, `clouds`, `structures` and `vegetation` are all stubs, so the frame
+ * is sky over a flat placeholder and its own `lap_var` is 16 against a target of 463 —
+ * it carries about 3% of the high-frequency energy a finished frame will. On content
+ * that smooth, sharpening moves `spectral_slope` *toward* −2.60 rather than away from
+ * it, because the render is starting from −3.03 and has a long way to go before it
+ * overshoots. That is the opposite of the failure mode this axis exists to catch, and it
+ * would be dishonest to report it as a pass.
+ *
+ * So the table below is **not** evidence that 0.30 is right. The derivation from the
+ * measured TAA MTF (see the header) is the argument; the table is here so the
+ * re-measurement after the scene lands is a one-command diff, and so the shape of the
+ * response is on record.
+ *
+ * The rule to apply when the scene IS complete: a strength is only acceptable if
+ * `lap_var` rises AND `spectral_slope` does not move away from −2.60. On this frame,
+ * 0.30 costs 0.207 of slope movement for +22.6 of lap_var; if the finished frame starts
+ * at −2.60 the same filter would land near −2.39, which would be too much and the knob
+ * would have to come down. Re-measure. Do not assume.
  */
 export const MEASURED = {
-  pose: 'ref_01500',
-  note: 'scene is still mostly sky at the time of measurement (terrain/rocks/ocean are '
-      + 'stubs), so the absolute numbers are not comparable to the reference clip. '
-      + 'The DELTA between strengths on the same frame is what selects the default.',
-  rows: [/* { strength, lap_var, spectral_slope } filled by the verify run */],
+  method: 'capture',
+  pose: 'ref_00720',
+  only: 'time,lighting,sky,pipeline',
+  settle: 48,
+  caveat: 'scene is 90% missing at measurement time (frame lap_var 16 vs a 463 target); '
+        + 'the slope is at -3.03, so every strength moves it TOWARD -2.60. This selects '
+        + 'nothing. Re-measure once terrain/rocks/ocean land.',
+  reference: { lap_var: 463, spectral_slope: -2.60 },
+  rows: [
+    { strength: 0.00, nyquistGain: 1.00, lap_var: 16.17, spectral_slope: -3.0259 },
+    { strength: 0.15, nyquistGain: 2.14, lap_var: 35.06, spectral_slope: -2.8389 },
+    { strength: 0.30, nyquistGain: 2.29, lap_var: 38.75, spectral_slope: -2.8187 },  // shipped
+    { strength: 0.60, nyquistGain: 2.68, lap_var: 52.20, spectral_slope: -2.7595 },
+  ],
 };
 
 const FRAG = /* glsl */`

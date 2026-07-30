@@ -195,3 +195,58 @@ that clipped sky at the corners, so `min` read 91-99 and looked stuck no matter 
 the sea colour was darkened. That is exactly the failure documented at the top of
 `docs/TARGETS.md` — regions are screen rectangles, look at the crop before believing
 the number.
+
+---
+
+## 8. Scene renders blown out and desaturated — ALBEDO, not exposure
+
+First full-scene capture with terrain, rocks, structures, vegetation and the viewmodel
+present (`shots/preview/preview.png`). Measured at `ref_00000` against `kf_00000`:
+
+```
+                  ours       ref     delta
+lum_mean        148.42    112.19    +36.22
+p50             163       116       +47
+sat_mean         33.62     77.86    -44.24     <-- the real problem
+lab_b            -5.58      4.67    -10.26
+lap_var         402.23    598.76   -196.52
+```
+
+**Saturation has collapsed to 43% of the reference.** The sheet shows why: sand, rock and
+the Forerunner alloy are all rendering near-white. That is an albedo authoring problem in
+the material modules, not a tonemap problem.
+
+Proof it is not exposure: bisecting `exposureEV` moves luminance but barely moves chroma.
+
+```
+EV  0.0   lum 148.4   p50 162   sat 32.4   lap 302
+EV -0.8   lum 126.2   p50 138   sat 39.3   lap 385
+EV -1.6   lum  13.2   p50  15   sat 98.8   lap   8      <-- see below
+reference lum 112.2   p50 116   sat 77.9   lap 599
+```
+
+Halving exposure buys 7 saturation points against a 44-point deficit. Correct fix is in
+the material modules: **real sand albedo is ~0.20-0.25 linear, not 0.7+**, wet sand is
+darker still, and the reference's `sand` region measures `sat_mean` 69 with `lab_b` +2.8.
+Dry beach sand is a warm mid-tone, not a white surface.
+
+### 8b. `exposureEV` has a discontinuity between -0.8 and -1.6
+
+A 0.8-stop change should scale luminance by ~0.57 (126 -> ~72). It produces 13.2 — an
+order of magnitude too dark, with saturation jumping to 98.8. Something in
+`tonemap.js` (probably the interaction between a pinned `ctx.config.exposure` and
+`keyedExposure()`) is discontinuous. Reproduce:
+
+```bash
+node tools/capture.mjs --pose ref_00000 --config exposureEV=-0.8 --out /tmp/a.png --settle 40
+node tools/capture.mjs --pose ref_00000 --config exposureEV=-1.6 --out /tmp/b.png --settle 40
+.venv/bin/python tools/metrics.py --stats /tmp/a.png
+.venv/bin/python tools/metrics.py --stats /tmp/b.png
+```
+
+Fix this before anyone tunes exposure, or they will be tuning against a broken control.
+
+### 8c. Ordering
+
+Do **not** recalibrate the grade against these frames yet — see issue 6. Fix albedos
+first, then 8b, then recalibrate the grade once, against complete frames.

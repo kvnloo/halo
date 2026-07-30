@@ -91,7 +91,28 @@ const res = await page.evaluate(async (o) => {
     const sky = ctx.get('sky');
     const r = ctx.renderer;
     const THREE = H.THREE;
-    const info = {};
+    const info = { exposure: ctx.config.exposure };
+    // wall-clock timing: N frames with clouds on vs off, each terminated by a
+    // 1-pixel readback so the GPU is actually flushed.
+    {
+      const r = ctx.renderer;
+      const gl = r.getContext();
+      const px = new Uint8Array(4);
+      const flush = () => gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      const run = (n) => { H.advance(n); flush(); };
+      const timeIt = (n) => {
+        run(8); const t0 = performance.now(); run(n); return (performance.now() - t0) / n;
+      };
+      const cl = ctx.get('clouds');
+      const withC = Math.min(timeIt(40), timeIt(40));
+      if (cl) cl.enabled = false;
+      const without = Math.min(timeIt(40), timeIt(40));
+      if (cl) cl.enabled = true;
+      run(48);
+      info.msWith = Math.round(withC * 1000) / 1000;
+      info.msWithout = Math.round(without * 1000) / 1000;
+      info.msClouds = Math.round((withC - without) * 1000) / 1000;
+    }
     if (sky) {
       const z = sky.zenithRadiance(new THREE.Color());
       const hz = sky.horizonRadiance(new THREE.Color());

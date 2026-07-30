@@ -81,6 +81,7 @@ const OPT = {
   keepServer: has('keep-server'),
   timeout: +arg('timeout', 180000),
   verbose: has('verbose'),
+  config: arg('config', null),   // "k=v,k=v" poked via __HALO__.setConfig before capture
 };
 
 const ROOT = resolve(new URL('..', import.meta.url).pathname);
@@ -148,7 +149,7 @@ async function viaDaemon(poses, all = false) {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         poses, all, w: OPT.w, h: OPT.h, settle: OPT.settle, time: OPT.time,
-        seed: OPT.seed, only: OPT.only, skip: OPT.skip, video: OPT.video,
+        seed: OPT.seed, only: OPT.only, skip: OPT.skip, video: OPT.video, config: OPT.config,
       }),
       // nine poses in one page load legitimately takes minutes under load
       signal: AbortSignal.timeout(Math.max(OPT.timeout, (all ? 9 : (poses?.length || 1)) * 120000)),
@@ -259,8 +260,9 @@ async function main() {
 
   const results = [];
   for (const pose of poses) {
-    const dataUrls = await page.evaluate(async (pose, settle, t, nvid) => {
+    const dataUrls = await page.evaluate(async (pose, settle, t, nvid, cfg) => {
       const H = globalThis.__HALO__;
+      if (cfg) for (const kv of cfg.split(',')) { const [k,v]=kv.split('='); H.setConfig(k, isNaN(+v)? v : +v); }
       H.setSize(innerWidth, innerHeight);
       H.setPose(pose);
       H.setTime(Number(t));
@@ -271,7 +273,7 @@ async function main() {
         return out;
       }
       return [H.screenshot()];
-    }, pose, OPT.settle, OPT.time, OPT.video, { timeout: OPT.timeout });
+    }, pose, OPT.settle, OPT.time, OPT.video, OPT.config, { timeout: OPT.timeout });
 
     dataUrls.forEach((du, i) => {
       const file = OPT.out && dataUrls.length === 1

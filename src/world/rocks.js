@@ -158,53 +158,53 @@ function beachProfileY(x, z) {
 const STACKS = [
   {
     id: 'stack_hero', x: -38, z: -92, baseY: -4.0, topY: 38, radius: 15,
-    res: [256, 208], lod: 0, castShadow: true,
-    prof: [[0, 0.70], [0.10, 0.76], [0.32, 0.88], [0.58, 1.02], [0.78, 1.10], [0.92, 1.06], [1.0, 0.90]],
+    res: [224, 176], lod: 0, castShadow: true,
+    prof: [[0, 0.72], [0.10, 0.78], [0.32, 0.92], [0.58, 1.06], [0.80, 1.14], [0.94, 1.13], [1.0, 1.08]],
     lean: [0.20, -0.11], notch: { y: 1.9, w: 1.5, d: 0.17, dir: 0.6 },
     ledges: [[0.40, 0.055], [0.66, 0.040]], flute: 1.0, crownFlat: 1.0,
   },
   {
     id: 'stack_arch', x: 34, z: -70, baseY: -3.4, topY: 41, radius: 17,
-    res: [256, 208], lod: 0, castShadow: true,
-    prof: [[0, 0.66], [0.09, 0.71], [0.30, 0.90], [0.55, 1.06], [0.80, 1.14], [0.93, 1.08], [1.0, 0.86]],
+    res: [224, 176], lod: 0, castShadow: true,
+    prof: [[0, 0.68], [0.09, 0.73], [0.30, 0.92], [0.55, 1.08], [0.80, 1.18], [0.93, 1.16], [1.0, 1.10]],
     lean: [-0.24, 0.14], notch: { y: 2.0, w: 1.9, d: 0.25, dir: 2.5 },
     ledges: [[0.30, 0.070], [0.58, 0.035]], flute: 1.15, crownFlat: 0.8,
   },
   {
     id: 'stack_twin_a', x: -96, z: -140, baseY: -7.5, topY: 44, radius: 19,
-    res: [192, 160], lod: 1, castShadow: false,
-    prof: [[0, 0.72], [0.12, 0.78], [0.34, 0.92], [0.60, 1.05], [0.82, 1.11], [0.94, 1.05], [1.0, 0.92]],
+    res: [176, 144], lod: 1, castShadow: false,
+    prof: [[0, 0.74], [0.12, 0.80], [0.34, 0.94], [0.60, 1.07], [0.82, 1.14], [0.94, 1.12], [1.0, 1.06]],
     lean: [0.14, 0.20], notch: { y: 1.7, w: 1.6, d: 0.16, dir: 4.0 },
     ledges: [[0.44, 0.050]], flute: 0.9, crownFlat: 1.0,
   },
   {
     id: 'stack_twin_b', x: -128, z: -172, baseY: -9.0, topY: 33, radius: 13,
-    res: [160, 128], lod: 1, castShadow: false,
-    prof: [[0, 0.74], [0.14, 0.80], [0.36, 0.94], [0.62, 1.06], [0.84, 1.09], [0.95, 1.00], [1.0, 0.84]],
+    res: [144, 112], lod: 1, castShadow: false,
+    prof: [[0, 0.76], [0.14, 0.82], [0.36, 0.96], [0.62, 1.08], [0.84, 1.12], [0.95, 1.09], [1.0, 1.02]],
     lean: [-0.18, -0.16], notch: { y: 1.6, w: 1.5, d: 0.15, dir: 1.4 },
     ledges: [[0.52, 0.045]], flute: 1.0, crownFlat: 0.9,
   },
   {
     id: 'stack_far_a', x: 120, z: -210, baseY: -12, topY: 36, radius: 16,
-    res: [128, 96], lod: 2, castShadow: false,
-    prof: [[0, 0.74], [0.13, 0.80], [0.35, 0.93], [0.60, 1.04], [0.83, 1.08], [0.95, 1.00], [1.0, 0.86]],
+    res: [112, 88], lod: 2, castShadow: false,
+    prof: [[0, 0.76], [0.13, 0.82], [0.35, 0.95], [0.60, 1.06], [0.83, 1.11], [0.95, 1.08], [1.0, 1.00]],
     lean: [0.16, 0.10], notch: { y: 1.8, w: 1.6, d: 0.14, dir: 3.1 },
     ledges: [[0.48, 0.045]], flute: 0.85, crownFlat: 1.0,
   },
   {
     id: 'stack_far_b', x: 156, z: -246, baseY: -13, topY: 30, radius: 12,
-    res: [112, 80], lod: 2, castShadow: false,
-    prof: [[0, 0.76], [0.13, 0.82], [0.36, 0.94], [0.62, 1.05], [0.84, 1.07], [0.95, 0.99], [1.0, 0.82]],
+    res: [96, 72], lod: 2, castShadow: false,
+    prof: [[0, 0.78], [0.13, 0.84], [0.36, 0.96], [0.62, 1.07], [0.84, 1.10], [0.95, 1.07], [1.0, 0.98]],
     lean: [-0.12, 0.18], notch: { y: 1.7, w: 1.5, d: 0.14, dir: 5.4 },
     ledges: [[0.45, 0.040]], flute: 0.9, crownFlat: 0.9,
   },
   {
     id: 'headland', x: 108, z: 20, baseY: -2.0, topY: 34, radius: 40,
-    res: [224, 144], lod: 0, castShadow: true,
-    prof: [[0, 0.86], [0.10, 0.90], [0.34, 0.96], [0.60, 0.98], [0.80, 0.93], [0.93, 0.80], [1.0, 0.58]],
+    res: [192, 120], lod: 0, castShadow: true,
+    prof: [[0, 0.86], [0.10, 0.90], [0.34, 0.97], [0.60, 1.00], [0.80, 0.97], [0.93, 0.88], [1.0, 0.72]],
     lean: [0.05, 0.08], notch: { y: 1.6, w: 1.7, d: 0.09, dir: 4.4 },
     ledges: [[0.30, 0.035], [0.62, 0.030]], flute: 0.75, crownFlat: 1.0,
-    capAmp: 3.2, capTilt: 0.10,
+    capAmp: 3.2, capTilt: 0.06,
   },
 ];
 
@@ -212,19 +212,45 @@ const STACKS = [
 
 function makeStackField(spec, rnd) {
   const R = spec.radius;
+  const H = spec.topY - spec.baseY;
   const seed = rnd.int(1, 1 << 28);
   const p1 = rnd.range(0, TAU), p2 = rnd.range(0, TAU), p3 = rnd.range(0, TAU);
   const tw1 = rnd.range(0.6, 1.6), tw2 = rnd.range(-1.9, -0.8), tw3 = rnd.range(1.3, 2.6);
-  const lobe1 = 0.155 + rnd.range(-0.04, 0.05);
-  const lobe2 = 0.095 + rnd.range(-0.03, 0.04);
-  const lobe3 = 0.052 + rnd.range(-0.02, 0.025);
+  const lobe1 = 0.185 + rnd.range(-0.05, 0.06);
+  const lobe2 = 0.115 + rnd.range(-0.035, 0.05);
+  const lobe3 = 0.060 + rnd.range(-0.02, 0.03);
   const leanX = spec.lean[0] * R, leanZ = spec.lean[1] * R;
   const swayX = rnd.sym(0.07) * R, swayZ = rnd.sym(0.07) * R;
   const swayP = rnd.range(0, TAU);
-  const bedP1 = rnd.range(1.05, 1.65), bedP2 = rnd.range(3.4, 5.2);
-  const bedA = R * 0.0105;
+  const bedP1 = rnd.range(1.15, 1.85), bedP2 = rnd.range(3.6, 5.6);
+  const bedA = R * 0.0062;
   const n = spec.notch;
   const flute = spec.flute ?? 1.0;
+  const browDir = rnd.range(0, TAU);
+  const fluteDir = rnd.range(0, TAU);
+
+  /**
+   * Cleavage faces. A limestone stack is a mass with a handful of *large flat faces*
+   * meeting at arêtes, not an isotropic lump — look at kf_01500, where the whole
+   * seaward side of the hero stack is one plane. Each plane clips the radius to
+   * p/cos(θ-φ) over a height band, smooth-minned so the arête has a real fillet.
+   * This is the single feature that stops the silhouette reading as procedural.
+   */
+  const planes = [];
+  const nPlanes = 3 + rnd.int(0, 2);
+  for (let i = 0; i < nPlanes; i++) {
+    const y0 = spec.baseY + H * rnd.range(0.02, 0.62);
+    const hh = H * rnd.range(0.34, 0.85);
+    planes.push({
+      phi: rnd.range(0, TAU),
+      p: R * rnd.range(0.76, 1.06),
+      tilt: rnd.sym(0.17),
+      y0, y1: y0 + hh,
+      k: R * rnd.range(0.055, 0.14),
+      w: hh * rnd.range(0.14, 0.34),
+      s: seed + 3000 + i * 97,
+    });
+  }
 
   /** axis offset at normalised height t */
   const axis = (t) => [
@@ -232,7 +258,7 @@ function makeStackField(spec, rnd) {
     leanZ * Math.pow(t, 1.55) + swayZ * Math.sin(t * 2.1 + swayP * 1.7),
   ];
 
-  /** the smooth part only — used as the reference the cavity mask is measured against */
+  /** the smooth part only — the reference the cavity/edge masks are measured against */
   const rSmooth = (th, t) => {
     let r = R * spline(spec.prof, t);
     r *= 1 + lobe1 * Math.cos(th + p1 + tw1 * t)
@@ -244,6 +270,9 @@ function makeStackField(spec, rnd) {
   const rAt = (th, t, y) => {
     let r = rSmooth(th, t);
 
+    // one-sided overhanging brow near the crown: the top hangs well outside the foot
+    r += R * 0.22 * smoothstep(0.62, 0.93, t) * Math.pow(sat(Math.cos(th - browDir)), 1.5);
+
     // ledges: a discrete step in with an outward lip just below it
     for (const [lt, la] of (spec.ledges || [])) {
       r -= R * la * smoothstep(lt - 0.014, lt + 0.026, t);
@@ -251,52 +280,76 @@ function makeStackField(spec, rnd) {
     }
 
     // karst mass: big lumps and blocky sub-masses
-    r += R * 0.128 * cylFbm(th, y, 0.95, 0.055, 4, seed);
-    r += R * 0.052 * cylFbm(th, y, 2.55, 0.145, 3, seed + 31);
+    r += R * 0.115 * cylFbm(th, y, 0.95, 0.055, 3, seed);
+    r += R * 0.042 * cylFbm(th, y, 2.55, 0.145, 3, seed + 31);
 
-    // vertical fluting — ridged noise stretched ~30:1 along y
-    const fw = 0.34 * cylFbm(th, y, 0.7, 0.05, 2, seed + 77);
-    r -= R * 0.082 * flute * cylRidged(th + fw, y, 7.6, 0.030, 4, seed + 53);
+    // cleavage faces
+    for (const pl of planes) {
+      const c = Math.cos(th - pl.phi);
+      if (c <= 0.26) continue;
+      const g = smoothstep(pl.y0 - pl.w, pl.y0 + pl.w, y) * (1 - smoothstep(pl.y1 - pl.w, pl.y1 + pl.w, y));
+      if (g < 0.02) continue;
+      const rp = (pl.p + pl.tilt * (y - pl.y0)) / c + R * 0.055 * cylFbm(th, y, 2.2, 0.10, 2, pl.s);
+      r = mix(r, smin(r, rp, pl.k), g);
+    }
 
-    // karst solution channels: narrow, deep, drip-warped, stronger on the upper faces
-    const cw = 0.85 * cylFbm(th, y, 0.5, 0.09, 3, seed + 201);
-    const ch = cylRidged(th + cw, y, 17.5, 0.016, 3, seed + 143);
-    r -= R * 0.052 * flute * Math.pow(sat(ch * 1.35), 1.8) * (0.35 + 0.65 * smoothstep(0.12, 0.55, t));
+    // vertical fluting — broad ridged grooves stretched ~35:1 along y, and only on
+    // some faces: uniform ribbing all the way round reads as corduroy, not rock.
+    // The crest must not be serrated: a 1.6 m groove cut into the last row reads as saw
+    // teeth against the sky, which no sea stack has. Fade the grooves out under the rim.
+    const topFade = 1 - smoothstep(0.84, 0.99, t);
+    const fw = 0.40 * cylFbm(th, y, 0.7, 0.05, 2, seed + 77);
+    const fmask = 0.30 + 0.70 * sat(0.55 + 0.9 * Math.cos(th - fluteDir)
+      + 1.5 * cylFbm(th, y, 1.3, 0.045, 2, seed + 91));
+    r -= R * 0.105 * flute * fmask * topFade * cylRidged(th + fw, y, 5.6, 0.024, 3, seed + 53);
 
-    // sedimentary bedding, two scales
-    const bw = 1.5 * cylFbm(th, y, 1.4, 0.05, 3, seed + 601);
-    r += bedA * (beddingShape((y + bw) / bedP1) + 0.8 * beddingShape((y + bw * 0.6) / bedP2));
+    // karst solution channels: narrow, deep, drip-warped, upper faces only
+    const cw = 0.85 * cylFbm(th, y, 0.5, 0.09, 2, seed + 201);
+    const ch = cylRidged(th + cw, y, 11.5, 0.014, 2, seed + 143);
+    r -= R * 0.058 * flute * fmask * topFade * Math.pow(sat(ch * 1.30), 2.0)
+      * (0.25 + 0.75 * smoothstep(0.14, 0.55, t));
 
-    // wave-cut notch: gaussian in world y, deepest on the exposed side
-    const np = Math.exp(-Math.pow((y - n.y) / n.w, 2));
-    const nd = 0.40 + 0.60 * sat(Math.cos(th - n.dir) * 0.5 + 0.5);
-    const nb = 0.72 + 0.56 * (cylFbm(th, y, 3.0, 0.25, 3, seed + 511) * 0.5 + 0.5);
+    // sedimentary bedding — small, and gated so it only shows where the face cuts
+    // across the strata rather than as a ring all the way round
+    const bw = 2.6 * cylFbm(th, y, 4.5, 0.05, 2, seed + 601);
+    const bmask = sat(0.35 + 1.4 * cylFbm(th, y, 1.1, 0.02, 2, seed + 631));
+    r += bedA * bmask * (beddingShape((y + bw) / bedP1) + 0.8 * beddingShape((y + bw * 0.6) / bedP2));
+
+    // wave-cut notch: skewed in y so the roof overhangs, deepest on the exposed side
+    const dy = y - n.y;
+    const np = Math.exp(-Math.pow(dy / (dy > 0 ? n.w * 0.78 : n.w * 1.35), 2));
+    const nd = 0.32 + 0.68 * sat(Math.cos(th - n.dir) * 0.5 + 0.5);
+    const nb = 0.68 + 0.64 * (cylFbm(th, y, 3.4, 0.25, 2, seed + 511) * 0.5 + 0.5);
     r -= R * n.d * np * nd * nb;
 
-    // wave-cut platform: the foot flares out below the notch
-    const ft = smoothstep(1.35, -0.7, y);
-    r += R * 0.30 * ft * (0.62 + 0.38 * (cylFbm(th, y, 1.8, 0.35, 3, seed + 811) * 0.5 + 0.5));
+    // Wave-cut platform. Only on part of the perimeter — a flare all the way round is a
+    // plinth, and stacks do not stand on plinths; the surf cuts a shelf where it reaches.
+    const ft = smoothstep(2.4, -1.2, y);
+    const fpm = sat(0.25 + 1.5 * cylFbm(th, y, 1.15, 0.06, 2, seed + 811)
+      + 0.45 * Math.cos(th - n.dir));
+    r += R * 0.20 * ft * fpm * (0.55 + 0.45 * (cylFbm(th, y, 3.2, 0.30, 2, seed + 821) * 0.5 + 0.5));
 
     // fine relief so the mesh itself carries ~30 cm structure
-    r += R * 0.017 * cylFbm(th, y, 6.2, 0.62, 3, seed + 311);
+    r += R * 0.019 * cylFbm(th, y, 6.2, 0.62, 3, seed + 311);
 
     return Math.max(R * 0.16, r);
   };
 
-  // crown: a tilted, lumpy plateau whose rim rolls over into the face
-  const capAmp = spec.capAmp ?? R * 0.075;
-  const tiltX = (spec.capTilt ?? 0.075) * rnd.sym(1);
-  const tiltZ = (spec.capTilt ?? 0.075) * rnd.sym(1);
+  // Crown: a *flat* tilted plateau with a hard rim. The reference stacks are cut off
+  // clean at the top and carry grass right to the edge; a domed cap reads as a thumb.
+  const capAmp = spec.capAmp ?? R * 0.055;
+  const tiltX = (spec.capTilt ?? 0.085) * rnd.sym(1);
+  const tiltZ = (spec.capTilt ?? 0.085) * rnd.sym(1);
   const capSeed = seed + 1777;
-  const rimDrop = R * 0.10 + capAmp * 0.5;
+  const rimDrop = R * 0.048;
   const flatK = spec.crownFlat ?? 1.0;
 
   /** s = 0 at the rim, 1 at the centre */
   const capY = (px, pz, s) => {
-    const lump = capAmp * (0.55 * fbm2(px * 0.085, pz * 0.085, 4, 2.02, 0.5, capSeed)
-      + 0.45 * fbm2(px * 0.26 + 4.4, pz * 0.26, 3, 2.02, 0.5, capSeed + 9));
-    const roll = -rimDrop * (1 - smoothstep(0, 0.30, s));
-    const dome = capAmp * 0.5 * s * flatK;
+    const lump = capAmp * (0.60 * fbm2(px * 0.075, pz * 0.075, 3, 2.02, 0.5, capSeed)
+      + 0.40 * fbm2(px * 0.24 + 4.4, pz * 0.24, 3, 2.02, 0.5, capSeed + 9));
+    const roll = -rimDrop * (1 - smoothstep(0, 0.16, s));
+    const dome = capAmp * 0.35 * s * flatK;
     return spec.topY + tiltX * px + tiltZ * pz + lump * flatK + roll + dome;
   };
 
@@ -549,7 +602,7 @@ function gridMasks(Rg, Yg, nT, rows, R, wrapT) {
 
 function buildCliff(rnd, ctx) {
   const X0 = -150, X1 = 190, CHUNKS = 6;
-  const nX = 128, nY = 96, nCap = 10;
+  const nX = 112, nY = 80, nCap = 8;
   const seed = rnd.int(1, 1 << 28);
   const S = (a) => seed + a;
 
@@ -689,26 +742,31 @@ function buildCliff(rnd, ctx) {
 /* ================================================= tide-pool wave-cut shelf */
 
 function buildShelf(rnd, heightAt) {
-  const X0 = -74, X1 = -14, Z0 = -17, Z1 = 1.5;
-  const nX = 176, nZ = 64;
+  const X0 = -72, X1 = -16, Z0 = -15, Z1 = -1;
+  const nX = 168, nZ = 56;
   const seed = rnd.int(1, 1 << 28);
   const cols = nX + 1, rows = nZ + 1, N = cols * rows;
   const pos = new Float32Array(N * 3);
   const rock = new Float32Array(N * 4);
   const Hg = new Float32Array(N), Yg = new Float32Array(N);
 
-  const shelfY = (x, z) => {
-    // a low platform that rises landward, cut by pools and channels
-    let h = 0.30 + 0.045 * (z + 12);
-    h += 0.55 * fbm2(x * 0.055, z * 0.055, 4, 2.02, 0.5, seed);
-    h += 0.22 * fbm2(x * 0.21, z * 0.21, 4, 2.02, 0.5, seed + 7);
-    h += 0.075 * fbm2(x * 0.85, z * 0.85, 3, 2.02, 0.5, seed + 13);
-    // pools: broad basins carved below the waterline
+  /**
+   * Relief *relative to the sand*, centred slightly below it: the shelf is a wave-cut
+   * platform that the beach has half-buried, so only the ridges and pool rims emerge as
+   * dark rock outcrops with sand lying in between — which is exactly what the reference
+   * foreground does at kf_01500 and kf_01800.
+   */
+  const shelfRelief = (x, z) => {
+    let h = -0.30;
+    h += 0.62 * fbm2(x * 0.052, z * 0.052, 4, 2.02, 0.5, seed);
+    h += 0.26 * fbm2(x * 0.20, z * 0.20, 4, 2.02, 0.5, seed + 7);
+    h += 0.085 * fbm2(x * 0.82, z * 0.82, 3, 2.02, 0.5, seed + 13);
+    // pools and channels: basins scoured below the sand
     const pw = 0.6 * fbm2(x * 0.03, z * 0.03, 2, 2.02, 0.5, seed + 21);
     const pl = ridged2(x * 0.062 + pw, z * 0.062, 3, 2.04, 0.5, seed + 29);
-    h -= 1.05 * Math.pow(sat(pl * 1.15), 2.2);
+    h -= 0.95 * Math.pow(sat(pl * 1.15), 2.2);
     // bedding steps
-    h += 0.09 * beddingShape((h * 3.0 + 0.7 * fbm2(x * 0.04, z * 0.04, 2, 2.02, 0.5, seed + 31)) / 0.42);
+    h += 0.10 * beddingShape((h * 3.0 + 0.7 * fbm2(x * 0.04, z * 0.04, 2, 2.02, 0.5, seed + 31)) / 0.42);
     return h;
   };
 
@@ -717,11 +775,10 @@ function buildShelf(rnd, heightAt) {
       const x = mix(X0, X1, i / nX), z = mix(Z0, Z1, j / nZ);
       const k = j * cols + i;
       // fade the slab away at its border so sand swallows the edges
-      const fade = smoothstep(0, 9, x - X0) * smoothstep(0, 9, X1 - x)
-        * smoothstep(0, 7, z - Z0) * smoothstep(0, 5, Z1 - z);
+      const fade = smoothstep(0, 8, x - X0) * smoothstep(0, 8, X1 - x)
+        * smoothstep(0, 6, z - Z0) * smoothstep(0, 4, Z1 - z);
       const ground = heightAt(x, z);
-      const h = shelfY(x, z);
-      const y = mix(ground - 1.4, Math.max(h, ground - 0.35), fade);
+      const y = ground + mix(-1.5, shelfRelief(x, z), fade);
       pos[k * 3] = x + 0.35 * fbm2(x * 0.2, z * 0.2, 2, 2.02, 0.5, seed + 41);
       pos[k * 3 + 1] = y;
       pos[k * 3 + 2] = z + 0.35 * fbm2(x * 0.2 + 9, z * 0.2, 2, 2.02, 0.5, seed + 42);
@@ -763,12 +820,13 @@ function buildBoulderShape(rnd, detail) {
   raw.dispose();
   const p = geo.getAttribute('position');
   const seed = rnd.int(1, 1 << 28);
-  const sq = [rnd.range(0.95, 1.35), rnd.range(0.48, 0.78), rnd.range(0.95, 1.35)];
-  // a few cleavage planes: beach limestone breaks into blocks, not potatoes
+  const sq = [rnd.range(0.95, 1.40), rnd.range(0.42, 0.74), rnd.range(0.95, 1.40)];
+  // Cleavage planes: beach limestone breaks into angular blocks, not potatoes. The
+  // reference surf boulders are clearly faceted with rounded arêtes.
   const planes = [];
-  for (let i = 0; i < 4; i++) {
-    const v = new THREE.Vector3(rnd.sym(1), rnd.sym(1) * 0.7, rnd.sym(1)).normalize();
-    planes.push({ n: v, d: rnd.range(0.52, 0.86) });
+  for (let i = 0; i < 5; i++) {
+    const v = new THREE.Vector3(rnd.sym(1), rnd.sym(1) * 0.8, rnd.sym(1)).normalize();
+    planes.push({ n: v, d: rnd.range(0.44, 0.80) });
   }
   const v = new THREE.Vector3();
   const N = p.count;
@@ -777,16 +835,17 @@ function buildBoulderShape(rnd, detail) {
     v.fromBufferAttribute(p, i);
     const nx = v.x, ny = v.y, nz = v.z;
     let r = 1;
-    r += 0.30 * pn3(nx, ny, nz, 1.35, 4, seed);
-    r += 0.13 * pn3(nx, ny, nz, 3.6, 3, seed + 11);
-    r += 0.055 * pn3(nx, ny, nz, 9.0, 3, seed + 23);
+    r += 0.42 * pn3(nx, ny, nz, 1.15, 4, seed);
+    r += 0.17 * pn3(nx, ny, nz, 3.2, 3, seed + 11);
+    r += 0.075 * pn3(nx, ny, nz, 8.5, 3, seed + 23);
+    r -= 0.16 * Math.pow(sat(pn3(nx, ny, nz, 5.2, 2, seed + 37) * 2.2 + 0.45), 2.0);
     v.set(nx * sq[0], ny * sq[1], nz * sq[2]).multiplyScalar(r);
     for (const pl of planes) {
       const dd = v.dot(pl.n);
-      if (dd > pl.d) v.addScaledVector(pl.n, -(dd - pl.d) * 0.92);
+      if (dd > pl.d) v.addScaledVector(pl.n, -(dd - pl.d));
     }
     p.setXYZ(i, v.x, v.y, v.z);
-    const cav = sat(0.5 + (r - 1) * 2.0);
+    const cav = sat(0.5 + (r - 1) * 1.7);
     occ[i * 4] = mix(0.45, 1.0, cav);
     occ[i * 4 + 1] = cav;
     occ[i * 4 + 2] = sat(-ny) * 0.6;
@@ -976,13 +1035,14 @@ vec3 nB2 = triplanarNormal(uNH_B, r3 * P, Ng, 1.0/0.055, 6.0);
 
 float k = uDetailAmt;
 vec3 nDet = Ng
-  + (dA1.xyz - Ng) * (0.85 * k)
-  + (dA2.xyz - Ng) * (0.72 * k)
-  + (dB1.xyz - Ng) * (0.46 * k)
-  + (nB2      - Ng) * (0.26 * k);
+  + (dA1.xyz - Ng) * (1.00 * k)
+  + (dA2.xyz - Ng) * (0.95 * k)
+  + (dB1.xyz - Ng) * (0.70 * k)
+  + (nB2      - Ng) * (0.42 * k);
 nDet = normalize(nDet);
 
-float h = dA1.w * 0.42 + dA2.w * 0.31 + dB1.w * 0.18 + 0.09;
+float hA = dA1.w, hB = dA2.w, hC = dB1.w;
+float h = hA * 0.42 + hB * 0.31 + hC * 0.18 + 0.09;
 
 // ---- macro fields (procedural, so they never tile) ---------------------------
 float m1 = fbm3(P * 0.055, 4);
@@ -998,19 +1058,25 @@ float bed2 = fract(P.y * 0.205 + bw * 0.9);
 bed2 = smoothstep(0.0, 0.12, bed2) * (1.0 - smoothstep(0.6, 1.0, bed2));
 
 // ---- albedo ------------------------------------------------------------------
+// Measured on the reference (kf_01500, rock-only boxes): the lit faces run
+// lum 67-111 with lum_std 33-64 and lap_var 860-3900. That variance is the whole
+// game — it has to come from independent modulation at every scale, so each detail
+// octave multiplies albedo separately rather than through one blended height.
 vec3 alb = uColBase;
-alb *= 1.0 + uMacroAmt * (0.34 * m1 + 0.17 * m2);
-alb *= mix(0.80, 1.13, smoothstep(0.24, 0.86, h));
+alb *= 1.0 + uMacroAmt * (0.40 * m1 + 0.22 * m2);
+alb *= mix(0.60, 1.34, hA);
+alb *= mix(0.70, 1.26, hB);
+alb *= mix(0.80, 1.20, hC);
 // curvature wear: grime settles in the concavities, edges scrub clean and bright
-float grime = (1.0 - occ) * (0.55 + 0.45 * (1.0 - smoothstep(0.2, 0.7, h)));
-alb = mix(alb, uColGrime, clamp(grime * 0.80, 0.0, 0.72));
-float wear = cvx * cvx * smoothstep(0.42, 0.92, h);
-alb = mix(alb, uColBright, wear * 0.55);
+float grime = (1.0 - occ) * (0.45 + 0.55 * (1.0 - smoothstep(0.15, 0.62, h)));
+alb = mix(alb, uColGrime, clamp(grime * 0.95, 0.0, 0.82));
+float wear = cvx * cvx * smoothstep(0.36, 0.88, h);
+alb = mix(alb, uColBright, wear * 0.70);
 // vertical staining, strongest below ledges and absent on up-facing rock
 float stainMask = streak * (1.0 - smoothstep(0.25, 0.72, Ng.y)) * (0.35 + 0.65 * (1.0 - crn));
-alb = mix(alb, uColStain, stainMask * 0.42);
+alb = mix(alb, uColStain, stainMask * 0.55);
 // bedding shows as a tonal band, not a groove
-alb *= 1.0 - 0.135 * bed - 0.075 * bed2;
+alb *= 1.0 - 0.20 * bed - 0.11 * bed2;
 
 // ---- tide zone ---------------------------------------------------------------
 float yn = 0.62 * fbm3(P * vec3(0.16, 0.55, 0.16), 3) + 0.30 * fbm3(P * vec3(0.9, 2.2, 0.9), 2);
@@ -1028,8 +1094,8 @@ alb = mix(alb, uColBleach, bleach);
 
 // ---- moss / lichen on the crown ---------------------------------------------
 float up = smoothstep(0.10, 0.68, Ng.y);
-float patch = smoothstep(-0.22, 0.30, fbm3(P * 0.26 + 71.0, 4));
-float moss = crn * up * patch * (0.45 + 0.55 * (1.0 - occ)) * uMossAmt;
+float mottle = smoothstep(-0.22, 0.30, fbm3(P * 0.26 + 71.0, 4));   // 'patch' is reserved in GLSL ES 3.00
+float moss = crn * up * mottle * (0.45 + 0.55 * (1.0 - occ)) * uMossAmt;
 alb = mix(alb, uColMoss, clamp(moss, 0.0, 0.9));
 float lich = crn * 0.45 * smoothstep(0.45, 0.95, h) * smoothstep(0.0, 0.5, fbm3(P * 0.7 + 5.0, 3));
 alb = mix(alb, uColLichen, lich * uMossAmt * 0.30);
@@ -1039,21 +1105,32 @@ alb = mix(alb, alb * vec3(0.66, 0.645, 0.635), shl * 0.72);
 // wet rock loses most of its diffuse
 alb *= mix(1.0, 0.46, wet);
 
-// ---- ambient occlusion (kept gentle: the reference never crushes, p01 = 17) ---
-float ao = mix(1.0, 0.55 + 0.45 * occ, uAOAmt);
-ao *= mix(1.0, 0.58, shl * 0.85);
-ao *= mix(1.0, 0.80 + 0.20 * smoothstep(0.05, 0.55, h), 0.7);
+// ---- ambient occlusion (floor kept off zero: the reference p01 is 17, never 0) --
+float ao = mix(1.0, 0.36 + 0.64 * occ, uAOAmt);
+ao *= mix(1.0, 0.48, shl * 0.9);
+ao *= mix(1.0, 0.62 + 0.38 * smoothstep(0.02, 0.52, hC), 0.85);
 
 diffuseColor.rgb = alb * ao;
+diffuseColor.a = 1.0;
 
 // ---- roughness ---------------------------------------------------------------
-float rgh = uRough * (0.88 + 0.30 * (1.0 - h));
+float rgh = uRough * (0.84 + 0.38 * (1.0 - h));
 rgh = mix(rgh, 0.55, algae * 0.55);
-rgh = mix(rgh, 0.72, bed * 0.25);
-rgh = mix(rgh, 0.115, wet);
-roughnessFactor = clamp(rgh, 0.07, 1.0);
+rgh = mix(rgh, 0.78, bed * 0.30);
+rgh = mix(rgh, 0.215, wet);          // damp limestone, not a mirror
+roughnessFactor = clamp(rgh, 0.10, 1.0);
 
 normal = normalize((viewMatrix * vec4(nDet, 0.0)).xyz);
+
+// applyWorldMaterial injects at <lights_fragment_begin>, but three's
+// <lights_physical_fragment> runs one chunk EARLIER and has already copied
+// diffuseColor / roughnessFactor into the PhysicalMaterial struct. Writing the locals
+// alone changes nothing but the G-buffer - the first coloured capture of this module
+// came out a flat white MeshStandardMaterial with correct relief, which is exactly that
+// symptom. Push the values into "material" too, replicating three's own derivation.
+material.diffuseColor = diffuseColor.rgb;
+material.diffuseContribution = diffuseColor.rgb * (1.0 - metalnessFactor);
+material.roughness = min(max(roughnessFactor, 0.0525) + geometryRoughness, 1.0);
 `;
 
 const ROCK_VERT_PARS = /* glsl */`
@@ -1315,7 +1392,7 @@ export function create(opts = {}) {
           center: new THREE.Vector3(-44, 0.4, -8),
           radius: 32,
           topY: 1.4,
-          _grid: { cols: 177, rows: 65, pos: geo.getAttribute('position').array, nrm: geo.getAttribute('normal').array, wrapU: false },
+          _grid: { cols: 169, rows: 57, pos: geo.getAttribute('position').array, nrm: geo.getAttribute('normal').array, wrapU: false },
         });
       }
 

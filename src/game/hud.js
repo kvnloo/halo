@@ -93,8 +93,10 @@ export function create(opts = {}) {
     contacts: [], trackerVis: 0, seen: new Map(), pingRim: 0,
     // text
     lines: [],
-    // perf
+    // perf — EMA plus a 128-frame ring so the report can quote a p95 rather than a
+    // peak that is really just first-frame font shaping or a GC
     ms: 0, msPeak: 0, drawn: 0, skipped: 0,
+    msRing: new Float32Array(128), msRingN: 0,
     cleared: true,
   };
 
@@ -172,11 +174,16 @@ export function create(opts = {}) {
     // Interior: dark teal, translucent. Kept light on purpose — a Halo tracker is a
     // pane of tinted glass, and an opaque disc reads as a grey sticker over the frame.
     const gr = c.createRadialGradient(0, 0, r * 0.05, 0, 0, r);
-    gr.addColorStop(0.0, 'rgba(10,34,46,0.055)');
-    gr.addColorStop(0.74, 'rgba(8,28,38,0.075)');
-    gr.addColorStop(0.95, 'rgba(5,20,28,0.125)');
-    gr.addColorStop(1.0, 'rgba(4,16,22,0.15)');
+    gr.addColorStop(0.0, 'rgba(10,34,46,0.115)');
+    gr.addColorStop(0.74, 'rgba(8,28,38,0.145)');
+    gr.addColorStop(0.95, 'rgba(5,20,28,0.225)');
+    gr.addColorStop(1.0, 'rgba(4,16,22,0.27)');
     c.beginPath(); c.arc(0, 0, r, 0, TAU); c.fillStyle = gr; c.fill();
+
+    // A dark ring just inside the rim: this is what keeps the tracker readable over
+    // sunlit sand without turning it into a grey disc over sky.
+    c.beginPath(); c.arc(0, 0, r - 1.6 * u, 0, TAU);
+    c.lineWidth = 3.2 * u; c.strokeStyle = 'rgba(2,10,15,0.22)'; c.stroke();
 
     c.globalCompositeOperation = 'lighter';
 
@@ -252,6 +259,18 @@ export function create(opts = {}) {
     ctx2d.lineWidth = haloW; ctx2d.strokeStyle = rgba(halo, haloA); path(); ctx2d.stroke();
     ctx2d.lineWidth = coreW; ctx2d.strokeStyle = rgba(core, coreA); path(); ctx2d.stroke();
     ctx2d.globalCompositeOperation = prev;
+  }
+
+  /**
+   * Dark contrast underlay. A near-white 1 px line over sunlit sand is invisible —
+   * this beach is the brightest background in the game and the reticle has to survive
+   * it. Every real Halo HUD element carries this outline for the same reason.
+   */
+  function shade(path, w, a, ctx2d = g) {
+    ctx2d.globalCompositeOperation = 'source-over';
+    ctx2d.lineWidth = w;
+    ctx2d.strokeStyle = `rgba(2,9,14,${a})`;
+    path(); ctx2d.stroke();
   }
 
   /* ---------------------------------------------------------------- shield */
@@ -401,13 +420,15 @@ export function create(opts = {}) {
       const tx = -sa * s, ty = ca * s;     // outward tangential
       const half = sh.barW * 0.72;
       const lead = 7.5 * u;
-      emissive(() => {
+      const bracket = () => {
         g.beginPath();
         g.moveTo(ox + nx * -half + tx * 1.5 * u, oy + ny * -half + ty * 1.5 * u);
         g.lineTo(ox + nx * -half + tx * lead, oy + ny * -half + ty * lead);
         g.lineTo(ox + nx * half + tx * lead * 0.45, oy + ny * half + ty * lead * 0.45);
         g.lineTo(ox + nx * half + tx * 1.5 * u, oy + ny * half + ty * 1.5 * u);
-      }, 1.3 * u, capA * 0.9, 3.4 * u, capA * 0.22);
+      };
+      shade(bracket, 3.0 * u, capA * 0.42);
+      emissive(bracket, 1.3 * u, capA * 0.9, 3.4 * u, capA * 0.22);
     }
   }
 
@@ -481,13 +502,15 @@ export function create(opts = {}) {
     g.globalCompositeOperation = 'source-over';
 
     // player wedge — always points up; the tracker is view-relative
-    const ws = 5.4 * u;
-    emissive(() => {
+    const ws = 5.6 * u;
+    const wedge = () => {
       g.beginPath();
       g.moveTo(0, -ws * 1.15); g.lineTo(ws * 0.82, ws * 0.72);
       g.lineTo(0, ws * 0.34); g.lineTo(-ws * 0.82, ws * 0.72);
       g.closePath();
-    }, 1.2 * u, alpha * 0.70, 3.0 * u, alpha * 0.18);
+    };
+    shade(wedge, 2.8 * u, alpha * 0.45);
+    emissive(wedge, 1.25 * u, alpha * 0.80, 3.2 * u, alpha * 0.20);
 
     // rim brightens when something is close
     if (S.pingRim > 0.01) {
@@ -521,9 +544,9 @@ export function create(opts = {}) {
       : C_CORE;
     const halo = tint > 0.01 ? C_RED : C_CYAN;
 
-    const len = 6.4 * u;
+    const len = 7.0 * u;
     g.lineCap = 'round';
-    emissive(() => {
+    const ticks = () => {
       g.beginPath();
       for (let i = 0; i < 4; i++) {
         const an = i * Math.PI * 0.5;
@@ -531,9 +554,13 @@ export function create(opts = {}) {
         g.moveTo(L.cx + cx * rad, L.cy + cy * rad);
         g.lineTo(L.cx + cx * (rad + len), L.cy + cy * (rad + len));
       }
-    }, 1.25 * u, a, 3.2 * u, a * 0.30, core, halo);
+    };
+    shade(ticks, 3.0 * u, a * 0.62);
+    emissive(ticks, 1.3 * u, a, 3.4 * u, a * 0.30, core, halo);
 
     // centre dot
+    g.beginPath(); g.arc(L.cx, L.cy, 2.3 * u, 0, TAU);
+    g.fillStyle = `rgba(2,9,14,${a * 0.55})`; g.fill();
     g.globalCompositeOperation = 'lighter';
     g.beginPath(); g.arc(L.cx, L.cy, 1.15 * u, 0, TAU);
     g.fillStyle = rgba(core, a * 1.15); g.fill();
@@ -556,7 +583,7 @@ export function create(opts = {}) {
       const r0 = rad + len * 1.5 + (1 - ease) * 5 * u;
       const r1 = r0 + 7.5 * u * (0.6 + 0.4 * ease);
       g.lineCap = 'butt';
-      emissive(() => {
+      const spurs = () => {
         g.beginPath();
         for (let i = 0; i < 4; i++) {
           const an = Math.PI * 0.25 + i * Math.PI * 0.5;
@@ -564,7 +591,9 @@ export function create(opts = {}) {
           g.moveTo(L.cx + cx * r0, L.cy + cy * r0);
           g.lineTo(L.cx + cx * r1, L.cy + cy * r1);
         }
-      }, 1.7 * u, alpha * 0.85 * ease, 4.2 * u, alpha * 0.28 * ease, hc, hc);
+      };
+      shade(spurs, 3.6 * u, alpha * 0.45 * ease);
+      emissive(spurs, 1.7 * u, alpha * 0.85 * ease, 4.2 * u, alpha * 0.28 * ease, hc, hc);
       if (kind === 2) {
         emissive(() => {
           g.beginPath();
@@ -685,12 +714,27 @@ export function create(opts = {}) {
   }
 
   /**
+   * The HUD's animation clock, read live.
+   *
+   * `S.t` is only refreshed in update(), so an event that arrives between two frames
+   * would be stamped with the *previous* frame's time. Normally that is a sub-frame
+   * error and invisible — but the capture harness can jump `clock.t` by seconds with
+   * setTime(), and a stale stamp then makes every timer (pickup lifetime, recharge
+   * delay, shield hold) fire instantly. Public entry points resync through this.
+   */
+  function hudNow() {
+    if (ctxRef?.config?.frozen) return S.t;
+    const t = ctxRef?.clock?.t;
+    return Number.isFinite(t) ? t : S.t;
+  }
+
+  /**
    * The whole damage reaction, shared by the bus handler and the public API.
    * `direction` points FROM the player TOWARD the source (Vector3-ish), or is a
    * world bearing in radians, or null for an omnidirectional hit.
    */
   function applyDamageFx(direction, amount) {
-    const t = S.t;
+    const t = S.t = hudNow();
     S.combat = t;
     S.shieldLastChange = t;
     S.rechargeAt = t + CFG.shieldRechargeDelay;
@@ -850,25 +894,25 @@ export function create(opts = {}) {
         S.dmgFrame = ctx.clock.frame; S.dmgDir = dir;
       });
       on('actor:damaged', (p) => {
-        S.combat = S.t;
         const dead = p?.actor && (p.actor.alive === false || p.actor.health <= 0);
         mod.setHitMarker(dead ? 'kill' : (p?.shield ? 'shield' : 'hit'));
       });
-      on('actor:killed', () => { S.combat = S.t; mod.setHitMarker('kill'); });
+      on('actor:killed', () => mod.setHitMarker('kill'));
       // `player` emits these too; they give an exact break instant rather than one
       // inferred from a sampled value.
-      on('player:shieldBroken', () => { S.brokeAt = S.t; S.shieldLastChange = S.t; S.cleared = false; });
-      on('player:shieldFull', () => { S.shieldLastChange = S.t; });
-      on('player:died', () => { S.vignette = 0.62; S.brokeAt = S.t; });
+      on('player:shieldBroken', () => { S.brokeAt = S.shieldLastChange = S.t = hudNow(); S.cleared = false; });
+      on('player:shieldFull', () => { S.shieldLastChange = S.t = hudNow(); });
+      on('player:died', () => { S.vignette = 0.62; S.brokeAt = S.t = hudNow(); });
       on('player:respawn', () => {
         S.arcs.length = 0; S.vignette = 0; S.brokeAt = -99;
         S.shield = 1; S.shieldGhost = 1; S.health = 1;
       });
       on('weapon:fired', () => {
-        S.combat = S.t;
+        S.combat = S.t = hudNow();
         S.bloom = clamp(S.bloom + 0.34, 0, 1.6);
+        S.cleared = false;
       });
-      on('weapon:impact', () => { S.combat = S.t; });
+      on('weapon:impact', () => { S.combat = S.t = hudNow(); });
       on('camera:teleport', () => {
         S.seen.clear(); S.contacts.length = 0;
         S.arcs.length = 0; S.vignette = 0; S.lines.length = 0;
@@ -1003,24 +1047,40 @@ export function create(opts = {}) {
       const ms = performance.now() - t0;
       S.ms = S.ms * 0.9 + ms * 0.1;
       if (ms > S.msPeak) S.msPeak = ms;
+      S.msRing[S.msRingN++ & 127] = ms;
       S.drawn++;
+    },
+
+    /** { ms (EMA), p50, p95, peak, drawn, skipped } — draw cost in milliseconds. */
+    timing() {
+      const n = Math.min(S.msRingN, 128);
+      if (!n) return { ms: 0, p50: 0, p95: 0, peak: 0, drawn: S.drawn, skipped: S.skipped };
+      const a = Array.from(S.msRing.slice(0, n)).sort((x, y) => x - y);
+      return {
+        ms: +S.ms.toFixed(4),
+        p50: +a[(n * 0.50) | 0].toFixed(4),
+        p95: +a[Math.min(n - 1, (n * 0.95) | 0)].toFixed(4),
+        peak: +S.msPeak.toFixed(4),
+        drawn: S.drawn, skipped: S.skipped,
+      };
     },
 
     /* ------------------------------------------------------- docs/API.md */
 
     /** kind: 'hit' | 'shield' | 'kill' */
     setHitMarker(kind = 'hit') {
+      const t = S.t = hudNow();
       S.hitKind = kind === 'kill' ? 2 : kind === 'shield' ? 1 : 0;
-      S.hitAt = S.t;
-      S.combat = S.t;
+      S.hitAt = t;
+      S.combat = t;
       S.hostileTint = 1;
       S.cleared = false;
     },
 
     showPickup(text) {
       if (!text) return;
-      const str = String(text).toUpperCase();
-      S.lines.push({ text: str, t0: S.t, a: 0 });
+      S.t = hudNow();
+      S.lines.push({ text: String(text).toUpperCase(), t0: S.t, a: 0 });
       while (S.lines.length > 3) S.lines.shift();
       S.cleared = false;
     },

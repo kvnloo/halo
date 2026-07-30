@@ -55,8 +55,8 @@ const DAMAGE = 9.5;
 /** Mount pose in view space (metres / radians). Solved against kf_01500: it puts the
  *  counter-housing apex at ~(1352, 640) of 1920x1080 and runs the rail off the right
  *  edge at y~1000, which is where the reference has them. */
-const MOUNT_POS = new THREE.Vector3(0.200, -0.146, -0.400);
-const MOUNT_ROT = { pitch: 0.1222, yaw: 0.1571, roll: 0.1745 };   // 7 / 9 / 10 deg
+const MOUNT_POS = new THREE.Vector3(0.202, -0.150, -0.395);
+const MOUNT_ROT = { pitch: 0.1658, yaw: 0.1571, roll: 0.1745 };   // 9.5 / 9 / 10 deg
 const ADS_POS = new THREE.Vector3(0.052, -0.092, -0.335);
 const ADS_ROT = { pitch: 0.0524, yaw: 0.0262, roll: 0.0175 };
 
@@ -842,7 +842,9 @@ function push(list, src, m) {
 function capProfileUV(mb, prof, z, dir, mask) {
   let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
   for (const p of prof) { x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x); y0 = Math.min(y0, p.y); y1 = Math.max(y1, p.y); }
-  const uv = (p) => [(p.x - x0) / (x1 - x0), 1 - (p.y - y0) / (y1 - y0)];
+  // CanvasTexture uploads with flipY, and the panel is read from +Z, so the
+  // profile box maps mirrored in u and upright in v.
+  const uv = (p) => [(p.x - x0) / (x1 - x0), (p.y - y0) / (y1 - y0)];
   let cx = 0, cy = 0;
   for (const p of prof) { cx += p.x; cy += p.y; }
   cx /= prof.length; cy /= prof.length;
@@ -935,4 +937,971 @@ function segRounded(len, w0, h0, w1, h1, r, o = {}) {
     st[i].nz = (b.z - a.z) !== 0 ? -((b.sx + b.sy) - (a.sx + a.sy)) * 0.5 / (b.z - a.z) : 0;
   }
   return extrudeProfile(prof, st, { mb: o.mb, capAo: 0.4 });
+}
+
+/**
+ * Assemble the rifle. Returns geometry lists keyed by material, plus the sub-groups
+ * that animate (magazine, charging handle/bolt, left hand, right forearm).
+ *
+ * Local frame: +X right, +Y up, -Z down the barrel. Origin sits inside the receiver
+ * just above the magwell. Everything is in metres at true scale — an MA5B receiver is
+ * 52 mm across and the chamfers are 3-4 mm, which is exactly the size that makes a
+ * rim highlight one to three pixels wide at this distance. Fudging the scale to
+ * "look right" is what turns a weapon into a plastic prop.
+ */
+function buildRifle(rand) {
+  const G = {
+    body: [], rail: [], poly: [], glove: [], plate: [], screen: [], engrave: [], led: [],
+  };
+  const parts = { mag: [], bolt: [], boltPoly: [], handL: [], armR: [] };
+
+  /* ---------------------------------------------------------- receiver ---- */
+  push(G.body, chamferBox(0.0620, 0.0870, 0.340, 0.0048, { offset: [0, -0.0105, 0.005], aoBottom: 0.80 }));
+  // side relief panels: two shallow milled flats, one per flank
+  for (const sx of [-1, 1]) {
+    const mb = new MB();
+    recess(mb, -0.075, 0.075, -0.024, 0.024, 0, 0.0038, 0.0038, 0.42);
+    push(G.body, mb, xform(sx * 0.0312, -0.016, 0.045, 0, sx > 0 ? -Math.PI / 2 : Math.PI / 2, 0));
+  }
+  // rear stock block
+  push(G.body, chamferBox(0.056, 0.076, 0.090, 0.005, { offset: [0, -0.006, 0.212], aoBottom: 0.7 }));
+
+  /* -------------------------------------------------------------- rail ---- */
+  {
+    const mb = new MB();
+    const x1 = 0.0285, yTop = 0.0465, c = 0.0038;
+    const z0 = -0.072, z1 = 0.176;
+    const rx0 = -0.0180, rx1 = 0.0180;       // recess outer
+    const rz0 = -0.046, rz1 = 0.086;
+    const mF = [0, 1], mE = [1, 1], mLo = [0.3, 1];
+    // top face: four borders around the milled recess
+    const q = (a, b, cc, d, mk) => mb.quad(a, b, cc, d, [0, 1, 0], mk, mk, mk, mk);
+    q([-x1 + c, yTop, z0 + c], [x1 - c, yTop, z0 + c], [x1 - c, yTop, rz0], [-x1 + c, yTop, rz0], mF);
+    q([-x1 + c, yTop, rz0], [rx0, yTop, rz0], [rx0, yTop, rz1], [-x1 + c, yTop, rz1], mF);
+    q([rx1, yTop, rz0], [x1 - c, yTop, rz0], [x1 - c, yTop, rz1], [rx1, yTop, rz1], mF);
+    // rear border carries the circular port
+    panelWithHole(mb, -x1 + c, x1 - c, rz1, z1 - c, yTop, 0, 0.126, 0.0130, 20, mF);
+    portHole(mb, 0, 0.126, yTop, 0.0130, 0.012, 20);
+    // recess lip + floor
+    const lip = 0.0036, fy = yTop - 0.0038;
+    const wall = (a, b, cc, d, n) => mb.quad(a, b, cc, d, nrm3(n), mE, mE, mLo, mLo);
+    wall([rx0, yTop, rz0], [rx1, yTop, rz0], [rx1 - lip, fy, rz0 + lip], [rx0 + lip, fy, rz0 + lip], [0, 0.7, 1]);
+    wall([rx1, yTop, rz1], [rx0, yTop, rz1], [rx0 + lip, fy, rz1 - lip], [rx1 - lip, fy, rz1 - lip], [0, 0.7, -1]);
+    wall([rx1, yTop, rz0], [rx1, yTop, rz1], [rx1 - lip, fy, rz1 - lip], [rx1 - lip, fy, rz0 + lip], [-1, 0.7, 0]);
+    wall([rx0, yTop, rz1], [rx0, yTop, rz0], [rx0 + lip, fy, rz0 + lip], [rx0 + lip, fy, rz1 - lip], [1, 0.7, 0]);
+    // rail sides + top chamfers
+    for (const sx of [-1, 1]) {
+      const n = nrm3([sx, 1, 0]);
+      mb.quad([sx * (x1 - c), yTop, z0 + c], [sx * (x1 - c), yTop, z1 - c],
+        [sx * x1, yTop - c, z1 - c], [sx * x1, yTop - c, z0 + c],
+        sx > 0 ? n : n, mE, mE, mLo, mLo);
+      mb.quad([sx * x1, yTop - c, z0], [sx * x1, yTop - c, z1], [sx * x1, 0.031, z1], [sx * x1, 0.031, z0],
+        [sx, 0, 0], mLo, mLo, [0, 0.9], [0, 0.9]);
+    }
+    // front + rear end chamfers
+    for (const sz of [-1, 1]) {
+      const zz = sz < 0 ? z0 : z1;
+      const n = nrm3([0, 1, sz]);
+      mb.quad([-x1 + c, yTop, zz + sz * -c], [x1 - c, yTop, zz + sz * -c],
+        [x1 - c, yTop - c, zz], [-x1 + c, yTop - c, zz], n, mE, mE, mLo, mLo);
+    }
+    push(G.rail, mb);
+    // the engraved floor is its own material (UV-mapped normal map, no triplanar)
+    const eb = new MB();
+    const fx0 = rx0 + lip, fx1 = rx1 - lip, fz0 = rz0 + lip, fz1 = rz1 - lip;
+    const m = [0, 0.72];
+    const uv = (x, z) => [(z - fz0) / (fz1 - fz0) * 2.0, (x - fx0) / (fx1 - fx0)];
+    eb.quadN([fx0, fy, fz0], [0, 1, 0], [fx1, fy, fz0], [0, 1, 0], [fx1, fy, fz1], [0, 1, 0],
+      [fx0, fy, fz1], [0, 1, 0], m, m, m, m, uv(fx0, fz0), uv(fx1, fz0), uv(fx1, fz1), uv(fx0, fz1));
+    push(G.engrave, eb);
+  }
+
+  /* ------------------------------------------------- ammo counter housing -- */
+  {
+    const tri = roundedPoly([[0, 0.0790], [-0.0425, -0.0470], [0.0425, -0.0470]], [0.0150, 0.0125, 0.0125], 4);
+    const st = [
+      { z: -0.0470, s: 0.895, edge: 0.55, ao: 0.9 },
+      { z: -0.0428, s: 0.985, edge: 1.0 },
+      { z: -0.0390, s: 1.000, edge: 0.0 },
+      { z: 0.0300, s: 1.000, edge: 0.0 },
+      { z: 0.0342, s: 0.985, edge: 1.0 },
+      { z: 0.0380, s: 0.930, edge: 0.55 },
+    ];
+    const mb = extrudeProfile(tri, st, { capBack: false, capFront: true, capAo: 0.6 });
+    // rear face: flat annulus (the thick bezel), then a step wall down to the screen
+    const mBez = [0.15, 0.95], mIn = [0.1, 0.45];
+    ringBetween(mb, tri, tri, 0.0380, 0.0380, [0, 0, 1], mBez, mBez, 0.930, 0.800);
+    ringBetween(mb, tri, tri, 0.0380, 0.0345, [0, 0, 1], mBez, mIn, 0.800, 0.755);
+    push(G.body, mb, xform(0, 0.0940, -0.1140, -10 * DEG, 0, 0));
+    // the screen itself
+    const sc = new MB();
+    const inner = tri.map((p) => ({ x: p.x * 0.755, y: p.y * 0.755, smooth: p.smooth }));
+    capProfileUV(sc, inner, 0.0345, 1, [0, 1]);
+    push(G.screen, sc, xform(0, 0.0940, -0.1140, -10 * DEG, 0, 0));
+    // two micro fasteners on the housing foot
+    for (const sx of [-1, 1]) {
+      push(G.body, chamferBox(0.008, 0.0045, 0.008, 0.0013,
+        { offset: [sx * 0.023, 0.0478, -0.0855], edge: 1.2 }));
+    }
+  }
+
+  /* ------------------------------------------------------------ shroud ---- */
+  {
+    const prof = rrProfile(0.0790, 0.1140, 0.0130, 3);
+    const zR = -0.138, zF = -0.3800;
+    const st = [];
+    const seams = [-0.186, -0.234, -0.282, -0.330];
+    const sAt = (z) => mix(1.0, 0.905, (zR - z) / (zR - zF));
+    st.push({ z: zR + 0.0000, s: sAt(zR) * 0.955, edge: 0.6, ao: 0.85 });
+    st.push({ z: zR - 0.0035, s: sAt(zR), edge: 1.0 });
+    for (const sz of seams) {
+      st.push({ z: sz + 0.0060, s: sAt(sz), edge: 0.0 });
+      st.push({ z: sz + 0.0022, s: sAt(sz) * 0.985, edge: 0.9 });
+      st.push({ z: sz - 0.0022, s: sAt(sz) * 0.962, edge: 0.15, ao: 0.42 });
+      st.push({ z: sz - 0.0060, s: sAt(sz) * 0.988, edge: 0.9 });
+    }
+    st.push({ z: zF + 0.0080, s: sAt(zF), edge: 0.0 });
+    st.push({ z: zF + 0.0035, s: sAt(zF) * 0.975, edge: 1.0 });
+    st.push({ z: zF, s: sAt(zF) * 0.900, edge: 0.55, ao: 0.8 });
+    st.sort((a, b) => a.z - b.z);
+    push(G.body, extrudeProfile(prof, st, { capAo: 0.5 }), xform(0, 0.0020, 0));
+
+    // raised latch tabs where the seams meet the top-left edge
+    for (let i = 0; i < seams.length; i++) {
+      push(G.body, chamferBox(0.011, 0.0065, 0.028, 0.0017,
+        { offset: [-0.0368, 0.0430, seams[i] + 0.001], edge: 1.15 }));
+    }
+
+    // slotted cooling vent on the left face, with slats
+    {
+      const mb = new MB();
+      recess(mb, -0.052, 0.052, -0.0240, 0.0240, 0, 0.022, 0.0042, 0.14);
+      push(G.body, mb, xform(-0.0390, -0.0100, -0.2620, 0, Math.PI / 2, 0));
+      for (let i = 0; i < 5; i++) {
+        const zz = -0.2620 + (i - 2) * 0.0205;
+        push(G.body, chamferBox(0.008, 0.038, 0.0072, 0.0014,
+          { offset: [-0.0372, -0.0100, zz], edge: 1.1, ao: 0.55 }));
+      }
+    }
+    // muzzle: barrel stub past the shroud
+    push(G.body, segRounded(0.040, 0.0125, 0.0125, 0.0110, 0.0110, 0.0125,
+      { steps: 3, capF: 0.05, capB: 0.30 }), xform(0, 0.002, -0.3780));
+  }
+
+  /* -------------------------------------------------- fore-end / handguard */
+  push(G.poly, chamferBox(0.0640, 0.0430, 0.1400, 0.0055,
+    { offset: [0, -0.0720, -0.2750], aoBottom: 0.72 }));
+  for (let i = 0; i < 6; i++) {   // finger grooves on the underside
+    push(G.poly, chamferBox(0.056, 0.0065, 0.0080, 0.0019,
+      { offset: [0, -0.0940, -0.2200 - i * 0.0190], edge: 0.9, ao: 0.6 }));
+  }
+
+  /* -------------------------------------------- charging handle (animates) */
+  push(parts.boltPoly, ribbedCylinder(0.0132, 0.1180, 15, 0.0016, { radial: 18 }),
+    xform(-0.0378, -0.0140, -0.0600));
+
+  /* ------------------------------------------------------ magazine (anim) */
+  push(parts.mag, chamferBox(0.0455, 0.1080, 0.0760, 0.0036,
+    { offset: [0, -0.1010, 0.0480], aoBottom: 0.65 }));
+  push(parts.mag, chamferBox(0.0480, 0.0135, 0.0780, 0.0030,
+    { offset: [0, -0.0480, 0.0480], edge: 1.1 }));
+  for (let i = 0; i < 3; i++) {   // witness slots
+    push(parts.mag, chamferBox(0.0060, 0.0180, 0.0058, 0.0012,
+      { offset: [-0.0200, -0.0850 - i * 0.0230, 0.0480], edge: 1.0, ao: 0.5 }));
+  }
+
+  /* ------------------------------------------------- grip + trigger group */
+  push(G.poly, chamferBox(0.0420, 0.1060, 0.0520, 0.0065,
+    { offset: [0, -0.0980, 0.1420], aoBottom: 0.6 }));
+  push(G.body, chamferBox(0.0360, 0.0170, 0.0660, 0.0032,
+    { offset: [0, -0.0600, 0.1080], ao: 0.65 }));
+
+  /* ----------------------------------------------------------- LED decal -- */
+  {
+    const mb = new MB();
+    const m = [0, 1];
+    const x = -0.03105;
+    mb.quadN([x, -0.0130, 0.0330], [-1, 0, 0], [x, -0.0130, -0.0060], [-1, 0, 0],
+      [x, -0.0325, -0.0060], [-1, 0, 0], [x, -0.0325, 0.0330], [-1, 0, 0],
+      m, m, m, m, [0, 0], [1, 0], [1, 1], [0, 1]);
+    push(G.led, mb);
+  }
+
+  return { G, parts };
+}
+
+/**
+ * Hands. The reference gives them very little tonal range — a dark soft mass with
+ * hard armour plates catching the only highlights — so the budget goes into the
+ * silhouette and the plates, not into anatomy that would never be resolved.
+ */
+function buildHands(G, parts) {
+  /* ------------------------------------------------- left hand on the fore-end */
+  const H = xform(-0.0480, -0.1150, -0.2560, -20 * DEG, 32 * DEG, -18 * DEG);
+  const mul = (a, b) => a.clone().multiply(b);
+
+  // back of hand
+  push(parts.handL, chamferBox(0.0900, 0.0370, 0.0980, 0.0110, { offset: [0.004, 0, 0] }), H.clone());
+  // wrist + cuff
+  push(parts.handL, chamferBox(0.0800, 0.0420, 0.0500, 0.0100, { offset: [-0.0600, -0.0040, 0] }), H.clone());
+  push(parts.handL, chamferBox(0.0880, 0.0510, 0.0220, 0.0060,
+    { offset: [-0.0880, -0.0050, 0], edge: 1.1 }), H.clone());
+  // forearm, tapering away from the camera
+  push(parts.handL, segRounded(0.190, 0.0420, 0.0290, 0.0360, 0.0260, 0.0165,
+    { steps: 5, capF: 0.10, capB: 0.06 }),
+  mul(H, xform(-0.0950, -0.0060, 0, 0, 88 * DEG, 0)));
+
+  // knuckle plates + proximal finger segments
+  for (let i = 0; i < 4; i++) {
+    const z = -0.0360 + i * 0.0245;
+    const spread = (i - 1.5) * 0.055;
+    const F = mul(H, xform(0.0420, 0.0020, z, spread, 0, 34 * DEG));
+    // proximal segment
+    push(parts.handL, segRounded(0.0370, 0.0108, 0.0124, 0.0100, 0.0116, 0.0074,
+      { steps: 3, capF: 0.12, capB: 0.12 }), mul(F, xform(0, 0, 0, 0, 90 * DEG, 0)));
+    // armoured knuckle plate, standing proud
+    push(G.plate, chamferBox(0.0225, 0.0070, 0.0186, 0.0026,
+      { offset: [0.0105, 0.0116, 0], edge: 1.25 }), F.clone());
+    // middle segment, curling over the guard
+    const F2 = mul(F, xform(0.0370, 0.0012, 0, 0, 0, 62 * DEG));
+    push(parts.handL, segRounded(0.0310, 0.0100, 0.0116, 0.0094, 0.0106, 0.0072,
+      { steps: 3, capF: 0.12, capB: 0.12 }), mul(F2, xform(0, 0, 0, 0, 90 * DEG, 0)));
+    push(G.plate, chamferBox(0.0162, 0.0060, 0.0166, 0.0024,
+      { offset: [0.0092, 0.0102, 0], edge: 1.25 }), F2.clone());
+  }
+  // thumb, lying along the guard
+  {
+    const T = mul(H, xform(0.0225, -0.0060, -0.0520, -28 * DEG, -40 * DEG, 18 * DEG));
+    push(parts.handL, segRounded(0.0450, 0.0138, 0.0150, 0.0122, 0.0132, 0.0094,
+      { steps: 3 }), mul(T, xform(0, 0, 0, 0, 90 * DEG, 0)));
+    push(G.plate, chamferBox(0.0186, 0.0062, 0.0174, 0.0024,
+      { offset: [0.0175, 0.0100, 0], edge: 1.2 }), T.clone());
+  }
+
+  /* --------------------------------- right forearm, bottom-right of the frame */
+  const R = xform(0.0900, -0.1450, 0.1250, -26 * DEG, -30 * DEG, 12 * DEG);
+  push(parts.armR, segRounded(0.230, 0.0560, 0.0500, 0.0400, 0.0380, 0.0230,
+    { steps: 6, capF: 0.08, capB: 0.16 }), mul(R, xform(0, 0, 0, 0, 155 * DEG, 0)));
+  // MJOLNIR forearm plate
+  push(G.plate, chamferBox(0.0620, 0.0180, 0.1050, 0.0070,
+    { offset: [0.0060, 0.0400, 0.0450], edge: 1.15 }), R.clone());
+  push(G.plate, chamferBox(0.0480, 0.0150, 0.0520, 0.0055,
+    { offset: [0.0140, 0.0330, -0.0400], edge: 1.15 }), R.clone());
+}
+
+/* ========================================================================== */
+/*  materials                                                                 */
+/* ========================================================================== */
+
+const VM_PARS = /* glsl */`
+uniform sampler2D tDetail;
+uniform vec3  uWornCol;
+uniform float uDetailScale;
+uniform float uNormalStr;
+uniform float uWearAmt;
+uniform float uRoughVar;
+uniform float uGrime;
+uniform float uAoDepth;
+uniform mat3  normalMatrix;
+varying vec3 vObjPosVM;
+varying vec3 vObjNrmVM;
+varying vec2 vMaskVM;
+`;
+
+/**
+ * Triplanar surface authoring in OBJECT space.
+ *
+ * Object space, not world space: the viewmodel's world transform changes every frame
+ * (sway, bob, recoil), and world-space projection would make every scratch swim
+ * across the metal as the gun moves — the single most obvious "procedural" tell there
+ * is. Object space costs one extra varying and pins the detail to the surface.
+ */
+const VM_FRAG = /* glsl */`
+vec3 oN = normalize(vObjNrmVM);
+vec3 aw = abs(oN); aw = aw*aw; aw = aw*aw;
+aw /= max(aw.x + aw.y + aw.z, 1e-4);
+vec2 uX = vObjPosVM.zy * uDetailScale;
+vec2 uY = vObjPosVM.xz * uDetailScale;
+vec2 uZ = vObjPosVM.xy * uDetailScale;
+vec4 dX = texture2D(tDetail, uX);
+vec4 dY = texture2D(tDetail, uY);
+vec4 dZ = texture2D(tDetail, uZ);
+vec4 dd = dX*aw.x + dY*aw.y + dZ*aw.z;
+
+vec3 pert = vec3(0.0);
+pert += aw.x * vec3(0.0, dX.r*2.0-1.0, dX.g*2.0-1.0);
+pert += aw.y * vec3(dY.r*2.0-1.0, 0.0, dY.g*2.0-1.0);
+pert += aw.z * vec3(dZ.r*2.0-1.0, dZ.g*2.0-1.0, 0.0);
+normal = normalize(normalMatrix * normalize(oN + pert * uNormalStr));
+
+float edgeM = vMaskVM.x;
+float wear  = clamp(edgeM, 0.0, 1.4) * smoothstep(0.28, 0.82, dd.a);
+float grime = 1.0 - dd.a;
+
+diffuseColor.rgb *= (1.0 - uGrime * grime * (1.0 - min(edgeM, 1.0)));
+diffuseColor.rgb  = mix(diffuseColor.rgb, uWornCol, clamp(wear * uWearAmt, 0.0, 1.0));
+diffuseColor.rgb *= mix(1.0 - uAoDepth, 1.0, vMaskVM.y);
+roughnessFactor = clamp(roughnessFactor + (dd.b - 0.5) * uRoughVar - wear * 0.24, 0.055, 1.0);
+metalnessFactor = clamp(metalnessFactor + wear * 0.30, 0.0, 1.0);
+`;
+
+const VM_VERT_PARS = /* glsl */`
+attribute vec2 aMask;
+varying vec3 vObjPosVM;
+varying vec3 vObjNrmVM;
+varying vec2 vMaskVM;
+`;
+const VM_VERT = /* glsl */`
+vObjPosVM = transformed;
+vObjNrmVM = objectNormal;
+vMaskVM   = aMask;
+`;
+
+function vmMaterial(ctx, key, o) {
+  const mat = new THREE.MeshStandardMaterial({
+    color: new THREE.Color().setHex(o.color, THREE.SRGBColorSpace),
+    roughness: o.roughness,
+    metalness: o.metalness,
+    envMapIntensity: o.envInt ?? 1.0,
+    dithering: true,
+  });
+  if (o.plain) {
+    applyWorldMaterial(mat, ctx, { matId: MAT_ID.VIEWMODEL, aerial: false, inject: { key } });
+    return mat;
+  }
+  applyWorldMaterial(mat, ctx, {
+    matId: MAT_ID.VIEWMODEL,
+    aerial: false,
+    inject: {
+      key,
+      uniforms: {
+        tDetail: { value: o.detail },
+        uWornCol: { value: new THREE.Color().setHex(o.worn ?? 0x6a6d72, THREE.SRGBColorSpace) },
+        uDetailScale: { value: o.detailScale ?? 7.0 },
+        uNormalStr: { value: o.normalStr ?? 0.85 },
+        uWearAmt: { value: o.wear ?? 0.85 },
+        uRoughVar: { value: o.roughVar ?? 0.30 },
+        uGrime: { value: o.grime ?? 0.30 },
+        uAoDepth: { value: o.aoDepth ?? 0.45 },
+      },
+      pars: VM_PARS,
+      fragment: VM_FRAG,
+      vertexPars: VM_VERT_PARS,
+      vertex: VM_VERT,
+    },
+  });
+  return mat;
+}
+
+/**
+ * Specular IBL for the viewmodel only.
+ *
+ * `env` is a stub and `scene.environment` is deliberately unset (the exposure key in
+ * `passes/tonemap.js` warns about un-published image-based ambient, and rightly). But
+ * a metal gun with no environment is black except for the sun lobe, and the brightest
+ * thing on the reference weapon — the grazing sheen down the top rail — is a
+ * reflection of the sky. So build a tiny private probe from `sky.radiance()`, PMREM
+ * it once, and hang it on the viewmodel materials by hand.
+ *
+ * It is normalised against the HemisphereLight's irradiance rather than used raw, so
+ * the ambient the gun sees stays tied to the same lighting rig as the world instead
+ * of drifting with whatever units the sky module happens to publish.
+ */
+function buildEnvProbe(ctx, intensityScale) {
+  const W = 64, H = 32;
+  const data = new Float32Array(W * H * 4);
+  const sky = ctx.get('sky');
+  const time = ctx.get('time');
+  const dir = new THREE.Vector3();
+  const col = new THREE.Color();
+  const fallbackSky = time ? time.skyColor.clone() : new THREE.Color(0.36, 0.56, 0.94);
+  const warm = time ? time.sunColor.clone() : new THREE.Color(1, 0.94, 0.82);
+
+  let hemiSum = 0, hemiW = 0;
+  const tmp = new Float32Array(W * H * 3);
+  for (let j = 0; j < H; j++) {
+    const v = (j + 0.5) / H;
+    const el = (v - 0.5) * Math.PI;
+    const sy = Math.sin(el), cy = Math.cos(el);
+    for (let i = 0; i < W; i++) {
+      const az = ((i + 0.5) / W - 0.5) * Math.PI * 2;
+      dir.set(Math.cos(az) * cy, sy, Math.sin(az) * cy);
+      if (sy > 0.005 && sky?.radiance) {
+        sky.radiance(dir, col);
+      } else if (sy > 0.005) {
+        col.copy(fallbackSky).multiplyScalar(0.22 + 0.30 * sy);
+      } else {
+        // ground: warm sand bounce, dimming as it faces away from the sky
+        const horizon = sky?.radiance ? sky.radiance(dir.set(Math.cos(az), 0.06, Math.sin(az)), col.clone())
+          : fallbackSky.clone().multiplyScalar(0.26);
+        col.setRGB(horizon.r * 0.46, horizon.g * 0.40, horizon.b * 0.30);
+        col.multiplyScalar(0.30 + 0.55 * (1 + sy));
+      }
+      const k = (j * W + i) * 3;
+      tmp[k] = Math.max(0, col.r); tmp[k + 1] = Math.max(0, col.g); tmp[k + 2] = Math.max(0, col.b);
+      if (sy > 0) {
+        const w = cy * sy;               // cosine-weighted solid angle for irradiance
+        hemiSum += (0.2126 * col.r + 0.7152 * col.g + 0.0722 * col.b) * w;
+        hemiW += w;
+      }
+    }
+  }
+  const meanL = hemiW > 0 ? hemiSum / hemiW : 1;
+  // match the HemisphereLight the rest of the scene is lit by
+  let targetE = 0.6;
+  const scene = ctx.scene;
+  scene.traverse((o) => {
+    if (o.isHemisphereLight) {
+      targetE = (0.2126 * o.color.r + 0.7152 * o.color.g + 0.0722 * o.color.b) * o.intensity;
+    }
+  });
+  const gain = (meanL > 1e-6 ? (targetE / Math.PI) / meanL : 1) * intensityScale;
+
+  for (let p = 0; p < W * H; p++) {
+    data[p * 4] = tmp[p * 3] * gain;
+    data[p * 4 + 1] = tmp[p * 3 + 1] * gain;
+    data[p * 4 + 2] = tmp[p * 3 + 2] * gain;
+    data[p * 4 + 3] = 1;
+  }
+  const tex = new THREE.DataTexture(data, W, H, THREE.RGBAFormat, THREE.FloatType);
+  tex.mapping = THREE.EquirectangularReflectionMapping;
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.colorSpace = THREE.NoColorSpace;
+  tex.needsUpdate = true;
+
+  const pmrem = new THREE.PMREMGenerator(ctx.renderer);
+  const rt = pmrem.fromEquirectangular(tex);
+  pmrem.dispose();
+  tex.dispose();
+  return rt;
+}
+
+/* ========================================================================== */
+/*  module                                                                    */
+/* ========================================================================== */
+
+export function create(opts = {}) {
+  let ctx = null;
+  const root = new THREE.Object3D();
+  root.name = 'viewmodel';
+  root.matrixAutoUpdate = false;
+  root.frustumCulled = false;
+
+  const grpGun = new THREE.Object3D();       // static receiver group
+  const grpMag = new THREE.Object3D();
+  const grpBolt = new THREE.Object3D();
+  const grpHand = new THREE.Object3D();
+  const grpArm = new THREE.Object3D();
+  for (const g of [grpGun, grpMag, grpBolt, grpHand, grpArm]) root.add(g);
+
+  const mats = {};
+  const tex = {};
+  let counter = null, counterTex = null, envRT = null;
+  let flashLight = null, flashSprite = null;
+  const shells = [];
+  const tracers = [];
+  let shellIx = 0, tracerIx = 0;
+
+  const st = {
+    ammo: START_AMMO, reserve: START_RESERVE,
+    firing: false, reloading: false, reloadT: 0, nextShot: -1, t: 0,
+    bloom: 0, ads: 0, adsTarget: 0,
+    lagYaw: 0, lagYawV: 0, lagPitch: 0, lagPitchV: 0,
+    recZ: 0, recZV: 0, recP: 0, recPV: 0, recY: 0, recYV: 0, recR: 0, recRV: 0,
+    landY: 0, landV: 0, wasGrounded: true,
+    bobPhase: 0, bobAmt: 0,
+    boltT: 1, flashT: 0, counterAmmo: -1, counterGlow: 0,
+    camYaw: 0, camPitch: 0, haveCam: false,
+  };
+
+  const _v = new THREE.Vector3(), _v2 = new THREE.Vector3(), _q = new THREE.Quaternion();
+  const _e = new THREE.Euler(0, 0, 0, 'YXZ');
+  const _m = new THREE.Matrix4();
+  const localPos = new THREE.Vector3();
+  const muzzleLocal = new THREE.Vector3(0, 0.004, -0.462);
+  const ejectLocal = new THREE.Vector3(0.030, 0.006, -0.055);
+  const muzzleWorld = new THREE.Vector3();
+  let rng = null;
+
+  /* -------------------------------------------------------------- effects */
+  function fireEffects() {
+    st.flashT = 0.055;
+    st.boltT = 0;
+    if (flashLight) flashLight.position.copy(muzzleWorld);
+    // shell
+    const physics = ctx.get('physics');
+    const shell = shells[shellIx % shells.length];
+    shellIx++;
+    if (shell) {
+      root.updateMatrixWorld(true);
+      const p = _v.copy(ejectLocal).applyMatrix4(root.matrixWorld);
+      const right = _v2.set(1, 0, 0).applyQuaternion(ctx.camera.quaternion);
+      const up = new THREE.Vector3(0, 1, 0);
+      if (shell.body && physics) physics.removeBody(shell.body.id);
+      shell.mesh.visible = true;
+      shell.life = 2.4;
+      if (physics?.addBody) {
+        shell.body = physics.addBody({
+          position: p.clone(),
+          velocity: right.clone().multiplyScalar(2.1 + rng.next() * 0.7)
+            .addScaledVector(up, 1.5 + rng.next() * 0.6)
+            .addScaledVector(_v2.set(0, 0, -1).applyQuaternion(ctx.camera.quaternion), 0.4),
+          angularVelocity: new THREE.Vector3(rng.sym(24), rng.sym(24), rng.sym(24)),
+          radius: 0.008, mass: 0.012, restitution: 0.42, drag: 0.06,
+          mask: physics.MASK ? physics.MASK.DEBRIS : 8,
+          life: 2.4,
+        });
+      } else {
+        shell.body = null;
+        shell.mesh.position.copy(p);
+      }
+    }
+  }
+
+  function spawnTracer(from, to) {
+    const t = tracers[tracerIx % tracers.length];
+    tracerIx++;
+    if (!t) return;
+    t.life = 0.055;
+    t.mesh.visible = true;
+    const d = _v.subVectors(to, from);
+    const len = Math.min(d.length(), 60);
+    t.mesh.position.copy(from).addScaledVector(d.normalize(), len * 0.5);
+    t.mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), d);
+    t.mesh.scale.set(1, 1, len);
+  }
+
+  /* ---------------------------------------------------------------- api */
+  const api = {
+    name: 'weapons',
+    order: 75,
+    enabled: true,
+
+    current: {
+      id: 'ma5b', name: 'MA5B Assault Rifle',
+      ammo: START_AMMO, reserve: START_RESERVE, magSize: MAG_SIZE,
+      rpm: RPM, spread: 0.006, damage: DAMAGE, range: RANGE,
+    },
+    get isFiring() { return st.firing; },
+    get isReloading() { return st.reloading; },
+    get adsAmount() { return st.ads; },
+    muzzleWorldPosition: muzzleWorld,
+
+    /** One round. Cooldown, ammo and reload state are all enforced here so external
+     *  callers (input, AI, a demo script) can hammer it safely. */
+    fire() {
+      if (!ctx || st.reloading || st.ammo <= 0) return;
+      if (st.t < st.nextShot) return;
+      st.nextShot = st.t + SHOT_DT;
+      st.ammo--;
+      api.current.ammo = st.ammo;
+
+      const cam = ctx.camera;
+      const origin = _v.copy(cam.position);
+      const dir = _v2.set(0, 0, -1).applyQuaternion(cam.quaternion);
+      const sp = 0.0022 + st.bloom * 0.026;
+      dir.x += rng.sym(sp); dir.y += rng.sym(sp); dir.z += rng.sym(sp * 0.2);
+      dir.normalize();
+      st.bloom = Math.min(1, st.bloom + 0.115);
+
+      const o = origin.clone(), d = dir.clone();
+      const hit = ctx.get('physics')?.raycast?.(o, d, RANGE);
+      const end = hit ? hit.point.clone() : o.clone().addScaledVector(d, RANGE);
+
+      // recoil: spring impulses on the viewmodel, plus the real camera kick
+      st.recZ += 0.0165; st.recP += 0.0270 + rng.next() * 0.006;
+      st.recY += rng.sym(0.0085); st.recR += rng.sym(0.024);
+      ctx.get('player')?.applyRecoil?.(0.0092 + rng.next() * 0.0035, rng.sym(0.0042));
+
+      fireEffects();
+      spawnTracer(muzzleWorld, end);
+      ctx.emit('weapon:fired', { weapon: api.current, origin: o, direction: d });
+      if (hit) {
+        ctx.emit('weapon:impact', {
+          point: hit.point, normal: hit.normal,
+          material: hit.body?.matId ?? 0, surface: hit.surface || 'rock',
+        });
+        const ai = ctx.get('ai');
+        if (ai?.nearestTo && hit.body?.actorId != null) ai.damage?.(hit.body.actorId, DAMAGE, hit.point, d);
+      }
+      ctx.get('audio')?.play?.('rifle_fire', { position: muzzleWorld.clone(), volume: 1 });
+      if (st.ammo === 0) api.reload();
+    },
+
+    reload() {
+      if (!ctx || st.reloading || st.ammo >= MAG_SIZE || st.reserve <= 0) return;
+      st.reloading = true;
+      st.reloadT = 0;
+      ctx.get('audio')?.play?.('rifle_reload', { volume: 0.8 });
+    },
+
+    switchTo(id) { return id === 'ma5b'; },
+
+    setFiring(v) { st.firing = !!v; },
+    setAds(v) { st.adsTarget = v ? 1 : 0; },
+
+    /* ------------------------------------------------------------- init */
+    async init(c) {
+      ctx = c;
+      rng = ctx.rand.fork('weapons');
+      const texRand = ctx.rand.fork('weapons.tex');
+
+      tex.metal = configureTexture(makeSurfaceTex(texRand, { size: 512, scratches: 320, aniso: 0.88 }), ctx);
+      tex.poly = configureTexture(makeSurfaceTex(texRand.fork(1), { size: 512, scratches: 140, aniso: 0.55, grain: 1.6 }), ctx);
+      tex.weave = configureTexture(makeWeaveTex(texRand.fork(2), 256), ctx);
+      tex.railN = configureTexture(makeRailNormalTex(texRand.fork(3)), ctx, { repeat: false });
+
+      const envInt = ctx.config.weaponEnvInt ?? 1.35;
+      try { envRT = buildEnvProbe(ctx, envInt); } catch (e) { console.warn('[weapons] env probe failed', e); }
+      const envMap = envRT ? envRT.texture : null;
+
+      mats.body = vmMaterial(ctx, 'vm_body', {
+        color: 0x2b2d30, roughness: 0.46, metalness: 0.62, detail: tex.metal,
+        worn: 0x6a6d72, detailScale: 7.2, normalStr: 0.95, wear: 0.90,
+        roughVar: 0.30, grime: 0.34, aoDepth: 0.52, envInt: 1.0,
+      });
+      mats.rail = vmMaterial(ctx, 'vm_rail', {
+        color: 0x3b3e43, roughness: 0.30, metalness: 0.84, detail: tex.metal,
+        worn: 0x7e8288, detailScale: 9.5, normalStr: 0.70, wear: 0.95,
+        roughVar: 0.26, grime: 0.26, aoDepth: 0.48, envInt: 1.15,
+      });
+      mats.poly = vmMaterial(ctx, 'vm_poly', {
+        color: 0x232529, roughness: 0.66, metalness: 0.05, detail: tex.poly,
+        worn: 0x4a4d52, detailScale: 6.0, normalStr: 1.05, wear: 0.55,
+        roughVar: 0.24, grime: 0.40, aoDepth: 0.55, envInt: 0.9,
+      });
+      mats.glove = vmMaterial(ctx, 'vm_glove', {
+        color: 0x101114, roughness: 0.74, metalness: 0.02, detail: tex.weave,
+        worn: 0x2a2c31, detailScale: 22.0, normalStr: 0.85, wear: 0.35,
+        roughVar: 0.22, grime: 0.30, aoDepth: 0.58, envInt: 0.85,
+      });
+      mats.plate = vmMaterial(ctx, 'vm_plate', {
+        color: 0x16181c, roughness: 0.40, metalness: 0.30, detail: tex.metal,
+        worn: 0x53575d, detailScale: 12.0, normalStr: 0.80, wear: 0.75,
+        roughVar: 0.26, grime: 0.30, aoDepth: 0.50, envInt: 1.05,
+      });
+      mats.engrave = new THREE.MeshStandardMaterial({
+        color: new THREE.Color().setHex(0x3d4046, THREE.SRGBColorSpace),
+        roughness: 0.34, metalness: 0.80, envMapIntensity: 1.1,
+        normalMap: tex.railN, normalScale: new THREE.Vector2(0.55, 0.55),
+      });
+      applyWorldMaterial(mats.engrave, ctx, { matId: MAT_ID.VIEWMODEL, aerial: false, inject: { key: 'vm_engrave' } });
+
+      counter = makeCounterCanvas();
+      counterTex = new THREE.CanvasTexture(counter.canvas);
+      counterTex.colorSpace = THREE.SRGBColorSpace;
+      counterTex.anisotropy = ctx.caps.maxAnisotropy;
+      counterTex.minFilter = THREE.LinearMipmapLinearFilter;
+      mats.screen = new THREE.MeshStandardMaterial({
+        color: new THREE.Color(0.02, 0.03, 0.035),
+        roughness: 0.10, metalness: 0.0,
+        emissive: new THREE.Color(1, 1, 1),
+        emissiveMap: counterTex,
+        emissiveIntensity: ctx.config.weaponScreenEmissive ?? 0.60,
+        envMapIntensity: 1.0,
+      });
+      applyWorldMaterial(mats.screen, ctx, { matId: MAT_ID.VIEWMODEL, aerial: false, inject: { key: 'vm_screen' } });
+
+      const ledTex = new THREE.CanvasTexture(makeLedCanvas());
+      ledTex.colorSpace = THREE.SRGBColorSpace;
+      mats.led = new THREE.MeshStandardMaterial({
+        color: new THREE.Color(0.05, 0.05, 0.05),
+        map: ledTex, transparent: true, alphaTest: 0.08,
+        roughness: 0.5, metalness: 0.0,
+        emissive: new THREE.Color(1, 1, 1), emissiveMap: ledTex, emissiveIntensity: 0.22,
+      });
+      applyWorldMaterial(mats.led, ctx, { matId: MAT_ID.VIEWMODEL, aerial: false, inject: { key: 'vm_led' } });
+
+      if (envMap) for (const k of Object.keys(mats)) if (mats[k].isMeshStandardMaterial) mats[k].envMap = envMap;
+
+      /* ------------------------------------------------------- geometry */
+      const { G, parts } = buildRifle(rng);
+      buildHands(G, parts);
+
+      const addMesh = (group, geos, mat, name) => {
+        if (!geos.length) return null;
+        const geo = geos.length === 1 ? geos[0] : mergeGeometries(geos, false);
+        if (!geo) { console.warn('[weapons] merge failed for', name); return null; }
+        geo.computeBoundingSphere();
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.name = 'vm_' + name;
+        mesh.frustumCulled = false;
+        mesh.castShadow = false;
+        mesh.receiveShadow = true;
+        group.add(mesh);
+        return mesh;
+      };
+      addMesh(grpGun, G.body, mats.body, 'body');
+      addMesh(grpGun, G.rail, mats.rail, 'rail');
+      addMesh(grpGun, G.engrave, mats.engrave, 'engrave');
+      addMesh(grpGun, G.poly, mats.poly, 'poly');
+      addMesh(grpGun, G.screen, mats.screen, 'screen');
+      addMesh(grpGun, G.led, mats.led, 'led');
+      addMesh(grpGun, G.plate, mats.plate, 'plate');
+      addMesh(grpGun, G.glove, mats.glove, 'gloveStatic');
+      addMesh(grpMag, parts.mag, mats.body, 'mag');
+      addMesh(grpBolt, parts.bolt, mats.body, 'bolt');
+      addMesh(grpBolt, parts.boltPoly, mats.poly, 'boltGrip');
+      addMesh(grpHand, parts.handL, mats.glove, 'handL');
+      addMesh(grpArm, parts.armR, mats.glove, 'armR');
+
+      /* ------------------------------------------------ muzzle flash + FX */
+      flashLight = new THREE.PointLight(0xffd9a0, 0, 5.0, 2.0);
+      flashLight.layers.enableAll();
+      flashLight.castShadow = false;
+      ctx.scene.add(flashLight);
+
+      const flashGeo = new THREE.PlaneGeometry(0.10, 0.10);
+      const flashMat = new THREE.MeshBasicMaterial({
+        color: new THREE.Color(9.0, 6.2, 3.0),
+        transparent: true, blending: THREE.AdditiveBlending,
+        depthWrite: false, depthTest: false, toneMapped: false,
+      });
+      flashSprite = new THREE.Object3D();
+      for (let i = 0; i < 3; i++) {
+        const m = new THREE.Mesh(flashGeo, flashMat);
+        m.rotation.z = i * Math.PI / 3;
+        flashSprite.add(m);
+      }
+      flashSprite.position.copy(muzzleLocal);
+      flashSprite.visible = false;
+      root.add(flashSprite);
+
+      const shellGeo = segRounded(0.0165, 0.0042, 0.0042, 0.0035, 0.0035, 0.0042, { steps: 3 }).geometry();
+      const shellMat = new THREE.MeshStandardMaterial({
+        color: new THREE.Color().setHex(0xb08a3c, THREE.SRGBColorSpace),
+        roughness: 0.34, metalness: 0.9, envMapIntensity: 1.0,
+      });
+      if (envMap) shellMat.envMap = envMap;
+      applyWorldMaterial(shellMat, ctx, { matId: MAT_ID.METAL, aerial: false, inject: { key: 'vm_shell' } });
+      for (let i = 0; i < 10; i++) {
+        const mesh = new THREE.Mesh(shellGeo, shellMat);
+        mesh.visible = false;
+        mesh.frustumCulled = false;
+        mesh.layers.set(LAYER.EFFECTS);
+        ctx.scene.add(mesh);
+        shells.push({ mesh, body: null, life: 0 });
+      }
+
+      const tracerGeo = new THREE.PlaneGeometry(0.028, 1);
+      tracerGeo.rotateX(Math.PI / 2);
+      const tracerMat = new THREE.MeshBasicMaterial({
+        color: new THREE.Color(5.2, 3.1, 1.0),
+        transparent: true, blending: THREE.AdditiveBlending,
+        depthWrite: false, toneMapped: false, side: THREE.DoubleSide,
+      });
+      for (let i = 0; i < 6; i++) {
+        const mesh = new THREE.Mesh(tracerGeo, tracerMat);
+        mesh.visible = false;
+        mesh.frustumCulled = false;
+        mesh.layers.set(LAYER.EFFECTS);
+        ctx.scene.add(mesh);
+        tracers.push({ mesh, life: 0 });
+      }
+
+      /* ---------------------------------------------------------- wiring */
+      root.traverse((o) => { if (o !== root) o.layers.set(LAYER.VIEWMODEL); });
+      root.layers.set(LAYER.VIEWMODEL);
+      patchForGBuffer(root, { matId: MAT_ID.VIEWMODEL, roughness: 0.46 });
+      ctx.scene.add(root);
+
+      // camera teleports (the capture harness sets a pose) must not leave the
+      // look-lag spring mid-flight, or the first settle frames differ from a
+      // steady-state one and two captures of the same pose disagree.
+      ctx.on('camera:teleport', () => {
+        st.lagYaw = st.lagYawV = st.lagPitch = st.lagPitchV = 0;
+        st.haveCam = false;
+      });
+
+      if (!ctx.engine.opts.deterministic && ctx.config.weaponInput !== false) {
+        const el = ctx.renderer.domElement;
+        el.addEventListener('mousedown', (e) => { if (e.button === 0) st.firing = true; if (e.button === 2) st.adsTarget = 1; });
+        globalThis.addEventListener?.('mouseup', (e) => { if (e.button === 0) st.firing = false; if (e.button === 2) st.adsTarget = 0; });
+        globalThis.addEventListener?.('keydown', (e) => { if (e.code === 'KeyR') api.reload(); });
+      }
+      this.updateCounter(true);
+    },
+
+    updateCounter(force) {
+      if (!counter) return;
+      const glow = st.reloading ? 0.5 + 0.5 * Math.sin(st.reloadT * 26) : (st.ammo === 0 ? 1 : 0);
+      if (!force && st.counterAmmo === st.ammo && Math.abs(st.counterGlow - glow) < 0.08) return;
+      st.counterAmmo = st.ammo; st.counterGlow = glow;
+      counter.draw(st.ammo, glow);
+      if (counterTex) counterTex.needsUpdate = true;
+    },
+
+    /* ------------------------------------------------------------ update */
+    update(dt, c) {
+      if (c.config.frozen) dt = 0;
+      st.t = c.clock.t;
+      const cam = c.camera;
+      const player = c.get('player');
+
+      st.bloom = Math.max(0, st.bloom - dt * 1.55);
+      st.ads += (st.adsTarget - st.ads) * Math.min(1, dt * 11);
+      st.boltT = Math.min(1, st.boltT + dt * 15);
+      st.flashT = Math.max(0, st.flashT - dt);
+      if (flashLight) flashLight.intensity = st.flashT > 0 ? 130 * (st.flashT / 0.055) : 0;
+      if (flashSprite) flashSprite.visible = st.flashT > 0;
+
+      if (st.firing && !st.reloading) api.fire();
+
+      if (st.reloading) {
+        st.reloadT += dt;
+        if (st.reloadT >= RELOAD_TIME) {
+          st.reloading = false; st.reloadT = 0;
+          const need = MAG_SIZE - st.ammo;
+          const take = Math.min(need, st.reserve);
+          st.ammo += take; st.reserve -= take;
+          api.current.ammo = st.ammo; api.current.reserve = st.reserve;
+        }
+      }
+
+      /* ---- look lag: the single most important motion cue ---------------- */
+      _e.setFromQuaternion(cam.quaternion, 'YXZ');
+      if (!st.haveCam) { st.camYaw = _e.y; st.camPitch = _e.x; st.haveCam = true; }
+      let dYaw = _e.y - st.camYaw;
+      while (dYaw > Math.PI) dYaw -= Math.PI * 2;
+      while (dYaw < -Math.PI) dYaw += Math.PI * 2;
+      const dPitch = _e.x - st.camPitch;
+      st.camYaw = _e.y; st.camPitch = _e.x;
+      if (dt > 0) {
+        st.lagYaw = THREE.MathUtils.clamp(st.lagYaw - dYaw * 0.58, -0.155, 0.155);
+        st.lagPitch = THREE.MathUtils.clamp(st.lagPitch - dPitch * 0.52, -0.130, 0.130);
+      }
+      [st.lagYaw, st.lagYawV] = spring(st.lagYaw, st.lagYawV, 0, 14, dt);
+      [st.lagPitch, st.lagPitchV] = spring(st.lagPitch, st.lagPitchV, 0, 14, dt);
+
+      /* ---- recoil ------------------------------------------------------- */
+      [st.recZ, st.recZV] = spring(st.recZ, st.recZV, 0, 21, dt);
+      [st.recP, st.recPV] = spring(st.recP, st.recPV, 0, 19, dt);
+      [st.recY, st.recYV] = spring(st.recY, st.recYV, 0, 17, dt);
+      [st.recR, st.recRV] = spring(st.recR, st.recRV, 0, 16, dt);
+
+      /* ---- walk bob + landing ------------------------------------------- */
+      let speed = 0;
+      if (player?.velocity) {
+        const v = player.velocity;
+        if (Number.isFinite(v.x)) speed = Math.hypot(v.x, v.z);
+      } else if (c.config.weaponWalk ?? !c.engine.opts.deterministic) {
+        // player is a stub: run a synthetic walk so the bob can be seen and tuned.
+        // Off by default under the capture harness — a standing player has no bob,
+        // and inventing one only smears the frame that gets measured.
+        speed = 3.1;
+      }
+      const sprint = player?.sprinting ? 1 : 0;
+      st.bobAmt += (Math.min(1, speed / 4.6) - st.bobAmt) * Math.min(1, dt * 6);
+      st.bobPhase += dt * (5.6 - sprint * 1.4) * Math.min(1.4, 0.35 + speed * 0.24);
+
+      const grounded = player?.grounded ?? true;
+      if (grounded && !st.wasGrounded) {
+        const vy = player?.velocity?.y ?? -4;
+        st.landV -= Math.min(0.55, Math.abs(vy) * 0.055);
+      }
+      st.wasGrounded = grounded;
+      [st.landY, st.landV] = spring(st.landY, st.landV, 0, 17, dt);
+
+      /* ---- effects lifetimes -------------------------------------------- */
+      for (const s of shells) {
+        if (!s.mesh.visible) continue;
+        s.life -= dt;
+        if (s.life <= 0) { s.mesh.visible = false; if (s.body) { c.get('physics')?.removeBody?.(s.body.id); s.body = null; } continue; }
+        if (s.body) { s.mesh.position.copy(s.body.position); s.mesh.quaternion.copy(s.body.quaternion); }
+      }
+      for (const t of tracers) {
+        if (!t.mesh.visible) continue;
+        t.life -= dt;
+        if (t.life <= 0) t.mesh.visible = false;
+      }
+      this.updateCounter(false);
+      api.current.spread = 0.0022 + st.bloom * 0.026;
+    },
+
+    /* --------------------------------------------------------- prerender */
+    prerender(c) {
+      const cam = c.camera;
+      const T = c.clock.t;
+      const swayK = (c.config.weaponSway ?? 1) * 0.35 * DEG;
+
+      // idle sway: two incommensurate rates so it never reads as a loop
+      const s1 = 0.60 * Math.sin(T * 2.30) + 0.40 * Math.sin(T * 3.70 + 1.90);
+      const s2 = 0.55 * Math.sin(T * 1.90 + 2.40) + 0.45 * Math.sin(T * 3.10 + 0.60);
+      const s3 = 0.50 * Math.sin(T * 1.60 + 4.10) + 0.50 * Math.sin(T * 2.70 + 2.80);
+
+      // walk bob: figure of eight, vertical 1.4 cm / lateral 0.9 cm at full speed
+      const bp = st.bobPhase;
+      const amp = st.bobAmt;
+      let bobX = Math.sin(bp) * 0.0045 * amp;
+      let bobY = Math.sin(bp * 2) * 0.0070 * amp;
+      let bobRoll = Math.sin(bp) * 0.020 * amp;
+      const vb = c.get('player')?.viewBobOffset;
+      if (vb && Number.isFinite(vb.x)) {
+        bobX = bobX * 0.35 + vb.x * 0.55;
+        bobY = bobY * 0.35 + vb.y * 0.55;
+        bobRoll = bobRoll * 0.35 + vb.x * 2.2;
+      }
+
+      // reload timeline
+      let rlx = 0, rly = 0, rlz = 0, rlp = 0, rlyaw = 0, rlroll = 0, magY = 0, magZ = 0, boltR = 0;
+      if (st.reloading) {
+        const p = st.reloadT / RELOAD_TIME;
+        const bump = THREE.MathUtils.smoothstep(p, 0.0, 0.16) * (1 - THREE.MathUtils.smoothstep(p, 0.82, 1.0));
+        rlx = -0.022 * bump; rly = -0.048 * bump; rlz = 0.026 * bump;
+        rlp = -0.30 * bump; rlyaw = 0.20 * bump; rlroll = -0.26 * bump;
+        const out = THREE.MathUtils.smoothstep(p, 0.13, 0.40);
+        const back = THREE.MathUtils.smoothstep(p, 0.58, 0.84);
+        magY = -0.185 * (out - back);
+        magZ = 0.030 * (out - back);
+        if (p > 0.86 && p < 0.96) boltR = Math.sin((p - 0.86) / 0.10 * Math.PI) * 0.024;
+      }
+
+      // compose the local mount transform
+      const a = st.ads;
+      localPos.copy(MOUNT_POS).lerp(ADS_POS, a);
+      localPos.x += bobX * (1 - a * 0.7) - st.lagYaw * 0.075 + rlx;
+      localPos.y += bobY * (1 - a * 0.7) + st.landY * 0.10 - st.lagPitch * 0.060 + rly;
+      localPos.z += st.recZ + rlz;
+
+      const pitch = mix(MOUNT_ROT.pitch, ADS_ROT.pitch, a) + s1 * swayK + st.lagPitch + st.recP + rlp;
+      const yaw = mix(MOUNT_ROT.yaw, ADS_ROT.yaw, a) + s2 * swayK + st.lagYaw + st.recY + rlyaw;
+      const roll = mix(MOUNT_ROT.roll, ADS_ROT.roll, a) + s3 * swayK * 1.6 + bobRoll + st.recR
+        + st.lagYaw * 0.55 + rlroll;
+
+      _e.set(pitch, yaw, roll, 'YXZ');
+      _q.setFromEuler(_e);
+      _m.compose(localPos, _q, _v.set(1, 1, 1));
+      root.matrix.multiplyMatrices(cam.matrixWorld, _m);
+      root.matrixWorldNeedsUpdate = true;
+
+      grpMag.position.set(0, magY, magZ);
+      grpBolt.position.set(0, 0, 0.020 * Math.sin(Math.min(1, st.boltT) * Math.PI) + boltR);
+      grpHand.position.set(0, magY * 0.10, 0);
+      grpArm.position.set(0, st.landY * 0.05, st.recZ * 0.5);
+      root.visible = c.config.weaponHidden !== true;
+      root.updateMatrixWorld(true);
+      muzzleWorld.copy(muzzleLocal).applyMatrix4(root.matrixWorld);
+      if (flashSprite && st.flashT > 0) {
+        flashSprite.scale.setScalar(0.75 + rng.next() * 0.5);
+        flashSprite.rotation.z = rng.next() * 6.28;
+      }
+    },
+
+    resize() {},
+
+    dispose(c) {
+      c.scene.remove(root);
+      if (flashLight) c.scene.remove(flashLight);
+      for (const s of shells) c.scene.remove(s.mesh);
+      for (const t of tracers) c.scene.remove(t.mesh);
+      root.traverse((o) => { o.geometry?.dispose?.(); });
+      for (const k of Object.keys(mats)) mats[k].dispose?.();
+      for (const k of Object.keys(tex)) tex[k].dispose?.();
+      counterTex?.dispose();
+      envRT?.dispose();
+    },
+  };
+
+  return api;
 }

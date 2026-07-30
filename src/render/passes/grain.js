@@ -25,6 +25,22 @@ import { Pass, fsMaterial, FullScreenQuad } from '../RenderPipeline.js';
  * the quantisation, so it is the *last* thing this shader does, after the grain and after
  * the vignette multiply.
  *
+ * Measured, blue channel down column x=1500 of a `diag_sky` capture, top 800 rows — the
+ * same measurement grade.js records, so the two are comparable. Grain is a broadband
+ * additive stage and therefore decorrelates quantisation on its own, so the dither has
+ * to be isolated by turning grain off:
+ *
+ *                                            codes  mean run  max run  runs >= 8px
+ *     grainAmount 0, gradeDither 0             53     2.23       20        12
+ *     grainAmount 0, gradeDither 1 (dither)    54     1.72       11         3
+ *     shipped (grain + dither)                 55     1.48       10         2
+ *     ref/keyframes (grade.js, for scale)     142-169  1.08-1.37  7-11     0-3
+ *
+ * `grade.js`'s regression gate fails above a 2.0 px mean plateau run. Undithered this
+ * pass measures 2.23 and would fail it; dithered it measures 1.72 and passes, and the
+ * shipped configuration is 1.48. So the dither is demonstrably reaching the backbuffer —
+ * which is exactly the claim that was false for two shipped reviews.
+ *
  * ## Order of operations, and why chromatic aberration looks out of place in the list
  *
  * The brief order is grain -> vignette -> CA -> dither. Grain and vignette are pointwise
@@ -61,6 +77,13 @@ import { Pass, fsMaterial, FullScreenQuad } from '../RenderPipeline.js';
  * command and the capture stays byte-identical — which a `Date.now()` or
  * `performance.now()` seed would destroy, taking the whole measurement loop with it.
  *
+ * Measured cost to the frame statistics at the shipped amplitude (`ref_00720`,
+ * `--only time,lighting,sky,pipeline`, sharpen off, so the grain is isolated):
+ * `lap_var` 12.39 -> 16.17 and `spectral_slope` −3.0412 -> −3.0259. That is +3.8 of
+ * Laplacian variance against a 463 target (0.8%) and 0.015 of slope, in the direction of
+ * the −2.60 target rather than away from it. Grain this fine is not what will move the
+ * spectrum; it is deliberately below the level at which it could.
+ *
  * ## Vignette
  *
  * Natural illumination falloff, `1/(1 + k·r^2)^2` — the cos^4 law, evaluated so that the
@@ -89,8 +112,26 @@ import { Pass, fsMaterial, FullScreenQuad } from '../RenderPipeline.js';
  *   grainDither      number   TPDF amplitude in LSBs, peak. Falls back to `gradeDither`
  *                             so the existing knob keeps working. (1.0)
  *
- * Cost at 1920x1080: **0.16 ms**. Three bilinear fetches instead of one, three PCG words,
- * and the dither; bandwidth-bound like the rest of the chain.
+ *
+ * ## Cost
+ *
+ * **Estimated, not profiled.** These numbers are derived, not measured, and the
+ * distinction is stated because this project rejects numbers whose provenance is not
+ * given. The GPU was saturated by a dozen concurrent capture sessions throughout this
+ * task, so a toggle-off/toggle-on timing run would have measured contention. The basis
+ * is the one hard measurement available for this chain: `grade.js` records **0.18 ms**
+ * for a full-screen RGBA16F pass at 1920x1080 doing one texture fetch plus four
+ * texelFetch from a cache-resident LUT, and **0.14 ms** for its dither stage doing a
+ * single fetch. Both are bandwidth-bound (8.3 MB read + 8.3 MB write), so in this chain
+ * a full-res pass costs ~0.14 ms of floor and additional taps that hit L1/L2 are close
+ * to free; a half-res pass costs ~a quarter of that.
+ *
+ * A real profiling pass on a quiet GPU is owed and should be run before anyone trusts
+ * these to two decimal places.
+ *
+ * Three bilinear fetches within a sub-pixel of each other (so two are L1 hits), five PCG
+ * words, and the 8-bit write. **~0.15 ms**, essentially the full-res bandwidth floor -
+ * and it *replaces* grade.js's separate 0.14 ms dither pass rather than adding to it.
  */
 
 const FRAG = /* glsl */`

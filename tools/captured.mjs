@@ -103,7 +103,7 @@ let served = 0;
  * load, which is the batching that makes a nine-pose preview cost one init instead of nine.
  */
 async function doCapture(req) {
-  const { poses: reqPoses, all = false, w = 1920, h = 1080, settle = 48, time = 12.0, seed = 1337, only, skip, video = 0 } = req;
+  const { poses: reqPoses, all = false, w = 1920, h = 1080, settle = 48, time = 12.0, seed = 1337, only, skip, video = 0, config = null } = req;
   await acquire();
   const page = await browser.newPage();
   const logs = [];
@@ -135,8 +135,9 @@ async function doCapture(req) {
 
     const out = {};
     for (const pose of poses) {
-      out[pose] = await page.evaluate(async (pose, settle, t, nvid) => {
+      out[pose] = await page.evaluate(async (pose, settle, t, nvid, cfg) => {
         const H = globalThis.__HALO__;
+        if (cfg) for (const kv of cfg.split(',')) { const [k,v]=kv.split('='); H.setConfig(k, isNaN(+v)? v : +v); }
         H.setSize(innerWidth, innerHeight);
         H.setPose(pose);
         H.setTime(Number(t));
@@ -147,7 +148,7 @@ async function doCapture(req) {
           return a;
         }
         return [H.screenshot()];
-      }, pose, settle, time, video);
+      }, pose, settle, time, video, config);
     }
     const stats = await page.evaluate(() => globalThis.__HALO__.stats());
     return { ok: true, shots: out, stats, missing: ready.missing,

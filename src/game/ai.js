@@ -45,6 +45,9 @@ const _a = new THREE.Vector3(), _b = new THREE.Vector3(), _c = new THREE.Vector3
 const _d = new THREE.Vector3(), _e = new THREE.Vector3(), _f = new THREE.Vector3();
 const _q = new THREE.Quaternion(), _q2 = new THREE.Quaternion();
 const _up = new THREE.Vector3(0, 1, 0);
+const _eu = new THREE.Euler(0, 0, 0, 'YXZ');
+/** Set a bone's local rotation from YXZ Euler angles without allocating. */
+const setEuler = (b, x, y, z) => { _eu.set(x, y, z, 'YXZ'); b.quaternion.setFromEuler(_eu); };
 
 /* ------------------------------------------------------------------- geometry */
 
@@ -259,9 +262,9 @@ function buildGrunt(major) {
     { n: 'pelvis', parent: null, p: [0, 0.58, 0] },
     { n: 'spine', parent: 'pelvis', p: [0, 0.15, -0.01] },
     { n: 'chest', parent: 'spine', p: [0, 0.16, -0.02] },
-    { n: 'neck', parent: 'chest', p: [0, 0.13, -0.05] },
-    { n: 'head', parent: 'neck', p: [0, 0.07, -0.03] },
-    { n: 'tank', parent: 'chest', p: [0, 0.04, 0.16] },
+    { n: 'neck', parent: 'chest', p: [0, 0.14, -0.07] },
+    { n: 'head', parent: 'neck', p: [0, 0.08, -0.05] },
+    { n: 'tank', parent: 'chest', p: [0, -0.01, 0.17] },
     { n: 'clavL', parent: 'chest', p: [0.13, 0.09, -0.01] },
     { n: 'uarmL', parent: 'clavL', p: [0.07, -0.03, 0] },
     { n: 'farmL', parent: 'uarmL', p: [0.05, -0.19, 0.02] },
@@ -287,7 +290,7 @@ function buildGrunt(major) {
 
   // torso: squat, barrel chested, wide hips
   B.limb(I('pelvis'), W[I('pelvis')].clone().add(_a.set(0, -0.06, 0)),
-    W[I('chest')], [[0, 0.17, 0.15], [0.4, 0.19, 0.17], [1, 0.16, 0.15]],
+    W[I('chest')], [[0, 0.155, 0.14], [0.4, 0.175, 0.155], [1, 0.145, 0.135]],
     { sides: 10, e: 3.0, col: PAL.gruntSkin, fx: FX_SUIT });
   // chest plate
   B.plate(I('chest'), W[I('chest')].clone().add(_a.set(0, 0.02, -0.10)), [0.155, 0.13, 0.07],
@@ -374,11 +377,11 @@ function buildElite(major) {
     { n: 'jawUR', parent: 'head', p: [-0.045, -0.02, -0.10] },
     { n: 'jawLL', parent: 'head', p: [0.055, -0.07, -0.08] },
     { n: 'jawLR', parent: 'head', p: [-0.055, -0.07, -0.08] },
-    { n: 'clavL', parent: 'chest', p: [0.16, 0.13, 0] },
+    { n: 'clavL', parent: 'chest', p: [0.16, 0.10, 0] },
     { n: 'uarmL', parent: 'clavL', p: [0.14, -0.01, 0] },
     { n: 'farmL', parent: 'uarmL', p: [0.04, -0.33, 0.02] },
     { n: 'handL', parent: 'farmL', p: [0.02, -0.29, 0.03] },
-    { n: 'clavR', parent: 'chest', p: [-0.16, 0.13, 0] },
+    { n: 'clavR', parent: 'chest', p: [-0.16, 0.10, 0] },
     { n: 'uarmR', parent: 'clavR', p: [-0.14, -0.01, 0] },
     { n: 'farmR', parent: 'uarmR', p: [-0.04, -0.33, 0.02] },
     { n: 'handR', parent: 'farmR', p: [-0.02, -0.29, 0.03] },
@@ -574,22 +577,22 @@ function buildJackal() {
 
 const TYPES = {
   grunt: {
-    build: (major) => buildGrunt(major), height: 1.30, eye: 1.12, hip: 0.58, radius: 0.33,
-    hp: 42, shield: 0, walk: 1.5, run: 3.6, stride: 0.42, hipWidth: 0.11,
+    build: (major) => buildGrunt(major), height: 1.30, eye: 1.12, hip: 0.55, radius: 0.33,
+    hp: 42, shield: 0, walk: 1.5, run: 3.6, stride: 0.42, hipWidth: 0.11, hunch: -0.18,
     fov: 100 * DEG, sight: 48, hearing: 26, accuracy: 0.30, reaction: 0.55,
     burst: [3, 5], rof: 5.5, boltSpeed: 34, boltDamage: 5.5, boltColor: PAL.glowGreen,
     range: [6, 22], morale: 0.55, waddle: 1.0, mass: 90,
   },
   elite: {
     build: (major) => buildElite(major), height: 2.28, eye: 2.02, hip: 1.10, radius: 0.45,
-    hp: 110, shield: 70, walk: 2.1, run: 5.4, stride: 0.78, hipWidth: 0.16,
+    hp: 110, shield: 70, walk: 2.1, run: 5.4, stride: 0.78, hipWidth: 0.16, hunch: -0.08,
     fov: 130 * DEG, sight: 78, hearing: 44, accuracy: 0.72, reaction: 0.30,
     burst: [4, 8], rof: 8.5, boltSpeed: 52, boltDamage: 8.0, boltColor: PAL.glowCyan,
     range: [8, 34], morale: 1.0, waddle: 0.15, mass: 190,
   },
   jackal: {
     build: () => buildJackal(), height: 1.86, eye: 1.60, hip: 0.90, radius: 0.36,
-    hp: 55, shield: 0, walk: 1.9, run: 4.6, stride: 0.60, hipWidth: 0.13,
+    hp: 55, shield: 0, walk: 1.9, run: 4.6, stride: 0.60, hipWidth: 0.13, hunch: -0.38,
     fov: 115 * DEG, sight: 64, hearing: 32, accuracy: 0.58, reaction: 0.38,
     burst: [2, 4], rof: 4.5, boltSpeed: 36, boltDamage: 6.5, boltColor: PAL.glowGreen,
     range: [10, 28], morale: 0.8, waddle: 0.4, mass: 110,
@@ -669,7 +672,6 @@ export function create(opts = {}) {
 
     root = new THREE.Group();
     root.name = 'ai_actors';
-    root.matrixAutoUpdate = false;
     ctx.scene.add(root);
 
     baseMaterial = makeActorMaterial(ctx);
@@ -734,14 +736,20 @@ export function create(opts = {}) {
         vertexPars: 'attribute vec3 aFx;\nvarying vec3 vFx;',
         vertex: 'vFx = aFx;',
         pars: 'varying vec3 vFx;\nuniform float uGlow;\nuniform float uHitFlash;\nuniform float uMuzzle;\nuniform vec3 uShieldTint;',
+        // NOTE: <lights_physical_fragment> has already packed roughnessFactor /
+        // metalnessFactor into `material` by the time this block runs, so the
+        // per-vertex surface parameters have to be written into `material` itself.
         fragment: `
-          roughnessFactor = clamp( vFx.z, 0.04, 1.0 );
-          metalnessFactor = clamp( vFx.y, 0.0, 1.0 );
-          float em = vFx.x * uGlow + vFx.x * uMuzzle * 2.5;
+          float aiRough = clamp( vFx.z, 0.04, 1.0 );
+          float aiMetal = clamp( vFx.y, 0.0, 1.0 );
+          material.roughness = clamp( aiRough, 0.0525, 1.0 );
+          material.metalness = aiMetal;
+          material.diffuseContribution = diffuseColor.rgb * ( 1.0 - aiMetal );
+          material.specularColorBlended = mix( vec3( 0.04 ), diffuseColor.rgb, aiMetal );
+          float em = vFx.x * ( uGlow + uMuzzle * 2.5 );
           totalEmissiveRadiance += diffuseColor.rgb * em;
           totalEmissiveRadiance += uShieldTint;
-          diffuseColor.rgb = mix( diffuseColor.rgb, vec3( 1.0, 0.55, 0.42 ), uHitFlash * 0.75 );
-          totalEmissiveRadiance += vec3( 1.6, 0.5, 0.25 ) * uHitFlash;
+          totalEmissiveRadiance += vec3( 1.8, 0.6, 0.30 ) * uHitFlash;
         `,
       },
     });
@@ -751,18 +759,10 @@ export function create(opts = {}) {
 
   /* ----------------------------------------------------------------- spawning */
 
-  function protoFor(type, major) {
-    const key = type + (major ? ':M' : '');
-    let p = shared.proto.get(key);
-    if (!p) { p = TYPES[type].build(major); shared.proto.set(key, p); }
-    return p;
-  }
-
   function spawnActor(type, position, o = {}) {
     const def = TYPES[type] || TYPES.grunt;
-    const proto = protoFor(TYPES[type] ? type : 'grunt', !!o.major);
-
-    // Fresh rig per actor (bones cannot be shared); geometry is shared.
+    // Bones cannot be shared between SkinnedMeshes, so each actor is rebuilt. The
+    // generators are pure and cheap (a few ms for the whole encounter, at init only).
     const built = TYPES[type] ? TYPES[type].build(!!o.major) : buildGrunt(false);
     const rig = built.rig;
     const geom = built.geom;
@@ -813,9 +813,9 @@ export function create(opts = {}) {
       squad: o.squad || 'X', rand: r, lod: 0, distToCam: 0,
       ragdoll: null, body: null, deathT: 0, tankRupture: 0,
       shieldMesh: null, shieldFlash: 0, impacts: [],
-      shieldRegenT: 0,
+      shieldRegenT: 0, desiredSpeed: 0, moveDir: new THREE.Vector3(0, 0, -1),
+      rootQ: new THREE.Quaternion(),
     };
-    void proto;
 
     for (const n of ['pelvis', 'spine', 'chest', 'neck', 'head', 'handR', 'handL',
       'thighL', 'shinL', 'metaL', 'footL', 'thighR', 'shinR', 'metaR', 'footR',
@@ -824,7 +824,14 @@ export function create(opts = {}) {
       const i = rig.index(n);
       if (i >= 0) a.bi[n] = i;
     }
+    // Watch posture: posted toward the beach, where the player comes from.
+    a.yaw = angWrap(Math.PI + r.sym(0.7));
+    a.desiredYaw = a.yaw;
     a.legs = [makeLeg(a, 1), makeLeg(a, -1)];
+    for (const leg of a.legs) {
+      neutralFoot(a, leg, leg.plant);
+      leg.from.copy(leg.plant); leg.target.copy(leg.plant); leg.init = true;
+    }
 
     if (def.shield > 0) attachShield(a);
 
@@ -841,15 +848,35 @@ export function create(opts = {}) {
   function makeLeg(a, side) {
     const S = side > 0 ? 'L' : 'R';
     const has = a.bi['meta' + S] !== undefined;
-    return {
+    const bones = a.rig.bones;
+    const thigh = a.bi['thigh' + S], shin = a.bi['shin' + S];
+    const meta = has ? a.bi['meta' + S] : -1, foot = a.bi['foot' + S];
+    // Ankle offset is derived from the actual bone lengths, not hard-coded — the
+    // three body plans have very different metatarsals and a fixed number
+    // over-extends the IK chain and locks the leg straight.
+    const metaLen = has ? bones[meta].position.length() : 0;
+    const footLen = foot >= 0 ? bones[foot].position.length() : 0.1;
+    const leg = {
       side,
-      thigh: a.bi['thigh' + S], shin: a.bi['shin' + S],
-      meta: has ? a.bi['meta' + S] : -1, foot: a.bi['foot' + S],
-      digit: has,
+      thigh, shin, meta, foot, digit: has,
+      l1: bones[shin].position.length(),
+      l2: has ? bones[meta].position.length() : bones[foot].position.length(),
+      ankleUp: has ? footLen * 0.80 : Math.max(0.09, footLen * 0.85),
+      ankleBack: has ? footLen * 0.55 : 0,
       plant: new THREE.Vector3(), from: new THREE.Vector3(), target: new THREE.Vector3(),
-      swinging: false, planted: false,
+      swinging: false, init: false,
       phase: side > 0 ? 0 : 0.5,
     };
+    void metaLen;
+    return leg;
+  }
+
+  /** Neutral stance position for a leg, in world space. */
+  function neutralFoot(a, leg, out) {
+    const rgtX = Math.cos(a.yaw), rgtZ = -Math.sin(a.yaw);
+    const x = a.position.x + rgtX * leg.side * a.def.hipWidth;
+    const z = a.position.z + rgtZ * leg.side * a.def.hipWidth;
+    return out.set(x, groundAt(x, z), z);
   }
 
   /* ------------------------------------------------------------ Elite shields */
@@ -924,10 +951,14 @@ export function create(opts = {}) {
   function makeBoltSystem(c, parent) {
     const MAX = 96;
     const g = new THREE.SphereGeometry(1, 7, 5);
+    // `color_fragment` only applies vColor under USE_COLOR, so an instanced-colour
+    // mesh still needs a (white) vertex colour attribute or every bolt renders black.
+    const nv = g.getAttribute('position').count;
+    g.setAttribute('color', new THREE.Float32BufferAttribute(new Float32Array(nv * 3).fill(1), 3));
     const mat = new THREE.MeshBasicMaterial({
       color: new THREE.Color(3.2, 3.2, 3.2), vertexColors: true,
       blending: THREE.AdditiveBlending, transparent: true, depthWrite: false,
-      toneMapped: false,
+      toneMapped: false, side: THREE.DoubleSide,
     });
     const im = new THREE.InstancedMesh(g, mat, MAX);
     im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -987,7 +1018,8 @@ export function create(opts = {}) {
           im.setMatrixAt(i, M);
           colors.setXYZ(i, b.col.r, b.col.g, b.col.b);
         }
-        for (let i = n; i < MAX; i++) im.setMatrixAt(i, ZERO);
+        im.count = Math.max(1, n);
+        if (n === 0) im.setMatrixAt(0, ZERO);
         im.instanceMatrix.needsUpdate = true;
         colors.needsUpdate = true;
         return list.length;
@@ -1373,6 +1405,10 @@ export function create(opts = {}) {
     const T = resolveTarget();
     const camPos = c.camera ? c.camera.position : T.eye;
 
+    // Hard per-frame query budgets: at most 3 LOS rays and 1 cover search.
+    losBudgetIdx = 0;
+    coverBudgetIdx = 0;
+
     for (const [, sq] of squads) sq.alertT += dt;
 
     for (let i = 0; i < actors.length; i++) {
@@ -1431,7 +1467,6 @@ export function create(opts = {}) {
     } else if (!inCone || !inRange) {
       a.canSee = false;
     }
-    if ((ctx.clock.frame % 4) === 0) losBudgetIdx = 0;
 
     const closeness = clamp(1 - d / a.def.sight, 0, 1);
     if (a.canSee) {
@@ -1470,6 +1505,7 @@ export function create(opts = {}) {
     a.coverT -= dt;
     a.strafeT -= dt;
     a.retreatT = Math.max(0, a.retreatT - dt);
+    a.reactT = Math.max(0, a.reactT - dt);
     a.shieldRegenT = Math.max(0, a.shieldRegenT - dt);
     a.panic = Math.max(0, a.panic - dt * 0.12);
 
@@ -1589,7 +1625,6 @@ export function create(opts = {}) {
       a.cover = findCover(a, T, want);
       a.coverT = a.rand.range(2.4, 4.5);
     }
-    if ((ctx.clock.frame % 3) === 0) coverBudgetIdx = 0;
 
     let tx = gx + sx, tz = gz + sz;
     if (a.cover && a.health < 0.75) { tx = a.cover.x; tz = a.cover.z; }
@@ -1710,7 +1745,7 @@ export function create(opts = {}) {
   function tryFire(a, T, dist, dt) {
     void dt;
     if (ctx.config.aiPassive) return;
-    if (a.reactT > 0) { a.reactT -= 1 / 60; return; }
+    if (a.reactT > 0) return;
     if (!a.canSee && a.lkpAge > 1.2) return;
     if (dist > a.def.range[1] * 1.35) return;
     if (a.reloadT > 0 || a.fireT > 0) return;
@@ -1828,9 +1863,8 @@ export function create(opts = {}) {
     const rate = (a.state === 'panic' || a.berserk ? 7 : 4.5) + a.speed * 0.8;
     a.yaw += angWrap(a.desiredYaw - a.yaw) * Math.min(1, dt * rate);
     a.yaw = angWrap(a.yaw);
-    a.desiredSpeed = 0;
-
-    flushHits();
+    // desiredSpeed intentionally persists: behaviour runs on an LOD stride and the
+    // actor must keep walking on the frames in between.
   }
 
   /* ---------------------------------------------------------------- animation */
@@ -1921,37 +1955,35 @@ export function create(opts = {}) {
     const pelvis = rig.bones[bi.pelvis];
     const groundY = groundAt(a.position.x, a.position.z);
     pelvis.position.set(sway, def.hip + bob + (groundY - a.position.y), 0);
-    _q.setFromEuler(new THREE.Euler(-a.lean * 0.5 + a.flinch.x * 0.35, 0, roll + a.flinch.z * 0.3, 'YXZ'));
-    pelvis.quaternion.copy(_q);
+    setEuler(pelvis, -a.lean * 0.5 + a.flinch.x * 0.35, 0, roll + a.flinch.z * 0.3);
     fk(a, bi.pelvis);
 
     // ---- spine chain + additive aim ---------------------------------------
+    // Sign convention: a NEGATIVE X rotation leans a bone forward (toward -Z, the
+    // facing direction); a POSITIVE X rotation on the head looks up.
     const aimY = clamp(a.aimYaw, -1.25, 1.25);
     const aimP = clamp(a.aimPitch, -0.9, 0.9);
-    const posture = a.type === 'grunt' ? -0.30 : a.type === 'jackal' ? -0.42 : -0.10;
+    const posture = def.hunch ?? -0.12;
     const chainW = [[bi.spine, 0.16, posture * 0.35], [bi.chest, 0.26, posture * 0.5], [bi.neck, 0.20, posture * 0.15]];
     for (const [idx, w, base] of chainW) {
       if (idx === undefined) continue;
-      const b = rig.bones[idx];
-      b.quaternion.setFromEuler(new THREE.Euler(
-        base - aimP * w * 0.55 + a.flinch.x * w * 0.9 + (moving ? Math.sin(ph * 2) * 0.012 : breathe * 0.4),
-        aimY * w, a.flinch.z * w * 0.7 + (moving ? -Math.sin(ph) * 0.02 : 0), 'YXZ'));
+      setEuler(rig.bones[idx],
+        base + aimP * w * 0.55 + a.flinch.x * w * 0.9 + (moving ? Math.sin(ph * 2) * 0.012 : breathe * 0.4),
+        aimY * w, a.flinch.z * w * 0.7 + (moving ? -Math.sin(ph) * 0.02 : 0));
       fk(a, idx);
     }
     if (bi.head !== undefined) {
-      const h = rig.bones[bi.head];
       const scan = (a.state === 'idle' || a.state === 'patrol') ? Math.sin(t * 0.55 + a.id) * 0.30 : 0;
-      h.quaternion.setFromEuler(new THREE.Euler(
-        -posture * 0.55 - aimP * 0.42 + a.flinch.x * 0.9,
-        aimY * 0.40 + scan, a.flinch.y * 0.5, 'YXZ'));
+      setEuler(rig.bones[bi.head],
+        -posture * 0.60 + aimP * 0.42 + a.flinch.x * 0.9,
+        aimY * 0.40 + scan, a.flinch.y * 0.5);
       fk(a, bi.head);
     }
     // Elite mandibles: flare when berserk or roaring
     if (bi.jawUL !== undefined) {
       const open = a.berserk ? 0.55 : (a.state === 'combat' ? 0.10 + Math.sin(t * 2.1 + a.id) * 0.06 : 0.05);
       for (const [n, sx, sy] of [['jawUL', 1, 1], ['jawUR', -1, 1], ['jawLL', 1, -1], ['jawLR', -1, -1]]) {
-        const b = rig.bones[bi[n]];
-        b.quaternion.setFromEuler(new THREE.Euler(sy * open * 0.7, sx * open * 0.9, 0, 'YXZ'));
+        setEuler(rig.bones[bi[n]], sy * open * 0.7, sx * open * 0.9, 0);
         fk(a, bi[n]);
       }
     }
@@ -1977,32 +2009,33 @@ export function create(opts = {}) {
       const clav = bi['clav' + S], uarm = bi['uarm' + S], farm = bi['farm' + S], hand = bi['hand' + S];
       if (uarm === undefined) continue;
       if (clav !== undefined) {
-        rig.bones[clav].quaternion.setFromEuler(new THREE.Euler(a.flinch.x * 0.25, 0, side * (gunUp ? -0.06 : 0), 'YXZ'));
+        setEuler(rig.bones[clav], a.flinch.x * 0.25, 0, side * (gunUp ? -0.06 : 0));
         fk(a, clav);
       }
+      // Arms hang along -Y in bind, so +X rotation swings them forward and up.
       const weaponSide = side < 0;   // right hand carries the gun
       let ex, ey, ez;
       if (panic) {
-        ex = -2.2 + Math.sin(t * 9 + a.id + side) * 0.35; ey = 0; ez = side * 0.5;
+        ex = 2.55 + Math.sin(t * 9 + a.id + side) * 0.30; ey = 0; ez = side * -0.55;
       } else if (weaponSide && gunUp) {
-        ex = -1.42 - aimP * 0.85 + a.flinch.x * 0.5;
-        ey = aimY * 0.35 - 0.18;
-        ez = 0.30;
+        ex = 0.66 + aimP * 0.80 + a.flinch.x * 0.5;
+        ey = aimY * 0.30;
+        ez = 0.14;
       } else if (!weaponSide && gunUp) {
-        ex = -1.28 - aimP * 0.80; ey = -aimY * 0.15 + 0.42; ez = -0.55;
+        ex = 0.60 + aimP * 0.72; ey = -aimY * 0.12; ez = -0.50;
       } else {
-        ex = swing * side * 0.9 * (weaponSide ? 1 : -1) - 0.15;
-        ey = 0; ez = side * 0.20;
+        ex = swing * (weaponSide ? -1 : 1) * 0.9 + 0.10;
+        ey = 0; ez = side * -0.16;
       }
-      rig.bones[uarm].quaternion.setFromEuler(new THREE.Euler(ex, ey, ez, 'YXZ'));
+      setEuler(rig.bones[uarm], ex, ey, ez);
       fk(a, uarm);
       if (farm !== undefined) {
-        const bend = panic ? -1.9 : gunUp ? (weaponSide ? -1.15 : -1.55) : -0.35 - Math.abs(swing) * 0.4;
-        rig.bones[farm].quaternion.setFromEuler(new THREE.Euler(bend, 0, 0, 'YXZ'));
+        const bend = panic ? 0.85 : gunUp ? (weaponSide ? 0.62 : 1.05) : 0.32 + Math.abs(swing) * 0.4;
+        setEuler(rig.bones[farm], bend, 0, weaponSide ? -0.18 : 0.28);
         fk(a, farm);
       }
       if (hand !== undefined) {
-        rig.bones[hand].quaternion.setFromEuler(new THREE.Euler(gunUp ? 0.25 : 0, 0, 0, 'YXZ'));
+        setEuler(rig.bones[hand], gunUp ? 0.18 : 0, 0, 0);
         fk(a, hand);
       }
     }
@@ -2026,14 +2059,15 @@ export function create(opts = {}) {
 
       if (!moving) {
         // settle to a neutral stance under the hips
-        const nx = a.position.x + rgtX * lateral + fwdX * leg.side * 0.02;
-        const nz = a.position.z + rgtZ * lateral + fwdZ * leg.side * 0.02;
-        leg.plant.lerp(_a.set(nx, groundAt(nx, nz), nz), Math.min(1, dt * 8));
+        neutralFoot(a, leg, _a);
+        _a.x += fwdX * leg.side * 0.03; _a.z += fwdZ * leg.side * 0.03;
+        leg.plant.lerp(_a, Math.min(1, dt * 8));
         _foot.copy(leg.plant);
         leg.swinging = false;
       } else if (lp < STANCE) {
         if (leg.swinging) { leg.swinging = false; leg.plant.copy(leg.target); }
-        if (leg.plant.lengthSq() < 1e-6) leg.plant.set(px, groundAt(px, pz), pz);
+        // a plant more than a stride from the hips is stale: re-seat it
+        if (leg.plant.distanceToSquared(a.position) > 9) leg.plant.set(px, groundAt(px, pz), pz);
         _foot.copy(leg.plant);
       } else {
         if (!leg.swinging) { leg.swinging = true; leg.from.copy(leg.plant); }
@@ -2045,19 +2079,10 @@ export function create(opts = {}) {
 
       // ankle from the toe contact point
       const hip = a.wp[leg.thigh];
-      if (leg.digit) {
-        _ankle.set(_foot.x - fwdX * 0.16, _foot.y + 0.34, _foot.z - fwdZ * 0.16);
-      } else {
-        _ankle.set(_foot.x, _foot.y + 0.11, _foot.z);
-      }
-
-      const l1 = rig.bones[leg.shin].position.length();
-      const l2 = leg.digit
-        ? rig.bones[leg.meta].position.length()
-        : rig.bones[leg.foot].position.length();
+      _ankle.set(_foot.x - fwdX * leg.ankleBack, _foot.y + leg.ankleUp, _foot.z - fwdZ * leg.ankleBack);
 
       _e.set(fwdX, 0.35, fwdZ).normalize();     // knee pole: forward
-      ik2(hip, _ankle, l1, l2, _e, _knee);
+      ik2(hip, _ankle, leg.l1, leg.l2, _e, _knee);
 
       aimBone(a, leg.thigh, _d.subVectors(_knee, hip));
       aimBone(a, leg.shin, _d.subVectors(_ankle, _knee));
@@ -2065,8 +2090,7 @@ export function create(opts = {}) {
       if (leg.digit) {
         aimBone(a, leg.meta, _d.subVectors(_foot, _ankle));
         if (leg.foot !== undefined && leg.foot >= 0) {
-          const fb = rig.bones[leg.foot];
-          fb.quaternion.setFromEuler(new THREE.Euler(0.45, 0, 0, 'YXZ'));
+          setEuler(rig.bones[leg.foot], 0.45, 0, 0);
           fk(a, leg.foot);
         }
       } else if (leg.foot >= 0) {
@@ -2208,10 +2232,8 @@ export function create(opts = {}) {
     }
     for (const [leg, fp] of [[a.legs[0], 5], [a.legs[1], 6]]) {
       const hip = a.wp[leg.thigh];
-      const l1 = rig.bones[leg.shin].position.length();
-      const l2 = leg.digit ? rig.bones[leg.meta].position.length() : rig.bones[leg.foot].position.length();
       _e.set(-Math.sin(a.yaw), 0.3, -Math.cos(a.yaw)).normalize();
-      ik2(hip, pts[fp].p, l1, l2, _e, _knee);
+      ik2(hip, pts[fp].p, leg.l1, leg.l2, _e, _knee);
       aimBone(a, leg.thigh, _d.subVectors(_knee, hip));
       aimBone(a, leg.shin, _d.subVectors(pts[fp].p, _knee));
       if (leg.digit && leg.meta >= 0) aimBone(a, leg.meta, _d.set(0, -1, 0));

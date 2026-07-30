@@ -76,7 +76,7 @@ import { HASH_GLSL, VALUE_NOISE_GLSL } from '../../gfx/glsl/noise.js';
  * fogDensity     0.00075   extinction at the base height, per metre
  * fogHeight      24.0      e-folding height of the layer, metres
  * fogMaxDist     460.0     end of the layer
- * fogShafts      0.60      scale on the sun in-scatter (the crepuscular term)
+ * fogShafts      0.25      scale on the sun in-scatter (the crepuscular term)
  * fogAmbient     0.52      scale on the sky/ground in-scatter
  * fogNoise       0.55      0 = smooth wash, 1 = fully modulated
  * fogWarmth      1.0       scale on the warm tint pushed into the low layer
@@ -312,14 +312,23 @@ export function create(opts = {}) {
     density: 0.00075,
     height: 24.0,
     maxDist: 460.0,
-    shafts: 0.60,
+    shafts: 0.25,
     ambient: 0.52,
     noise: 0.55,
     noiseScale: 1 / 46.0,
     warmth: 1.0,
-    g1: 0.76,
-    g2: 0.0,
-    lobeMix: 0.55,
+    // Two-term Henyey-Greenstein: a hard forward peak plus a small backscatter lobe.
+    // The first cut used `mix(isotropic, HG(0.76), 0.55)`, i.e. a 45%-weight isotropic
+    // term, and it measured badly for a reason worth recording: an isotropic lobe is
+    // 1/4pi of the *whole* solar irradiance in every direction at once, so it lands as a
+    // flat achromatic wash over the entire frame instead of as a glow around the sun.
+    // On the ref_00120 A/B that single term took the upper sky from sat 95.5 to 84.2
+    // while the ambient term (which is the sky's own colour, so it cannot desaturate)
+    // moved it by 0.9. Real aerosol phase functions are forward-peaked by two orders of
+    // magnitude; this one is ~50:1 forward:side, which puts the energy where a shaft is.
+    g1: 0.78,
+    g2: -0.35,
+    lobeMix: 0.80,
     shadowBias: 0.0016,
   }, opts.volumetricFog || {});
 
@@ -407,6 +416,12 @@ export function create(opts = {}) {
       u.uSunDir.value.set(0.5, 0.7, 0.5).normalize();
       _sun.setRGB(6.2, 5.9, 5.5);
     }
+    // `sunIntensity` is a three.js DirectionalLight intensity, and the sky module's
+    // radiance is in its own atmosphere units with `solarIrradiance 9.4`. The two are not
+    // on a common scale, so the physically-correct `phase * irradiance` comes out roughly
+    // an order of magnitude hot against the sky this engine actually draws. `fogShafts`
+    // absorbs that; it is a calibration constant, not a look knob, and it should be
+    // revisited if anyone ever reconciles the two unit systems.
     u.uSunRadiance.value.set(_sun.r, _sun.g, _sun.b);
 
     // The ambient in-scatter of an optically thin layer under an open sky is close to the

@@ -257,7 +257,7 @@ uniform vec2  uDetailOffset;
 uniform vec2  uWeatherOffset, uWeatherOffset2;
 uniform float uEvolve;        // slow vertical evolution of the shape volume
 uniform float uBaseFreq, uBaseFreqY, uDetailFreq, uWeatherFreq, uWeatherFreq2;
-uniform float uErode, uCurl;
+uniform float uErode, uCurl, uEdgeGain;
 
 uniform float uExtinction;    // 1/km at density 1
 uniform float uAlbedo;
@@ -265,6 +265,8 @@ uniform float uHGf, uHGb, uHGw;
 uniform float uMSa, uMSb, uMSc;
 uniform float uPowder;
 uniform float uAmbGain;
+uniform float uScatterGain;
+uniform float uLightStep;
 
 uniform float uMaxDist;
 uniform float uTemporalJitter;
@@ -361,22 +363,31 @@ float cloudDensity(vec3 p, float h, bool cheap){
                  (p.z + uBaseOffset.y) * uBaseFreq);
   vec4 b = texture(tBase, sp);
   float wf = b.y*0.625 + b.z*0.25 + b.w*0.125;
-  float shape = clamp(remap(b.x, wf*0.72 - 0.18, 1.0, 0.0, 1.0), 0.0, 1.0);
-  shape *= heightGradient(h, w.y);
+  float field = clamp(remap(b.x, wf*0.72 - 0.18, 1.0, 0.0, 1.0), 0.0, 1.0);
+  field *= heightGradient(h, w.y);
 
-  float d = clamp(remap(shape, 1.0 - cov, 1.0, 0.0, 1.0), 0.0, 1.0) * cov;
-  if (d <= 0.0) return 0.0;
-
+  // The erosion is SUBTRACTED FROM THE FIELD, before the coverage threshold, not
+  // remapped out of the finished density afterwards. That is the difference between
+  // clouds with cauliflower silhouettes and clouds that look like marshmallow: the
+  // iso-contour that becomes the cloud's edge then follows the 120-500 m detail octaves
+  // instead of the 1.4 km shape octaves, and every lobe gets its own outline.
   if (!cheap){
-    // curl-distorted erosion, strongest at the base where real cumulus shreds
     vec3 dp = vec3((p.x + uDetailOffset.x + w.z * uCurl * (1.0 - h)) * uDetailFreq,
                    (alt - uEvolve * 0.6) * uDetailFreq,
                    (p.z + uDetailOffset.y + w.w * uCurl * (1.0 - h)) * uDetailFreq);
     vec3 dt = texture(tDetail, dp).xyz;
     float df = dt.x*0.625 + dt.y*0.25 + dt.z*0.125;
-    float mod_ = mix(df, 1.0 - df, clamp(h * 3.5, 0.0, 1.0));
-    d = clamp(remap(d, mod_ * uErode, 1.0, 0.0, 1.0), 0.0, 1.0);
+    // billowy at the top, wispy near the base — the standard Nubis inversion
+    float mod_ = mix(1.0 - df, df, clamp(h * 3.0, 0.0, 1.0));
+    field -= mod_ * uErode * (0.30 + 0.70 * (1.0 - field));
   }
+
+  // A hard threshold with a controlled ramp width. Real cumulus have a condensation
+  // boundary a few tens of metres thick, not the 500 m gradient a linear coverage
+  // remap produces, and that boundary is where all of the silhouette contrast lives.
+  float d = clamp((field - (1.0 - cov)) * uEdgeGain, 0.0, 1.0);
+  if (d <= 0.0) return 0.0;
+  d *= mix(0.62, 1.0, cov);
 
   // vertical density profile: thin just above the base, thickest through the middle,
   // fraying at the very top. This is what stops the deck reading as a solid slab.
@@ -388,20 +399,23 @@ const vec3 CONE[6] = vec3[6](
   vec3( 0.38, 0.21, 0.14), vec3(-0.29, 0.34, -0.22), vec3( 0.11, -0.37, 0.31),
   vec3(-0.34, -0.15, -0.30), vec3( 0.25, 0.09, -0.39), vec3(-0.09, 0.40, 0.19));
 
+/** Cone-sampled 6-step march toward the sun. The span has to cover the slant path
+ *  through the whole layer — 1.7 km of cloud at 41 deg of solar elevation is 2.6 km —
+ *  or the underside of a tower never darkens and the deck reads as backlit paper. */
 float lightMarch(vec3 p, float baseStep){
   float od = 0.0;
   float t = 0.0;
   for (int i = 0; i < 6; i++){
-    float s = baseStep * (1.0 + float(i) * 0.72);
+    float s = baseStep * (1.0 + float(i) * 0.80);
     t += s;
-    vec3 q = p + uSunDir * t + CONE[i] * t * 0.42;
+    vec3 q = p + uSunDir * t + CONE[i] * t * 0.24;
     float h = heightFrac(q);
     if (h > 1.02) break;
     od += cloudDensity(q, h, i > 2) * s;
   }
   // one long far tap so a tower shadows the deck beneath it
-  vec3 q = p + uSunDir * (t + 1.6);
-  od += cloudDensity(q, heightFrac(q), true) * 1.6 * 0.5;
+  vec3 q = p + uSunDir * (t + 2.4);
+  od += cloudDensity(q, heightFrac(q), true) * 2.4 * 0.5;
   return od;
 }
 
@@ -465,7 +479,7 @@ void main(){
     float sigmaE = d * uExtinction;
     float sigmaS = sigmaE * uAlbedo;
 
-    float od = lightMarch(p, max(step, 0.045));
+    float od = lightMarch(p, max(step, uLightStep));
 
     // Multiple-scattering octaves: extinction, contribution and phase eccentricity
     // each decay geometrically. Octave 0 is the direct beam; 1 and 2 stand in for
@@ -481,7 +495,13 @@ void main(){
     // the light there has not scattered enough times yet, so it only shows on the side
     // of the cloud that faces the sun — i.e. when we are looking away from it.
     float powder = 1.0 - exp(-od * uExtinction * 2.0);
-    sun *= mix(1.0, powder * 1.90, uPowder * clamp(-cosT * 0.5 + 0.5, 0.0, 1.0));
+    sun *= mix(1.0, powder * 2.0, uPowder * clamp(-cosT * 0.5 + 0.5, 0.0, 1.0));
+    // Truncating the scattering series at three octaves loses most of the high-order
+    // energy. A thick cumulus actually reflects ~0.8 of the sunlight falling on it, so
+    // an unshadowed top should read E*mu_sun*0.8/pi ~ 1.6 in the sky module's units;
+    // the raw series lands near 0.35. uScatterGain closes exactly that gap and is the
+    // one place this shader is fitted rather than derived.
+    sun *= uScatterGain;
 
     vec3 amb = mix(uAmbBottom, uAmbTop, clamp(h, 0.0, 1.0)) * uAmbGain;
     amb *= 0.30 + 0.70 * exp(-od * uExtinction * 0.55);
@@ -606,19 +626,24 @@ export function create(opts = {}) {
   const S = {
     baseKm: 0.90,            // cloud base, 900 m
     topKm: 2.60,             // cloud top, 2600 m
-    coverage: 0.52,
+    coverage: 0.56,
     density: 1.55,
-    typeBias: -0.06,
+    typeBias: 0.10,
 
-    baseTileKm: 13.0,        // horizontal world period of the 128^3 shape volume
-    baseTileYKm: 4.4,        // vertical period: the layer must span a useful slab
-    detailTileKm: 1.55,      // world period of the 32^3 erosion volume
-    weatherTileKm: 41.0,
-    weatherTile2Km: 17.0,
+    // A 1.7 km-deep layer whose horizontal features are 13 km across can only produce
+    // pancakes. Congestus in the reference is roughly 3:1 wide-to-tall with ~1 km lobes,
+    // so the shape volume's horizontal period has to come down to a few kilometres.
+    baseTileKm: 5.6,         // horizontal world period of the 128^3 shape volume
+    baseTileYKm: 2.6,        // vertical period
+    detailTileKm: 0.95,      // world period of the 32^3 erosion volume
+    weatherTileKm: 26.0,
+    weatherTile2Km: 11.0,
     weatherOffsetKm: [0, 0],
 
-    erode: 0.36,
-    curlKm: 0.5,
+    erode: 0.42,
+    edgeGain: 7.0,           // sharpness of the condensation boundary
+    curlKm: 0.45,
+    lightStepKm: 0.11,
 
     extinction: 12.5,        // 1/km at density 1
     albedo: 0.985,
@@ -631,6 +656,7 @@ export function create(opts = {}) {
     powder: 0.62,
 
     sunScale: 1.0,           // solar irradiance -> cloud source term
+    scatterGain: 4.2,        // closes the 3-octave truncation, see the shader
     ambGain: 1.0,
     ambTopScale: 1.20,
     ambBottomScale: 0.70,
@@ -698,12 +724,15 @@ export function create(opts = {}) {
     uWeatherFreq2: { value: 1 / S.weatherTile2Km },
     uErode: { value: S.erode },
     uCurl: { value: S.curlKm },
+    uEdgeGain: { value: S.edgeGain },
     uExtinction: { value: S.extinction },
     uAlbedo: { value: S.albedo },
     uHGf: { value: S.hgForward }, uHGb: { value: S.hgBack }, uHGw: { value: S.hgWeight },
     uMSa: { value: S.msAtten }, uMSb: { value: S.msContrib }, uMSc: { value: S.msPhase },
     uPowder: { value: S.powder },
     uAmbGain: { value: S.ambGain },
+    uScatterGain: { value: S.scatterGain },
+    uLightStep: { value: S.lightStepKm },
     uMaxDist: { value: S.maxDistKm },
     uTemporalJitter: { value: 0 },
     uHasTrLut: { value: 0 },
@@ -891,8 +920,13 @@ export function create(opts = {}) {
         if (k === 'cloudDensity') { S.density = v; set('uDensity', v); }
         if (k === 'cloudSunScale') { S.sunScale = v; sunKey = ''; invalidateHistory(); }
         if (k === 'cloudAmbGain') { S.ambGain = v; set('uAmbGain', v); }
+        if (k === 'cloudScatterGain') { S.scatterGain = v; set('uScatterGain', v); }
+        if (k === 'cloudHazeScale') { S.hazeScale = v; sunKey = ''; invalidateHistory(); }
+        if (k === 'cloudAmbTopScale') { S.ambTopScale = v; sunKey = ''; invalidateHistory(); }
         if (k === 'cloudExtinction') { S.extinction = v; set('uExtinction', v); }
         if (k === 'cloudErode') { S.erode = v; set('uErode', v); }
+        if (k === 'cloudEdgeGain') { S.edgeGain = v; set('uEdgeGain', v); }
+        if (k === 'cloudLightStep') { S.lightStepKm = v; set('uLightStep', v); }
         if (k === 'cloudPowder') { S.powder = v; set('uPowder', v); }
         if (k === 'cloudHazeK') { S.hazeK = v; set('uHazeK', v); }
         if (k === 'cloudTypeBias') { S.typeBias = v; set('uTypeBias', v); }

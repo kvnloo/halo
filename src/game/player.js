@@ -392,7 +392,15 @@ export function create(opts = {}) {
     get sprinting() { return sprinting; },
     get health() { return health; },
     get shield() { return shield; },
-    damage(amount, direction) { if (api._ctx) applyDamage(api._ctx, amount, direction); },
+    /**
+     * `amount` is in the SAME UNITS as `health` and `shield`, which docs/API.md
+     * defines as 0..1. A full shield is 1.0, so `damage(0.25)` takes a quarter of it
+     * and `damage(1.0)` strips the shield entirely. It is NOT a 0..100 hit-point
+     * scale — callers passing 6 or 58 will one-shot the player.
+     */
+    damage(amount, direction) {
+      if (api._ctx && Number.isFinite(amount)) applyDamage(api._ctx, amount, direction);
+    },
     applyRecoil(p, y) {
       // radians. Kicks the view immediately; `recoilRetain` of it becomes the new
       // settled line, which then bleeds back to the aim over ~1.5 s.
@@ -401,11 +409,23 @@ export function create(opts = {}) {
       settleP = clamp(settleP + (p || 0) * T.recoilRetain, -T.recoilMaxPitch, T.recoilMaxPitch);
       settleY = clamp(settleY + (y || 0) * T.recoilRetain, -T.recoilMaxPitch, T.recoilMaxPitch);
     },
-    /** Camera-local (three.js axes: +x right, +y up, +z *backward*), metres. */
+    /**
+     * Head bob as a CAMERA-LOCAL offset in metres, three.js axes: +x right, +y up,
+     * +z *backward* (so a forward lunge is negative z). Verified: this offset dotted
+     * with `player.right` / `player.forward` reproduces the camera's world-space
+     * displacement exactly. Typical magnitude 0.02 m walking, 0.05 m sprinting.
+     *
+     * It is ALREADY applied to the camera. A viewmodel parented to the camera should
+     * use it for counter-sway (e.g. `-k * viewBobOffset`), not add it again.
+     */
     viewBobOffset,
 
     /* --- extras consumers may find useful -------------------------------- */
-    viewBobAngles,          // Euler YXZ, radians — roll/pitch/yaw of the bob
+    /** Additive view rotation the controller applied on top of the aim this frame:
+     *  bob roll/pitch/yaw + strafe tilt + landing dip + sprint lean, radians, YXZ.
+     *  Also already applied to the camera — for a viewmodel that is NOT a child of
+     *  the camera, or for counter-rotation. */
+    viewBobAngles,
     lookDir,                // unit world aim direction (includes recoil)
     forward, right,         // horizontal basis
     groundNormal,
@@ -428,6 +448,8 @@ export function create(opts = {}) {
       vel.set(0, 0, 0);
       dipPos = dipVel = stepOffset = 0;
       recoilP = recoilY = settleP = settleY = 0;
+      stepPhase = 0; stepIndex = 0; bobBlend = 0;
+      viewBobOffset.set(0, 0, 0);
       updateBasis();
     },
     TUNE: T,
@@ -630,16 +652,18 @@ export function create(opts = {}) {
       applyFriction(dt, 1 + 0.55 * wade);
       accelerate(_w, wishSpeed, T.groundAccel, dt);
       vel.y = Math.min(vel.y, 0);
-      // Coyote time and buffered jumps.
+      // Coyote time and buffered jumps. The buffer is armed by the key*down* only, so
+      // a press that was released before landing still fires (that is the whole point
+      // of a buffer) while holding the key never auto-repeats into a bunny hop.
       coyote = T.coyote;
-      if (jumpBuffer > 0 && wantJump) {
+      if (jumpBuffer > 0) {
         vel.y = JUMP_V * (1 - 0.30 * wade);
         grounded = false; jumpBuffer = 0; jumpGrace = T.jumpGrace; coyote = 0;
         ctx.emit('player:jump', { position: pos.clone(), speed: Math.hypot(vel.x, vel.z) });
       }
     } else {
       coyote = Math.max(0, coyote - dt);
-      if (jumpBuffer > 0 && coyote > 0 && wantJump) {
+      if (jumpBuffer > 0 && coyote > 0) {
         vel.y = JUMP_V; jumpBuffer = 0; jumpGrace = T.jumpGrace; coyote = 0;
         ctx.emit('player:jump', { position: pos.clone(), speed: Math.hypot(vel.x, vel.z) });
       }

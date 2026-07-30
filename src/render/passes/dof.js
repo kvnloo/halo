@@ -61,12 +61,24 @@ import { Pass, fsMaterial, makeRT, FullScreenQuad } from '../RenderPipeline.js';
  *     smooth gradient is a no-op that only costs bandwidth. docs/TARGETS.md puts the sky
  *     at `lap_var` 253 and `spectral_slope` −2.95, the smoothest region in the frame;
  *     there is nothing there for a blur to do except lose score.
- *  2. **`MAT_ID.VIEWMODEL`** — the weapon gets a *fixed* near CoC (`dofViewmodelCoC`)
- *     with no depth lookup at all. It has to: `scene.js` draws the viewmodel from its own
- *     camera with a 0.002–12 m frustum, so its depth values are not in the main camera's
- *     range and `linearZ()` with the main near/far would give a meaningless number.
- *     The weapon sits at a fixed distance from the eye by construction, so a constant is
- *     not an approximation, it is the right model.
+ *  2. **The viewmodel** — a *fixed* near CoC (`dofViewmodelCoC`), no depth lookup at all.
+ *     It has to be fixed: `scene.js` draws the viewmodel from its own camera with a
+ *     0.002-12 m frustum, so a fragment at 0.3 m writes a depth that decodes to ~9 m
+ *     against the main camera's 0.06-12000 m near/far. `linearZ()` on it would be
+ *     meaningless. The weapon sits at a fixed distance from the eye by construction, so a
+ *     constant is not an approximation — it is the right model. It is detected either by
+ *     `MAT_ID.VIEWMODEL` (the contract, currently unreachable because `scene.js` does not
+ *     render `LAYER.VIEWMODEL` into the G-buffer) or by "wrote depth, no G-buffer
+ *     coverage", which in this engine is exactly and only the viewmodel.
+ *
+ *     **The default is 1.2 px, and it is low on purpose.** docs/TARGETS.md puts the
+ *     `weapon` ROI at `lap_var` 489 and `local_contrast` 0.178 — the highest local
+ *     contrast in the entire reference frame. The reference's weapon is *sharp*. The near
+ *     CoC here exists to seat the gun in depth, not to defocus it, and because the CoC is
+ *     a constant across the whole viewmodel (no usable depth gradient from muzzle to
+ *     receiver) any larger value softens the sight glass and the receiver detail
+ *     uniformly, which is exactly the `detail` score this pass must not spend. Re-measure
+ *     the `weapon` ROI against 489 before raising it.
  *  3. **Covered geometry sitting exactly on the far plane** — impossible for real
  *     geometry, and the signature of a depth buffer that was cleared after the pre-pass
  *     filled it. `scene.js` calls `renderer.clearDepth()` before the viewmodel draw while
@@ -94,7 +106,7 @@ import { Pass, fsMaterial, makeRT, FullScreenQuad } from '../RenderPipeline.js';
  *   dofStrength       string   'off' | 'low' | 'medium' | 'high'   (default 'low')
  *   dofNearMaxCoC     number   px at 1080p, full-res, before the strength scale  (2.6)
  *   dofFarMaxCoC      number   px at 1080p, full-res, before the strength scale  (1.5)
- *   dofViewmodelCoC   number   fixed near CoC for MAT_ID.VIEWMODEL pixels        (2.2)
+ *   dofViewmodelCoC   number   fixed near CoC for viewmodel pixels               (1.2)
  *   dofNearEnd        number   metres: full near blur at or below this   (0.28)
  *   dofNearStart      number   metres: near blur gone at or above this   (1.60)
  *   dofFarStart       number   metres: far blur begins                   (90)
@@ -107,7 +119,28 @@ import { Pass, fsMaterial, makeRT, FullScreenQuad } from '../RenderPipeline.js';
  *                              be exercised and looked at while the scene has no
  *                              G-buffer coverage at all. 0 in every real frame.
  *
- * Cost at 1920x1080: prefilter 0.03 ms, gather 0.09 ms, composite 0.07 ms => **0.19 ms**.
+ *
+ * ## Cost
+ *
+ * **Estimated, not profiled.** These numbers are derived, not measured, and the
+ * distinction is stated because this project rejects numbers whose provenance is not
+ * given. The GPU was saturated by a dozen concurrent capture sessions throughout this
+ * task, so a toggle-off/toggle-on timing run would have measured contention. The basis
+ * is the one hard measurement available for this chain: `grade.js` records **0.18 ms**
+ * for a full-screen RGBA16F pass at 1920x1080 doing one texture fetch plus four
+ * texelFetch from a cache-resident LUT, and **0.14 ms** for its dither stage doing a
+ * single fetch. Both are bandwidth-bound (8.3 MB read + 8.3 MB write), so in this chain
+ * a full-res pass costs ~0.14 ms of floor and additional taps that hit L1/L2 are close
+ * to free; a half-res pass costs ~a quarter of that.
+ *
+ * A real profiling pass on a quiet GPU is owed and should be run before anyone trusts
+ * these to two decimal places.
+ *
+ * prefilter (half res, 1 bilinear + 8 nearest) ~0.04 ms; gather (half res, 21 taps of a
+ * 2.1 MB target that lives in L2) ~0.07 ms; composite (full res, 4 fetches) ~0.16 ms.
+ * **~0.27 ms total**, and it is the composite that dominates - the blur itself is cheap
+ * and the full-res round trip is not. `dofEnabled false` skips the two half-res passes
+ * but still pays the composite, because the chain still has to be written.
  */
 
 /* ------------------------------------------------------------------ the kernel */
@@ -171,9 +204,18 @@ float cocAtUv(vec2 uv){
   if (uTestCoC != 0.0) return uTestCoC * (uv.x * 2.0 - 1.0);
 
   vec4 g1 = texture(tGbuf1, uv);
-  if (g1.a <= 0.5) return 0.0;                                    // sky / no coverage
-  if (abs(g1.b * 255.0 - MATID_VIEWMODEL) < 0.5) return -uViewmodelCoC;
   float raw = texture(tDepth, uv).r;
+
+  if (g1.a <= 0.5) {
+    // Depth written but no G-buffer coverage means the pixel was drawn AFTER the
+    // pre-pass, and scene.js draws exactly one thing after the pre-pass: the viewmodel,
+    // from its own 0.002-12 m camera. Its depth is therefore not in the main camera's
+    // range and must not be run through linearZ() - it gets the fixed CoC instead.
+    // Cleared depth reads exactly 1.0, so the sky falls through to zero.
+    if (raw < 0.999999) return -uViewmodelCoC;
+    return 0.0;                                                   // sky / no coverage
+  }
+  if (abs(g1.b * 255.0 - MATID_VIEWMODEL) < 0.5) return -uViewmodelCoC;
   if (raw >= 0.999999) return 0.0;                                // depth not valid here
   return cocAt(linearZ(raw));
 }
@@ -312,7 +354,7 @@ const DEFAULTS = {
   dofStrength: 'low',
   dofNearMaxCoC: 2.6,
   dofFarMaxCoC: 1.5,
-  dofViewmodelCoC: 2.2,
+  dofViewmodelCoC: 1.2,
   dofNearEnd: 0.28,
   dofNearStart: 1.60,
   dofFarStart: 90.0,

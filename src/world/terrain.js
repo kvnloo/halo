@@ -89,8 +89,8 @@ const CM_RINGS = 10;              // rings on top of the centre block
 const CM_NEAR_RINGS = 3;          // rings that cast shadows (inner ~1.9 m..15 m)
 
 // CPU height tables
-const FINE_STEP = 0.5, FINE_X0 = -300, FINE_X1 = 190, FINE_Z0 = -170, FINE_Z1 = 170;
-const CRS_STEP = 2.0, CRS_X0 = -840, CRS_X1 = 840, CRS_Z0 = -840, CRS_Z1 = 840;
+const FINE_STEP = 0.5, FINE_X0 = -270, FINE_X1 = 175, FINE_Z0 = -150, FINE_Z1 = 150;
+const CRS_STEP = 3.0, CRS_X0 = -840, CRS_X1 = 840, CRS_Z0 = -840, CRS_Z1 = 840;
 
 /* ================================================================== JS noise ==
  * A mirror of src/gfx/glsl/noise.js. Same constants, same operation order. */
@@ -112,27 +112,28 @@ function hash22(x, y, out) {
   return out;
 }
 const _h2 = [0, 0];
+/** dot of the normalised hashed gradient at lattice (ix,iz) with (dx,dz) */
+function gdot(ix, iz, dx, dz) {
+  let ax = fract(ix * 0.1031), ay = fract(iz * 0.1030), az = fract(ix * 0.0973);
+  const d = ax * (ay + 33.33) + ay * (az + 33.33) + az * (ax + 33.33);
+  ax += d; ay += d; az += d;
+  let gx = fract((ax + ay) * az) * 2 - 1;
+  let gz = fract((ax + az) * ay) * 2 - 1;
+  const l = Math.sqrt(gx * gx + gz * gz) || 1;
+  return (gx * dx + gz * dz) / l;
+}
 function gnoise2(px, pz) {
   const ix = Math.floor(px), iz = Math.floor(pz);
   const fx = px - ix, fz = pz - iz;
   const ux = fx * fx * fx * (fx * (fx * 6 - 15) + 10);
   const uz = fz * fz * fz * (fz * (fz * 6 - 15) + 10);
-  let s = 0;
-  // corner (0,0)
-  hash22(ix, iz, _h2);
-  let gx = _h2[0] * 2 - 1, gz = _h2[1] * 2 - 1; let l = Math.hypot(gx, gz) || 1;
-  const va = (gx / l) * fx + (gz / l) * fz;
-  hash22(ix + 1, iz, _h2);
-  gx = _h2[0] * 2 - 1; gz = _h2[1] * 2 - 1; l = Math.hypot(gx, gz) || 1;
-  const vb = (gx / l) * (fx - 1) + (gz / l) * fz;
-  hash22(ix, iz + 1, _h2);
-  gx = _h2[0] * 2 - 1; gz = _h2[1] * 2 - 1; l = Math.hypot(gx, gz) || 1;
-  const vc = (gx / l) * fx + (gz / l) * (fz - 1);
-  hash22(ix + 1, iz + 1, _h2);
-  gx = _h2[0] * 2 - 1; gz = _h2[1] * 2 - 1; l = Math.hypot(gx, gz) || 1;
-  const vd = (gx / l) * (fx - 1) + (gz / l) * (fz - 1);
-  s = (va + (vb - va) * ux) + ((vc + (vd - vc) * ux) - (va + (vb - va) * ux)) * uz;
-  return s * 1.4142;
+  const va = gdot(ix, iz, fx, fz);
+  const vb = gdot(ix + 1, iz, fx - 1, fz);
+  const vc = gdot(ix, iz + 1, fx, fz - 1);
+  const vd = gdot(ix + 1, iz + 1, fx - 1, fz - 1);
+  const a = va + (vb - va) * ux;
+  const b = vc + (vd - vc) * ux;
+  return (a + (b - a) * uz) * 1.4142;
 }
 /** matches FBM_GLSL fbm2(): M2 rotation, lacunarity 2.02, gain 0.5, amplitude-normalised */
 function fbm2(px, pz, oct) {
@@ -239,8 +240,8 @@ float tHeight(vec2 P, int lod){
     float sz = smoothstep(-17.5, -13.0, P.y) * (1.0 - smoothstep(-4.0, 0.5, P.y));
     float shelf = sx * sz;
     if (shelf > 0.001){
-      float flat = 0.16 + 0.20 * fbm2(P * 0.16 + 91.0, 2);
-      y = mix(y, flat, shelf * 0.86);
+      float flatY = 0.16 + 0.20 * fbm2(P * 0.16 + 91.0, 2);
+      y = mix(y, flatY, shelf * 0.86);
       vec2 w = worley2(P * 0.30 + 5.0);
       float pool = smoothstep(0.52, 0.10, w.x);
       y -= shelf * pool * (0.55 + 0.42 * fbm2(P * 0.5 + 3.0, 2));
@@ -263,21 +264,24 @@ float tHeight(vec2 P, int lod){
   }
 
   if (lod >= 2){
-    float cob = sh.w * (0.35 + 0.65 * smoothstep(-0.25, 0.35, fbm2(P * 0.42 + 61.0, 3)));
+    // Cobble cover is patchy, not a carpet: bare sand between drifts of shingle is
+    // what gives the ground its large-scale structure. A uniform pavement measures
+    // spectral_slope -1.6 (all high frequency) against the reference's -2.1.
+    float cob = sh.w * smoothstep(-0.10, 0.34, fbm2(P * 0.42 + 61.0, 3));
     cob *= 1.0 - smoothstep(2.6, 5.2, y);                     // no cobbles high on the dune
     // two cobble scales: 22 cm pavement, 9 cm shingle
     vec2 w1 = worley2(P * 4.6 + 13.0);
     float c1 = clamp(1.0 - w1.x * 2.15, 0.0, 1.0); c1 = c1 * c1 * (3.0 - 2.0 * c1);
     vec2 w2 = worley2(P * 11.3 + 41.0);
     float c2 = clamp(1.0 - w2.x * 2.05, 0.0, 1.0); c2 = c2 * c2 * (3.0 - 2.0 * c2);
-    y += (c1 * 0.075 + c2 * 0.026) * cob * uTDetail;
+    y += (c1 * 0.048 + c2 * 0.016) * cob * uTDetail;
 
     // wind ripples: crests perpendicular to the wind, only on damp/dry sand
     float dry = smoothstep(0.10, 0.85, y) * (1.0 - smoothstep(4.2, 6.5, y));
     float rw = fbm2(P * 0.34 + 5.0, 3);
     float ph = dot(P, uTWind) * 39.0 + rw * 5.2;
     float rip = sin(ph) * 0.62 + sin(ph * 0.41 + rw * 2.0) * 0.38;
-    y += rip * 0.021 * dry * uTDetail;
+    y += rip * 0.014 * dry * (1.0 - cob * 0.7) * uTDetail;
   }
 
   if (lod >= 3){
@@ -513,13 +517,23 @@ vec3 tBlendN(vec3 a, vec3 b){          // whiteout blend
 /** Analytic sky radiance for reflections; keyed off the sky module's own horizon and
  *  zenith radiance so wet sand never disagrees with the sky it is mirroring. */
 vec3 tSkyRefl(vec3 d, float rough){
-  float h = clamp(d.y * 0.5 + 0.5, 0.0, 1.0);
   vec3 c = mix(uTHorizon, uTZenith, pow(clamp(d.y, 0.0, 1.0), 0.55));
   c = mix(c, uTHorizon * 0.86, smoothstep(0.02, -0.25, d.y));
   float s = max(dot(d, uTSunDir), 0.0);
   float sharp = mix(1600.0, 26.0, clamp(rough * 3.2, 0.0, 1.0));
   c += uTSunRad * (pow(s, sharp) * (1.0 - rough * 0.6) + pow(s, 5.0) * 0.05);
   return c;
+}
+/** Karis' analytic split-sum env BRDF. Without it the Schlick term alone runs to 1.0
+ *  at grazing incidence on a roughness-0.94 surface, which turns the entire beach —
+ *  seen at a grazing angle by definition — into a mirror. That is exactly how a
+ *  sunlit beach measures sat_mean 7 against a reference 87. */
+float tEnvBRDF(float F0, float rough, float NoV){
+  vec4 c0 = vec4(-1.0, -0.0275, -0.572, 0.022);
+  vec4 c1 = vec4(1.0, 0.0425, 1.04, -0.04);
+  vec4 r = rough * c0 + c1;
+  float a004 = min(r.x * r.x, exp2(-9.28 * NoV)) * r.x + r.y;
+  return F0 * (-1.04 * a004 + r.z) + (1.04 * a004 + r.w);
 }
 `;
 
@@ -549,7 +563,7 @@ const SURFACE_FRAG = /* glsl */`
   sheet *= 0.45 + 0.55 * smoothstep(0.25, 0.75, fbm2(P * vec2(0.20, 0.9) + 61.0, 3) * 0.5 + 0.5);
 
   /* ---------------- layer weights -------------------------------------------- */
-  float cobD = clamp(sh.w * (0.30 + 0.9 * mac.b), 0.0, 1.4)
+  float cobD = clamp(sh.w * smoothstep(-0.10, 0.34, fbm2(P * 0.42 + 61.0, 3)) * (0.45 + 1.1 * mac.b), 0.0, 1.2)
              * (1.0 - smoothstep(2.4, 5.0, wp.y));
   float shelf = smoothstep(-78.0, -66.0, P.x) * (1.0 - smoothstep(-24.0, -12.0, P.x))
               * smoothstep(-17.5, -13.0, P.y) * (1.0 - smoothstep(-4.0, 0.5, P.y));
@@ -597,12 +611,14 @@ const SURFACE_FRAG = /* glsl */`
   /* ---------------- albedo ---------------------------------------------------- */
   float grainA = micro.a;
   float mesoA  = meso.a * 0.6 + meso2.a * 0.4;
-  float tone   = 0.72 + 0.56 * mac.r;
+  // Macro tone carries the low-frequency energy the spectral slope is made of: broad
+  // pale drifts against darker, damper, shell-poor ground, tens of metres across.
+  float tone   = (0.58 + 0.84 * mac.r) * (0.86 + 0.28 * meso2.a);
 
   vec3 dry  = uTDryCol * tone
-            * (0.74 + 0.52 * grainA)
-            * (0.80 + 0.40 * mesoA);
-  vec3 damp = dry * vec3(0.60, 0.585, 0.58);
+            * (0.70 + 0.60 * grainA)
+            * (0.78 + 0.44 * mesoA);
+  vec3 damp = dry * vec3(0.52, 0.505, 0.515);
   vec3 wetC = uTWetCol * tone * (0.85 + 0.30 * grainA);
 
   vec3 alb = mix(dry, damp, smoothstep(0.02, 0.45, wet));
@@ -610,12 +626,12 @@ const SURFACE_FRAG = /* glsl */`
 
   // pebble pavement colour: dark basalt through pale quartz, sitting proud of the sand
   {
-    float stone = smoothstep(0.16, 0.55, grav.b) * clamp(cobD, 0.0, 1.0);
-    vec3 sc = mix(vec3(0.030, 0.028, 0.026), vec3(0.235, 0.215, 0.190), grav.a);
-    sc = mix(sc, sc * vec3(0.72, 0.86, 0.70), smoothstep(0.55, 0.95, wet) * 0.65);
-    alb = mix(alb, sc * (0.55 + 0.9 * grav.a) * tone, stone * 0.92);
+    float stone = smoothstep(0.14, 0.48, grav.b) * clamp(cobD, 0.0, 1.0);
+    vec3 sc = mix(vec3(0.0125, 0.0118, 0.0112), vec3(0.235, 0.212, 0.176), pow(grav.a, 1.35));
+    sc = mix(sc, sc * vec3(0.62, 0.74, 0.62), smoothstep(0.55, 0.95, wet) * 0.7);
+    alb = mix(alb, sc * tone, stone * 0.95);
     // contact shading: stones bed into a dark rim of damp sand
-    alb *= 1.0 - smoothstep(0.34, 0.03, grav.b) * clamp(cobD, 0.0, 1.0) * 0.22;
+    alb *= 1.0 - smoothstep(0.34, 0.02, grav.b) * clamp(cobD, 0.0, 1.0) * 0.30;
   }
 
   // organic strandline: dark weed and shell wrack in a band above the swash
@@ -658,11 +674,10 @@ const SURFACE_FRAG = /* glsl */`
   {
     float NoV = max(dot(nOut, V), 1e-3);
     float F0 = mix(0.028, 0.021, smoothstep(0.3, 0.9, wet));
-    float fres = F0 + (1.0 - F0) * pow(1.0 - NoV, 5.0);
     vec3 R = reflect(-V, nOut);
     vec3 Rr = normalize(mix(R, nOut, rough * rough * 0.9));
     vec3 sky = tSkyRefl(Rr, rough);
-    gTEnvSpec = sky * fres * (1.0 - rough * 0.72) * ao * uTSpecBoost;
+    gTEnvSpec = sky * tEnvBRDF(F0, rough, NoV) * ao * uTSpecBoost;
   }
 `;
 
@@ -909,11 +924,55 @@ export function create(opts = {}) {
 
   /* ------------------------------------------------------------- the materials */
 
-  function patchVertex(shader) {
-    shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', `#include <common>\n${FIELD_GLSL}\n${CLIPMAP_VERT}`)
-      .replace('#include <beginnormal_vertex>', `${CLIPMAP_BODY}\n  vec3 objectNormal = tNrm;`)
-      .replace('#include <begin_vertex>', '  vec3 transformed = tWorld;');
+  /** Splice the displacement into any three vertex shader that has <begin_vertex>.
+   *  Materials with normals (standard) get the body at <beginnormal_vertex> so the
+   *  displaced normal is in scope for <defaultnormal_vertex>; the depth material has
+   *  no normal chunk at all, so there the body goes at <begin_vertex> instead. */
+  function patchVertex(shader, withNormal = true) {
+    let v = shader.vertexShader
+      .replace('#include <common>', `#include <common>\n${NOISE_CORE}\n${FIELD_GLSL}\n${CLIPMAP_VERT}`);
+    if (withNormal) {
+      v = v.replace('#include <beginnormal_vertex>', `${CLIPMAP_BODY}\n  vec3 objectNormal = tNrm;`)
+           .replace('#include <begin_vertex>', '  vec3 transformed = tWorld;');
+    } else {
+      v = v.replace('#include <begin_vertex>', `${CLIPMAP_BODY}\n  vec3 transformed = tWorld;`);
+    }
+    shader.vertexShader = v;
+  }
+
+  /**
+   * `applyWorldMaterial()` ends by calling `lighting.registerMaterial()`, which calls
+   * `CSM.setupMaterial()` — and three's CSM addon does a bare
+   * `material.onBeforeCompile = function (shader) {...}`, throwing away whatever chain
+   * was there. Every injection applyWorldMaterial had just installed is destroyed:
+   * no aerial perspective, no custom surface, and here no vertex displacement either.
+   *
+   * So: apply the world material with `lighting` hidden, then register with CSM
+   * ourselves and rebuild the chain by hand. CSM's callback only adds three uniforms
+   * and stashes the shader object, so running it first is safe.
+   *
+   * This is a defect in shared code (src/gfx/materialCommon.js + the CSM addon) that
+   * every future world material will hit; it is worked around here rather than fixed
+   * because this task owns one file. See the report.
+   */
+  function applyWorldMaterialWithCSM(mat, ctx, o) {
+    const noLighting = Object.assign({}, ctx, {
+      get: (n, req) => (n === 'lighting' ? null : ctx.get(n, req)),
+    });
+    applyWorldMaterial(mat, noLighting, o);
+    const wmChain = mat.onBeforeCompile;
+    const lighting = ctx.get('lighting');
+    if (lighting?.registerMaterial) {
+      lighting.registerMaterial(mat);
+      const csmChain = mat.onBeforeCompile;
+      if (csmChain !== wmChain) {
+        mat.onBeforeCompile = (shader, renderer) => {
+          csmChain(shader, renderer);
+          wmChain(shader, renderer);
+        };
+      }
+    }
+    return mat;
   }
 
   function buildSurfaceMaterial(ctx) {
@@ -924,19 +983,17 @@ export function create(opts = {}) {
     mat.onBeforeCompile = (shader) => {
       Object.assign(shader.uniforms, fieldUniforms, surfUniforms);
       patchVertex(shader);
-      shader.vertexShader = shader.vertexShader.replace(
-        '#include <common>', '#include <common>\nvarying vec3 vTWorldNormal;\nvarying float vTLevelSpacing;');
       // the env specular computed in the inject block is added after three's own IBL
       shader.fragmentShader = shader.fragmentShader.replace(
         '#include <lights_fragment_end>',
         '#include <lights_fragment_end>\n  reflectedLight.indirectSpecular += gTEnvSpec;');
     };
-    applyWorldMaterial(mat, ctx, {
+    applyWorldMaterialWithCSM(mat, ctx, {
       matId: MAT_ID.TERRAIN_SAND,
       inject: {
         key: 'terrain-surface',
         uniforms: Object.assign({}, fieldUniforms, surfUniforms),
-        pars: FIELD_GLSL + SURFACE_PARS,
+        pars: SURFACE_PARS + FIELD_GLSL,
         fragment: SURFACE_FRAG,
       },
     });
@@ -948,9 +1005,9 @@ export function create(opts = {}) {
     const mat = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking });
     mat.onBeforeCompile = (shader) => {
       Object.assign(shader.uniforms, fieldUniforms);
-      shader.vertexShader = shader.vertexShader.replace(
-        '#include <common>', '#include <common>\nvarying vec3 vTWorldNormal;\nvarying float vTLevelSpacing;');
-      patchVertex(shader);
+      // MeshDepthMaterial only includes <beginnormal_vertex> under USE_DISPLACEMENTMAP,
+      // so the body has to go in at <begin_vertex> here.
+      patchVertex(shader, false);
     };
     mat.customProgramCacheKey = () => 'terrain-depth';
     return mat;
@@ -969,6 +1026,7 @@ export function create(opts = {}) {
       uniforms: u,
       vertexShader: /* glsl */`
         #include <common>
+        ${NOISE_CORE}
         ${FIELD_GLSL}
         ${CLIPMAP_VERT}
         uniform mat4 uPrevViewProj;
@@ -990,8 +1048,6 @@ export function create(opts = {}) {
       `,
       fragmentShader: /* glsl */`
         precision highp float;
-        ${NOISE_CORE}
-        ${FIELD_GLSL}
         uniform float uTRoughApprox;
         uniform float uTMatId;
         in vec3 vViewNormal;
@@ -1051,8 +1107,8 @@ export function create(opts = {}) {
     const geoLarge = makePebbleGeometry(rand, 1);
 
     const mkMat = (rough) => {
-      const m = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: rough, metalness: 0.0, vertexColors: false });
-      applyWorldMaterial(m, ctx, {
+      const m = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: rough, metalness: 0.0 });
+      applyWorldMaterialWithCSM(m, ctx, {
         matId: MAT_ID.ROCK,
         inject: {
           key: `terrain-pebble-${rough}`,
@@ -1292,7 +1348,7 @@ export function create(opts = {}) {
         mesh.matrixAutoUpdate = false;
         for (let i = 0; i < levels.length; i++) mesh.setMatrixAt(i, new THREE.Matrix4());
         mesh.instanceMatrix.needsUpdate = true;
-        mesh.onBeforeRender = (r, scene) => { if (scene.overrideMaterial) geo.setDrawRange(0, 0); };
+        mesh.onBeforeRender = (r, scene) => { if (scene.overrideMaterial) geo.setDrawRange(0, -1); };
         mesh.onAfterRender = () => geo.setDrawRange(0, Infinity);
         group.add(mesh);
 
@@ -1304,7 +1360,7 @@ export function create(opts = {}) {
         proxy.matrixAutoUpdate = false;
         for (let i = 0; i < levels.length; i++) proxy.setMatrixAt(i, new THREE.Matrix4());
         proxy.instanceMatrix.needsUpdate = true;
-        proxy.onBeforeRender = (r, scene) => { if (!scene.overrideMaterial) geoG.setDrawRange(0, 0); };
+        proxy.onBeforeRender = (r, scene) => { if (!scene.overrideMaterial) geoG.setDrawRange(0, -1); };
         proxy.onAfterRender = () => geoG.setDrawRange(0, Infinity);
         group.add(proxy);
 

@@ -527,7 +527,9 @@ void main(){
   float r2 = dot(q, q);
   float r  = sqrt(r2);
   float a;
-  if (vShape < 0.5)      a = exp(-r2 * 2.8) * smoothstep(1.05, 0.55, r);
+  // NB: smoothstep(e0, e1, x) is undefined for e0 >= e1 and returns 0 under
+  // ANGLE/Vulkan — always write the increasing form and invert.
+  if (vShape < 0.5)      a = exp(-r2 * 2.8) * (1.0 - smoothstep(0.55, 1.05, r));
   else if (vShape < 1.5) a = exp(-r2 * 2.2);
   else { float d = abs(r - 0.80); a = exp(-d * d * 120.0); }
   a *= vCol.a;
@@ -716,9 +718,11 @@ void main(){
   float dist = max(-vp.z, 0.01);
 
   // Silhouettes at range: the haze that swallows the stacks swallows these too.
-  float t = 1.0 - exp(-dist * 0.0055);
-  vec3 col = mix(vec3(0.16, 0.15, 0.145) * (uSunColor * 0.6 + uSkyColor * 0.9), uSkyColor * 2.45, t);
-  vCol = vec4(col, 1.0 - 0.35 * t);
+  // Gulls read as dark marks against a bright sky; the haze only lifts them a
+  // little, or they invert into pale specks and stop looking like birds.
+  float t = 1.0 - exp(-dist * 0.0038);
+  vec3 col = mix(vec3(0.085, 0.080, 0.075) * (uSunColor * 0.55 + uSkyColor * 0.8), uSkyColor * 1.25, t);
+  vCol = vec4(col, 1.0 - 0.30 * t);
 
   vp.xy += position.xy * uSize;
   vUv = uv;
@@ -735,10 +739,12 @@ layout(location = 0) out vec4 oCol;
 void main(){
   vec2 q = vUv * 2.0 - 1.0;
   float ax = abs(q.x);
-  float wy = vFlap * 0.42 * ax * ax;                       // dihedral rises with span
-  float th = 0.115 * (1.0 - ax * 0.82);                    // wing tapers to the tip
-  float wing = smoothstep(th, th * 0.15, abs(q.y - wy)) * step(ax, 0.94) * step(0.07, ax);
-  float body = smoothstep(0.20, 0.06, length(q * vec2(1.0, 2.7)));
+  // A gull is ~14 px across at these ranges, so the wing has to be a real fraction of
+  // the sprite: a thin analytic line disappears below one pixel and the bird vanishes.
+  float wy = vFlap * 0.52 * ax;                            // dihedral rises with span
+  float th = 0.34 * (1.0 - ax * 0.72);                     // half-thickness, tapering
+  float wing = (1.0 - smoothstep(th * 0.35, th, abs(q.y - wy))) * (1.0 - smoothstep(0.84, 1.0, ax));
+  float body = 1.0 - smoothstep(0.13, 0.36, length(q * vec2(1.0, 2.2)));
   float a = max(wing, body) * vCol.a;
   if (a <= 0.01) discard;
   oCol = vec4(vCol.rgb * a, a);
@@ -1272,7 +1278,7 @@ export function create(opts = {}) {
     uniforms: {
       uStacks: U.uStacks, uStackCount: U.uStackCount, uTime: U.uTime,
       uCamPos: U.uCamPos, uSunColor: U.uSunColor, uSkyColor: U.uSkyColor,
-      uSize: { value: 1.55 },
+      uSize: { value: 2.10 },
     },
     transparent: true, depthTest: true, depthWrite: false, side: THREE.DoubleSide,
     blending: THREE.CustomBlending, blendEquation: THREE.AddEquation,
@@ -1678,7 +1684,10 @@ export function create(opts = {}) {
       U.uOpaque.value = pipe?.opaqueRT?.texture || null;
       U.uGbuf0.value = pipe?.gbuffer?.textures?.[0] || null;
       U.uGbuf1.value = pipe?.gbuffer?.textures?.[1] || null;
-      U.uDepth.value = depthCopyRT ? depthCopyRT.texture : null;
+      // Without a pipeline the copy never gets written; binding an uninitialised float
+      // target would make the soft-particle fade read garbage. Fall back to "no depth",
+      // which three binds as white => scene at the far plane => no fade.
+      U.uDepth.value = (pipe && depthCopyRT) ? depthCopyRT.texture : null;
       decalMesh.visible = !!(pipe && depthCopyRT && decalsLive > 0);
       shimmer.visible = !!U.uOpaque.value;
 

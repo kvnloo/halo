@@ -211,16 +211,22 @@ function makeDriftwood(rand, { seg = 7, radial = 7, bend = 0.22, taper = 0.55, k
 }
 
 /** A limp kelp mat: a flattened ragged disc with a few fronds trailing off it. */
-function makeKelpMat(rand, { ring = 13, rings = 3, fronds = 5 } = {}) {
+function makeKelpMat(rand, { ring = 17, rings = 4, fronds = 5 } = {}) {
   const pos = [], nor = [], uv = [];
   const lob = lumpField(rand, 5, 0.10, 0.34, 1.2, 4.0);
+  // relief across the pad: a smooth disc facing straight up catches the whole sky and
+  // reads as a tarpaulin. Bladder-wrack lumps break both the shading and the silhouette.
+  const bump = lumpField(rand, 6, 0.03, 0.085, 3.0, 9.0);
   const R = (a, k) => k * (1 + lob(Math.cos(a) * 2.0, k * 1.5, Math.sin(a) * 2.0));
-  const H = (k) => 0.16 * (1 - k * k);
+  const H = (k, x, z) => 0.16 * (1 - k * k) + bump(x, 0, z);
   for (let r = 0; r < rings; r++) {
     const k0 = r / rings, k1 = (r + 1) / rings;
     for (let j = 0; j < ring; j++) {
       const a0 = (j / ring) * Math.PI * 2, a1 = ((j + 1) / ring) * Math.PI * 2;
-      const pt = (a, k) => [Math.cos(a) * R(a, k), H(k), Math.sin(a) * R(a, k)];
+      const pt = (a, k) => {
+        const x = Math.cos(a) * R(a, k), z = Math.sin(a) * R(a, k);
+        return [x, H(k, x, z), z];
+      };
       const q = [pt(a0, k0), pt(a0, k1), pt(a1, k1), pt(a1, k0)];
       for (const i of [0, 1, 2, 0, 2, 3]) {
         pos.push(q[i][0], q[i][1], q[i][2]); nor.push(0, 1, 0);
@@ -230,7 +236,8 @@ function makeKelpMat(rand, { ring = 13, rings = 3, fronds = 5 } = {}) {
   }
   for (let i = 0; i < fronds; i++) {
     const a = rand.range(0, Math.PI * 2);
-    const len = rand.range(0.9, 2.1), w = rand.range(0.05, 0.13);
+    // short: a frond as long as the mat is wide reads as a tarpaulin, not as wrack
+    const len = rand.range(0.30, 0.80), w = rand.range(0.05, 0.13);
     const ca = Math.cos(a), sa = Math.sin(a);
     const px = -sa * w, pz = ca * w;
     const x0 = ca * 0.85, z0 = sa * 0.85;
@@ -522,8 +529,13 @@ export function create(opts = {}) {
   `;
   const PROP_PARS = /* glsl */`
     varying vec3 vPropTint;
+    /** Descending smoothstep. GLSL leaves smoothstep(hi, lo, x) undefined, so spell it out. */
+    float pDown(float hi, float lo, float x){
+      float t = clamp((hi - x) / max(hi - lo, 1e-5), 0.0, 1.0);
+      return t * t * (3.0 - 2.0 * t);
+    }
     /** Below the swash line everything is soaked; it dries out up the berm. */
-    float pWet(vec3 wp){ return clamp(smoothstep(2.2, 0.10, wp.y), 0.0, 1.0); }
+    float pWet(vec3 wp){ return pDown(2.2, 0.10, wp.y); }
   `;
 
   /**
@@ -720,9 +732,13 @@ export function create(opts = {}) {
       {
         const rnd = ctx.rand.fork(0x51c0bb1e);
         const geos = [
+          // 0: small water-worn pebble, 80 tris — never drawn above ~0.3 m
           makeStone(rnd.fork(1), { detail: 1, lumps: 8, amp: 0.24, cuts: 0, flatten: 0.78 }),
-          makeStone(rnd.fork(2), { detail: 1, lumps: 6, amp: 0.20, cuts: 5, flatten: 0.72, faceted: true }),
-          makeStone(rnd.fork(3), { detail: 1, lumps: 7, amp: 0.17, cuts: 3, flatten: 0.44, faceted: true }),
+          // 1: the boulder variant. 320 tris, because at 0.5-1 m an 80-triangle
+          //    icosphere silhouettes as a cut gem no matter how it is shaded
+          makeStone(rnd.fork(2), { detail: 2, lumps: 9, amp: 0.22, cuts: 4, flatten: 0.72, faceted: true }),
+          // 2: flat slab, 80 tris
+          makeStone(rnd.fork(3), { detail: 1, lumps: 7, amp: 0.17, cuts: 2, flatten: 0.52, faceted: true }),
         ];
         geometries.push(...geos);
 
@@ -733,11 +749,11 @@ export function create(opts = {}) {
           float grit = vnoise3(wp * 96.0);
           float wet  = pWet(wp);
           // dry cobbles are pale warm grey; wet ones go near-black and glossy
-          vec3 dry = mix(vec3(0.470, 0.430, 0.372), vec3(0.250, 0.226, 0.198), n);
-          dry = mix(dry, vec3(0.560, 0.520, 0.455), smoothstep(0.62, 0.95, n2) * 0.55);
+          vec3 dry = mix(vec3(0.395, 0.360, 0.310), vec3(0.190, 0.172, 0.150), n);
+          dry = mix(dry, vec3(0.480, 0.445, 0.388), smoothstep(0.62, 0.95, n2) * 0.55);
           dry *= 0.80 + 0.34 * grit;
-          diffuseColor.rgb = mix(dry, dry * 0.30, wet) * vPropTint;
-          roughnessFactor = clamp(mix(0.88, 0.24, wet) * (0.84 + 0.30 * n2) - 0.10 * grit, 0.06, 1.0);
+          diffuseColor.rgb = mix(dry, dry * 0.24, wet) * vPropTint;
+          roughnessFactor = clamp(mix(0.90, 0.40, wet) * (0.84 + 0.30 * n2) - 0.08 * grit, 0.14, 1.0);
         `, { roughness: 0.72, tint: 0.16 });
 
         // Cobbles form beds and drifts, not confetti — a coherent field decides where.
@@ -750,7 +766,11 @@ export function create(opts = {}) {
           castShadow: [true, true, false], matId: MAT_ID.ROCK, roughness: 0.72,
         });
 
-        const pts = scatterPoints(rnd, 5200, (x, z, g) => {
+        // The reference foreground carries roughly 2 stones per m² at cobble scale.
+        // 17k over the ~35,000 m² beach band is 0.5/m² — still 4x short, and where the
+        // triangle budget lands. Closing the rest wants either terrain displacement
+        // for the sub-10 cm grade or a camera-relative near-field set; see the report.
+        const pts = scatterPoints(rnd, 17000, (x, z, g) => {
           if (g.y < -2.6 || g.y > 11) return 0;
           if (g.slope > 0.62) return 0;
           const nr = nearRock(x, z);
@@ -765,7 +785,8 @@ export function create(opts = {}) {
         for (const pt of pts) {
           // power-law sizes: many pebbles, few boulders
           const size = 0.045 * Math.pow(20.0, Math.pow(rnd.next(), 2.1));
-          const gi = size > 0.34 ? rnd.int(1, 2) : rnd.int(0, 2);
+          // only the top ~4% by size pay for the 320-triangle variant
+          const gi = size > 0.62 ? 1 : (rnd.next() < 0.5 ? 0 : 2);
           const sink = size * rnd.range(0.18, 0.62);
           const y = pt.g.y - sink + size * 0.5;
           scat.push({
@@ -776,7 +797,7 @@ export function create(opts = {}) {
             sz: size * rnd.range(0.85, 1.25),
             gi,
             // pebbles vanish close in; boulders survive out to the haze band
-            fadeEnd: THREE.MathUtils.clamp(size * 300, 26, 260),
+            fadeEnd: THREE.MathUtils.clamp(size * 260, 20, 170),
           });
           if (size > 0.42 && colliders.length < 190) {
             colliders.push({
@@ -855,18 +876,18 @@ export function create(opts = {}) {
           vec3 wp = vWorldPositionWM;
           float n = fbm3(wp * 5.0, 4) * 0.5 + 0.5;
           float f = fbm3(wp * 34.0, 3) * 0.5 + 0.5;
-          vec3 base = mix(vec3(0.086, 0.078, 0.040), vec3(0.170, 0.148, 0.062), n);
-          base = mix(base, vec3(0.230, 0.170, 0.086), smoothstep(0.6, 0.95, f) * 0.5);
+          vec3 base = mix(vec3(0.026, 0.025, 0.014), vec3(0.062, 0.055, 0.024), n);
+          base = mix(base, vec3(0.098, 0.070, 0.034), smoothstep(0.6, 0.95, f) * 0.5);
           diffuseColor.rgb = base * vPropTint;
           // wet weed is the glossiest thing on the beach — it is what catches the sun
-          roughnessFactor = clamp(0.20 + 0.26 * n, 0.05, 1.0);
-        `, { roughness: 0.28, tint: 0.26, side: THREE.DoubleSide });
+          roughnessFactor = clamp(0.45 + 0.30 * n, 0.05, 1.0);
+        `, { roughness: 0.58, tint: 0.26, side: THREE.DoubleSide });
 
         const scat = new Scatter('kelp', [geo], mat, {
-          castShadow: false, matId: MAT_ID.FOLIAGE, roughness: 0.28,
+          castShadow: false, matId: MAT_ID.FOLIAGE, roughness: 0.58,
         });
 
-        const pts = scatterPoints(rnd, 320, (x, z, g) => {
+        const pts = scatterPoints(rnd, 480, (x, z, g) => {
           if (g.y < -1.1 || g.y > 1.6) return 0;       // strictly the swash line
           if (g.slope > 0.45) return 0;
           const nr = nearRock(x, z);
@@ -877,7 +898,8 @@ export function create(opts = {}) {
         });
 
         for (const pt of pts) {
-          const size = rnd.range(0.22, 0.85);
+          // small clumps, not pads: a 1 m mat reads as a tarpaulin on the sand
+          const size = rnd.range(0.14, 0.42);
           scat.push({
             x: pt.x, y: pt.g.y + 0.012, z: pt.z,
             q: seat(pt.g, rnd, 1.0, 0.10),
@@ -940,12 +962,12 @@ export function create(opts = {}) {
         const crabMat = makeMaterial(ctx, 'crab', MAT_ID.DEFAULT, /* glsl */`
           vec3 wp = vWorldPositionWM;
           float n = fbm3(wp * 55.0, 3) * 0.5 + 0.5;
-          diffuseColor.rgb = mix(vec3(0.300, 0.120, 0.062), vec3(0.470, 0.230, 0.115), n) * vPropTint;
-          roughnessFactor = clamp(0.34 + 0.24 * n, 0.05, 1.0);
-        `, { roughness: 0.36, tint: 0.18 });
+          diffuseColor.rgb = mix(vec3(0.190, 0.098, 0.058), vec3(0.320, 0.190, 0.112), n) * vPropTint;
+          roughnessFactor = clamp(0.40 + 0.24 * n, 0.05, 1.0);
+        `, { roughness: 0.44, tint: 0.18 });
 
         const crabs = new Scatter('crab', [crabGeo], crabMat, {
-          castShadow: false, matId: MAT_ID.DEFAULT, roughness: 0.36,
+          castShadow: false, matId: MAT_ID.DEFAULT, roughness: 0.44,
         });
         for (let i = 0; i < 30; i++) {
           const x = rnd.range(-70, -18), z = rnd.range(-14, -2);
@@ -971,7 +993,7 @@ export function create(opts = {}) {
           vec3 wp = vWorldPositionWM;
           float brush  = fbm3(wp * vec3(1.2, 30.0, 30.0), 3) * 0.5 + 0.5;
           float grime  = fbm3(wp * 4.4, 4) * 0.5 + 0.5;
-          float sanded = smoothstep(0.55, 0.05, wp.y);   // the buried edge silts over
+          float sanded = pDown(0.55, 0.05, wp.y);        // the buried edge silts over
           vec3 alloy = mix(vec3(0.205, 0.202, 0.192), vec3(0.315, 0.312, 0.300), brush);
           alloy = mix(alloy, vec3(0.135, 0.133, 0.126), smoothstep(0.55, 0.95, grime) * 0.55);
           diffuseColor.rgb = mix(alloy, vec3(0.330, 0.288, 0.220), sanded * 0.55 * grime) * vPropTint;
@@ -1055,11 +1077,13 @@ export function create(opts = {}) {
           totalEmissiveRadiance += vec3(0.10, 0.42, 0.62) * smoothstep(0.55, 0.95, w) * 0.55;
         `, { roughness: 0.3, tint: 0.0 });
 
+        // No shadow cascades for these two: a 20 cm object buys four extra shadow
+        // draws for a contact shadow the cobbles beside it already imply.
         const mags = new Scatter('mag', [magGeo], gearMat, {
-          castShadow: true, matId: MAT_ID.METAL, roughness: 0.40,
+          castShadow: false, matId: MAT_ID.METAL, roughness: 0.40,
         });
         const pistols = new Scatter('pistol', [pistolGeo], plasmaMat, {
-          castShadow: true, matId: MAT_ID.METAL, roughness: 0.30,
+          castShadow: false, matId: MAT_ID.METAL, roughness: 0.30,
         });
 
         // Near the spawn and the first scored poses, so they actually read.

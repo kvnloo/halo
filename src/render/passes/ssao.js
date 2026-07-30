@@ -136,7 +136,7 @@ import { Pass, fsMaterial, makeRT, FullScreenQuad } from '../RenderPipeline.js';
  * ---------------------------------------------------------------------------
  * ctx.config knobs
  *   aoEnabled 1     aoStrength 1.0    aoRadius 2.2     aoThickness 0.35
- *   aoAmbientFloor 0.25               aoFalloffStart 0.55
+ *   aoAmbientFloor 0.25               aoFalloffStart 0.55    aoAngleBias 0.12
  *   aoAlpha 0.10 (temporal)           aoDepthTol 0.02
  *   aoDebug 0       1 = AO, 2 = bent normal, 3 = indirect weight
  */
@@ -191,19 +191,28 @@ in vec2 vUv;
 uniform sampler2D tDepth;
 uniform sampler2D tGbuf0;
 uniform sampler2D tGbuf1;
+uniform vec2  uFullTexel;
+uniform vec2  uHalfRes;
 uniform float uNear, uFar;
 out vec4 oCol;
 
 void main(){
-  vec4 g1 = texture(tGbuf1, vUv);
-  float d  = texture(tDepth, vUv).r;
+  // Snap to the centre of full-res texel (2i, 2j). A half-res pixel centre lands exactly
+  // on a boundary between two full-res texels, where NearestFilter's choice is
+  // implementation-defined — and worse, depth, normal and mask could each resolve to a
+  // *different* one of the four, which produces a normal that does not belong to the
+  // depth it is paired with. Sampling one explicit texel makes the half-res buffer an
+  // exact subsample and removes the ambiguity.
+  vec2 suv = (floor(vUv * uHalfRes) * 2.0 + 0.5) * uFullTexel;
+  vec4 g1 = texture(tGbuf1, suv);
+  float d  = texture(tDepth, suv).r;
   // g1.a is 1 only where the G-buffer pre-pass actually rasterised opaque geometry.
   // Sky, and an empty scene, land here and are stamped with the sentinel depth so every
   // later stage costs one compare instead of a branch tree.
   if (g1.a < 0.5 || d >= 1.0) { oCol = vec4(0.0, 0.0, 1.0, SKY_Z); return; }
   float ndcZ = d * 2.0 - 1.0;
   float linZ = (2.0 * uNear * uFar) / max(uFar + uNear - ndcZ * (uFar - uNear), 1e-6);
-  vec3 n = texture(tGbuf0, vUv).xyz * 2.0 - 1.0;
+  vec3 n = texture(tGbuf0, suv).xyz * 2.0 - 1.0;
   float l = length(n);
   oCol = vec4(l > 1e-4 ? n / l : vec3(0.0, 0.0, 1.0), linZ);
 }
@@ -219,6 +228,7 @@ uniform vec2  uTexel;
 uniform float uRadius;       // world-space radius, metres
 uniform float uThickness;    // thin-occluder compensation, 0..1
 uniform float uFalloffStart; // fraction of uRadius at which attenuation begins
+uniform float uAngleBias;    // sin of the minimum elevation above the tangent plane
 uniform float uFrame;
 uniform float uMaxRadiusPx;
 out vec4 oCol;
@@ -284,7 +294,15 @@ void main(){
         // this pixel's own texel, which would self-occlude every surface.
         float t = (float(st) + stepN) / float(STEPS);
         float rp = max(t * t * radiusPx, 1.6);
-        vec2 sUv = (px + omega * (sgn * rp)) * uTexel;
+        // Snap to the texel centre the fetch will actually land on. tPrep is
+        // NearestFilter, so an un-snapped uv reads texel A's depth while the
+        // reconstruction below believes the sample sits at position B, up to half a texel
+        // away. On a tilted surface that fabricates a height difference — and at the first
+        // step, where the two points are only ~1.6 px apart, half a texel of lateral error
+        // is a large fraction of the separation. That is a plane occluding itself, and it
+        // is invisible as a bug because it looks like plausible ambient darkening.
+        vec2 sPx = floor(px + omega * (sgn * rp)) + 0.5;
+        vec2 sUv = sPx * uTexel;
         if (sUv.x < 0.0 || sUv.x > 1.0 || sUv.y < 0.0 || sUv.y > 1.0) break;
 
         float slz = texture(tPrep, sUv).a;
@@ -300,6 +318,19 @@ void main(){
         // not have its contribution scaled after the integral (which would break the
         // analytic solution's energy).
         float w = clamp((uRadius - dist) * falloffMul, 0.0, 1.0);
+
+        // Angle bias. A sample lying *in* this pixel's own tangent plane is not an
+        // occluder — its horizon is exactly the hemisphere limit, so in exact arithmetic
+        // it contributes nothing. In practice the depth buffer is quantised and this
+        // buffer is half resolution, and at grazing incidence a fraction of a millimetre
+        // of depth error is several degrees of horizon error. The result is a flat plane
+        // that occludes itself: measured, an unoccluded ground plane at this scene's
+        // camera height read a uniform 0.84 instead of 1.0, with a black band along the
+        // horizon where the grazing gets extreme. Requiring a sample to stand at least
+        // ~7 degrees above the tangent plane before it counts removes it. sin(elevation
+        // above the tangent plane) is just D.N/|D|.
+        w *= smoothstep(0.0, uAngleBias, dot(D, N) / dist);
+
         sCos = mix(lowH, sCos, w);
 
         // Thin-occluder compensation — see the header. max() would latch a grass blade
@@ -551,7 +582,9 @@ void main(){
 
   vec3 mul = mix(vec3(1.0), occ, w * cover);
 
-  if (uDebug > 2.5)      { oCol = vec4(vec3(w * cover), 1.0); return; }
+  if (uDebug > 4.5)      { oCol = vec4(vec3(fract(linZ * 0.05)), 1.0); return; }
+  else if (uDebug > 3.5) { oCol = vec4(N * 0.5 + 0.5, 1.0); return; }
+  else if (uDebug > 2.5) { oCol = vec4(vec3(w * cover), 1.0); return; }
   else if (uDebug > 1.5) { oCol = vec4(bentN * 0.5 + 0.5, 1.0); return; }
   else if (uDebug > 0.5) { oCol = vec4(vec3(ao), 1.0); return; }
 
@@ -572,6 +605,7 @@ export function create(opts = {}) {
     strength: 1.0,
     thickness: 0.35,
     falloffStart: 0.55,
+    angleBias: 0.12,
     ambientFloor: 0.25,
     alpha: 0.10,
     depthTol: 0.02,
@@ -626,6 +660,7 @@ export function create(opts = {}) {
 
     prepMat = fsMaterial(PREP_FRAG, {
       tDepth: { value: null }, tGbuf0: { value: null }, tGbuf1: { value: null },
+      uFullTexel: { value: new THREE.Vector2() }, uHalfRes: { value: new THREE.Vector2() },
       uNear: { value: 0.06 }, uFar: { value: 12000 },
     });
 
@@ -635,7 +670,7 @@ export function create(opts = {}) {
       uTanHalf: { value: new THREE.Vector2(1, 1) }, uJitter: { value: new THREE.Vector2() },
       uRadius: { value: cfg.radius }, uThickness: { value: cfg.thickness },
       uFalloffStart: { value: cfg.falloffStart }, uFrame: { value: 0 },
-      uMaxRadiusPx: { value: cfg.maxRadiusPx },
+      uAngleBias: { value: cfg.angleBias }, uMaxRadiusPx: { value: cfg.maxRadiusPx },
     }, D);
 
     blurMat = fsMaterial(DENOISE_FRAG, {
@@ -719,6 +754,8 @@ export function create(opts = {}) {
       u.tDepth.value = pipe.depthTex;
       u.tGbuf0.value = pipe.gbuffer.textures[0];
       u.tGbuf1.value = pipe.gbuffer.textures[1];
+      u.uFullTexel.value.set(1 / pipe.w, 1 / pipe.h);
+      u.uHalfRes.value.set(hw, hh);
       u.uNear.value = cam.near; u.uFar.value = cam.far;
       quad.material = prepMat;
       r.setRenderTarget(prepRT);
@@ -736,6 +773,7 @@ export function create(opts = {}) {
       u.uRadius.value = Math.max(0.05, c.aoRadius ?? cfg.radius);
       u.uThickness.value = THREE.MathUtils.clamp(c.aoThickness ?? cfg.thickness, 0, 1);
       u.uFalloffStart.value = THREE.MathUtils.clamp(c.aoFalloffStart ?? cfg.falloffStart, 0, 0.95);
+      u.uAngleBias.value = THREE.MathUtils.clamp(c.aoAngleBias ?? cfg.angleBias, 0.0, 0.9);
       u.uMaxRadiusPx.value = cfg.maxRadiusPx;
       // Animated from the pipeline's own frame counter, never a clock — two runs of the
       // same capture must produce the same slice rotations on every frame.

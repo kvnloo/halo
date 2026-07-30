@@ -82,29 +82,43 @@ import { sharedAerialUniforms } from '../gfx/materialCommon.js';
 const SEA_LEVEL = 0.0;
 const G = 9.81;
 
-/** Displaced Gerstner bands. dirDeg is measured from +Z (shoreward) toward +X. */
+/**
+ * Displaced Gerstner bands. dirDeg is measured from +Z (shoreward) toward +X.
+ *
+ * The directional spread is deliberately narrow (±24 deg) for the swell. A wide
+ * spread makes a confused, isotropic sea; the reference is a long-crested swell whose
+ * crests run almost exactly parallel to the beach (kf_01800 shows eight or nine
+ * near-parallel crests across 20 m of shallows), which is what refraction over a
+ * shore-parallel bathymetry does to any incoming swell. The chop above it keeps a
+ * wide spread because that is genuinely wind-driven and short-crested.
+ *
+ * Total mean-square slope over both tables is 0.030, which is the Cox-Munk value for
+ * the 5.4 m/s wind `time` reports. That number matters: it sets how far the reflected
+ * ray wanders across the sky gradient, and therefore how much contrast the surface has.
+ */
 const WAVE_BANDS = [
   // wavelength(m), amplitude(m), dirDeg, steepness
-  { L: 28.0, A: 0.330, dir: -6, Q: 0.72 },
-  { L: 19.0, A: 0.215, dir: 11, Q: 0.70 },
-  { L: 13.0, A: 0.140, dir: -19, Q: 0.66 },
-  { L: 8.60, A: 0.092, dir: 24, Q: 0.62 },
-  { L: 5.50, A: 0.055, dir: -31, Q: 0.56 },
-  { L: 3.60, A: 0.032, dir: 38, Q: 0.50 },
-  { L: 2.40, A: 0.018, dir: -46, Q: 0.44 },
-  { L: 1.60, A: 0.0105, dir: 57, Q: 0.38 },
+  { L: 28.0, A: 0.340, dir: -5, Q: 0.74 },
+  { L: 19.0, A: 0.225, dir: 9, Q: 0.72 },
+  { L: 13.0, A: 0.152, dir: -14, Q: 0.68 },
+  { L: 8.60, A: 0.104, dir: 17, Q: 0.64 },
+  { L: 5.50, A: 0.068, dir: -21, Q: 0.58 },
+  { L: 3.60, A: 0.043, dir: 24, Q: 0.52 },
+  { L: 2.40, A: 0.028, dir: -33, Q: 0.46 },
+  { L: 1.60, A: 0.0185, dir: 41, Q: 0.40 },
 ];
 const NW = WAVE_BANDS.length;
 
 /** Normal-only bands, evaluated per pixel. Too fine to tessellate, too coarse to
  *  hide in a texture — this is the band that carries the visible chop. */
 const CHOP_BANDS = [
-  { L: 1.90, A: 0.0072, dir: 74 },
-  { L: 1.25, A: 0.0046, dir: -88 },
-  { L: 0.82, A: 0.0029, dir: 108 },
-  { L: 0.54, A: 0.00185, dir: -124 },
-  { L: 0.35, A: 0.00115, dir: 146 },
-  { L: 0.22, A: 0.00072, dir: -161 },
+  { L: 1.90, A: 0.0132, dir: 62 },
+  { L: 1.25, A: 0.0089, dir: -78 },
+  { L: 0.82, A: 0.0059, dir: 96 },
+  { L: 0.54, A: 0.0039, dir: -117 },
+  { L: 0.35, A: 0.00255, dir: 139 },
+  { L: 0.22, A: 0.00165, dir: -158 },
+  { L: 0.145, A: 0.00108, dir: 173 },
 ];
 const NC = CHOP_BANDS.length;
 
@@ -188,20 +202,21 @@ function fbmCpu(x, y, oct) {
  */
 function fallbackSeabed(x, z) {
   // shoreline excursion along X: positive pushes the waterline seaward
-  let zOff = 12.0 * Math.exp(-Math.pow((x + 20) / 85, 2))
-           - 30.0 * smooth01((x - 30) / 75)
-           + 6.0 * fbmCpu(x / 74 + 11.3, 0.5, 3)
-           + 1.7 * fbmCpu(x / 17 + 41.7, 3.5, 2);
+  // The table is authoritative AT X = 0, so the modulation is anchored to zero there.
+  let zOff = 4.5 * Math.exp(-Math.pow((x + 20) / 45, 2)) - 2.4
+           - 26.0 * smooth01((x - 38) / 66)
+           + 3.2 * fbmCpu(x / 78 + 11.3, 0.5, 3)
+           + 1.1 * fbmCpu(x / 19 + 41.7, 3.5, 2);
   const ze = z + zOff;
   let y = profileY(ze);
   if (ze < -2) {
     // sandbar crest, and general seabed relief
-    const bar = 0.62 * Math.exp(-Math.pow((ze + 26) / 12, 2)) * (0.72 + 0.5 * fbmCpu(x / 55 + 7.1, 1.3, 2));
-    const relief = 0.30 * fbmCpu(x / 26 + 3.3, ze / 26 + 9.1, 3)
-                 + 0.10 * fbmCpu(x / 7.5 + 13.3, ze / 7.5 + 19.1, 3);
+    const bar = 0.55 * Math.exp(-Math.pow((ze + 26) / 13, 2)) * (0.72 + 0.5 * fbmCpu(x / 55 + 7.1, 1.3, 2));
+    const relief = 0.13 * fbmCpu(x / 34 + 3.3, ze / 34 + 9.1, 3)
+                 + 0.055 * fbmCpu(x / 9.5 + 13.3, ze / 9.5 + 19.1, 3);
     y += bar + relief * Math.min(1, -ze / 6);
   } else {
-    y += 0.11 * fbmCpu(x / 9 + 21.3, ze / 9 + 5.1, 3);
+    y += 0.05 * fbmCpu(x / 11 + 21.3, ze / 11 + 5.1, 3);
   }
   return y;
 }
@@ -395,9 +410,12 @@ void main(){
   float c  = surfH(vUv);
   float hx = surfH(vUv + vec2(e, 0.0));
   float hy = surfH(vUv + vec2(0.0, e));
-  // slope in "texture units"; the shader scales it by the tile size in metres
-  vec2 g = vec2(hx - c, hy - c) / e;
-  oCol = vec4(g * 0.5 + 0.5, c * 0.5 + 0.5, 1.0);
+  // A raw d(height)/d(uv) runs to several hundred and clipped this map to solid white
+  // in an 8-bit target. Store a unit normal instead and let the shader read the slope
+  // back as n.xy/n.z, which is scale-free and cannot saturate.
+  vec2 g = vec2(hx - c, hy - c) / e * 0.0022;
+  vec3 n = normalize(vec3(-g, 1.0));
+  oCol = vec4(n * 0.5 + 0.5, c * 0.5 + 0.5);
 }
 `;
 
@@ -436,19 +454,23 @@ void main(){
 
   /* --- decay ------------------------------------------------------------------- */
   // deep-water foam dissipates fast; foam sitting in the swash lingers
-  float tau = mix(1.05, 3.4, shoal);
+  float tau = mix(0.85, 2.6, shoal);
   foam *= exp(-uDt / tau);
   wet  *= exp(-uDt / 7.5);
 
-  /* --- inject: breaking crests -------------------------------------------------- */
+  /* --- inject: breaking crests --------------------------------------------------
+   * brk is how much amplitude the depth-limited clip removed. That is nonzero over
+   * the whole surf zone, but a wave only *aerates* right at the crest as it pitches,
+   * so the source is raised to a power: the difference between a plausible breaker
+   * line and a bay filled with milk. */
   vec3 tx, tz; float brk, crest;
   vec3 S = oc_surface(p, h, 1.0, tx, tz, brk, crest);
-  foam += brk * uFoamGain * uDt * 5.2;
+  foam += pow(brk, 2.6) * uFoamGain * uDt * 2.6;
 
   /* --- inject: the swash sheet -------------------------------------------------- */
   float col = S.y - oc_seabedY(p);
-  float sheet = smoothstep(0.42, 0.02, col) * step(0.0, col);
-  foam += sheet * uDt * 1.35;
+  float sheet = smoothstep(0.20, 0.015, col) * step(0.0, col);
+  foam += sheet * uDt * 0.85;
   wet   = max(wet, step(0.005, col));
 
   /* --- inject: waves hitting rock ------------------------------------------------
@@ -459,12 +481,13 @@ void main(){
     vec4 lm = uLandmarks[i];
     if (lm.w < 0.5) continue;
     float d = length(p - lm.xy) - lm.z;
-    float ring = exp(-max(d, 0.0) * 0.55) * smoothstep(-3.5, 0.4, d);
-    float pulse = 0.42 + 0.58 * pow(clamp(crest / max(0.18, 0.18), 0.0, 1.0), 1.5);
-    foam += ring * pulse * uDt * 2.3 * smoothstep(0.15, 2.5, h);
+    if (d > 9.0 || d < -6.0) continue;
+    float ring = exp(-max(d, 0.0) * 0.72) * smoothstep(-3.0, 0.6, d);
+    float pulse = pow(clamp(crest * 2.6, 0.0, 1.0), 2.0);
+    foam += ring * (0.2 + 0.8 * pulse) * uDt * 1.5 * smoothstep(0.2, 2.5, h);
   }
 
-  oCol = vec4(clamp(foam, 0.0, 1.35), clamp(wet, 0.0, 1.0), 0.0, 1.0);
+  oCol = vec4(clamp(foam, 0.0, 1.1), clamp(wet, 0.0, 1.0), 0.0, 1.0);
 }
 `;
 
@@ -568,6 +591,8 @@ uniform sampler2D tDepth;
 uniform sampler2D tDetail;
 uniform sampler2D tFoam;
 uniform samplerCube tSky;
+uniform sampler2D tClouds;
+uniform float uUseClouds;
 uniform vec4 uFoamRect;
 
 uniform vec3 uSunDir;
@@ -596,7 +621,6 @@ uniform vec3  uAerialGroundColor;
 uniform float uAerialDensity;
 uniform float uAerialHeightFalloff;
 uniform float uAerialSunAmount;
-uniform float uAerialSunAmount2;
 uniform float uAerialStart;
 
 ${NOISE_GLSL}
@@ -655,8 +679,28 @@ vec3 caustics(vec2 p, float t, float depth){
 
 /* ------------------------------------------------------------ detail normal map */
 vec2 detailSlope(vec2 p, float tile, vec2 drift, float t){
-  vec3 s = texture(tDetail, (p + drift * t) / tile).xyz;
-  return (s.xy * 2.0 - 1.0);
+  vec3 n = texture(tDetail, (p + drift * t) / tile).xyz * 2.0 - 1.0;
+  return n.xy / max(n.z, 0.15);
+}
+
+/* ------------------------------------------------------------- fallback seabed */
+/** Only used where the depth pre-pass found no geometry, i.e. terrain has not landed
+ *  yet. Without it the water refracts the sky dome's grey ground hemisphere, which is
+ *  bright and neutral and turns every shallow into milk — it hides exactly the Fresnel
+ *  banding this shader exists to produce. Rippled sand at a plausible albedo. */
+vec3 oc_fallbackBottom(vec2 p, float depth){
+  float ripple = sin(p.y * 5.4 + fbm2(p * 0.22, 3) * 4.5) * 0.5 + 0.5;
+  ripple = mix(ripple, sin(p.x * 0.9 + p.y * 3.1) * 0.5 + 0.5, 0.35);
+  float cobble = 1.0 - worley2(p * 2.7).x;
+  float grain = fbm2(p * 6.5 + 19.0, 3) * 0.5 + 0.5;
+  float mottle = fbm2(p * 0.55 + 5.0, 4) * 0.5 + 0.5;
+  vec3 sand = vec3(0.455, 0.372, 0.252);
+  vec3 dark = vec3(0.155, 0.140, 0.108);
+  vec3 c = mix(sand, dark, smoothstep(0.62, 0.93, cobble) * 0.75 * smoothstep(2.2, 0.2, depth));
+  c *= 0.80 + 0.34 * ripple * smoothstep(4.5, 0.3, depth);
+  c *= 0.86 + 0.30 * mottle;
+  c *= 0.90 + 0.20 * grain;
+  return c;
 }
 
 /* ================================================================= main ======= */
@@ -734,7 +778,11 @@ void main(){
            * vec2(1.0 - smoothstep(0.95, 0.30, fp / 0.045));
 
   vec3 N = normalize(cross(tz, tx));
-  if (dot(N, V) < 0.0) N = -N;   // seen from beneath
+  // Only flip when we are genuinely looking at the underside. Flipping on
+  // dot(N,V) < 0 instead would erase the steep near-face of every shoaling crest —
+  // which is precisely where the Fresnel drops and the seabed shows through, i.e. the
+  // dark band that gives the reference surface its contrast.
+  if (!gl_FrontFacing) N = -N;
 
   /* filtered roughness: base + the slope variance we removed (Toksvig / LEAN) */
   float vX = varLost.x, vZ = varLost.y;
@@ -772,17 +820,22 @@ void main(){
    * radiance) when terrain has not landed, so the ocean still reads as water rather
    * than as a mirror over nothing. */
   float pathView;
+  float sunT = clamp(uSunDir.y, 0.15, 1.0);
   if (bgIsSky){
-    float sunT = clamp(uSunDir.y, 0.15, 1.0);
-    pathView = min(column / max(-((P - uCamPos) / max(viewDist,1e-4)).y, 0.045), 46.0);
-    vec3 sand = vec3(0.335, 0.281, 0.203) * (uSunColor * uSunIntensity * 0.115 * sunT + uSkyAmbient * 0.55);
-    refr = mix(refr, sand, smoothstep(0.02, 0.35, column));
+    // The view ray leaves the surface and travels down to the seabed; at grazing
+    // incidence that is a long way through the water, which is exactly why distant
+    // shallows still read as deep colour.
+    vec3 vd = (P - uCamPos) / max(viewDist, 1e-4);
+    pathView = min(column / max(-vd.y, 0.030), 55.0);
+    bgPos = P + vd * min(pathView, 55.0);
+    refr = oc_fallbackBottom(bgPos.xz, column)
+         * (uSunColor * uSunIntensity * 0.105 * sunT + uSkyAmbient * 0.62);
   } else {
-    pathView = min(max(distance(bgPos, P), column), 46.0);
+    pathView = min(max(distance(bgPos, P), column), 55.0);
   }
-  float sunPath = column / clamp(uSunDir.y, 0.2, 1.0);
+  float sunPath = min(column / clamp(uSunDir.y, 0.2, 1.0), 34.0);
   vec3 trans = exp(-uExtinction * pathView);
-  vec3 transSun = exp(-uExtinction * min(sunPath, 30.0));
+  vec3 transSun = exp(-uExtinction * sunPath);
 
   /* caustics ride on the seabed, so they belong on the refracted sample */
   if (uCausticAmount > 0.001 && column < 9.0){
@@ -791,8 +844,10 @@ void main(){
   }
 
   float lightIn = clamp(uSunDir.y, 0.0, 1.0);
-  vec3 inScatter = uScatterCol * (uSunColor * uSunIntensity * 0.055 * lightIn + uSkyAmbient * 0.9);
-  vec3 body = refr * trans * transSun * 0.55 + refr * trans * 0.45
+  vec3 inScatter = uScatterCol * (uSunColor * uSunIntensity * 0.048 * lightIn + uSkyAmbient * 0.75);
+  // Downwelling light is part sun (attenuated over the slant path to the bed) and part
+  // sky (which arrives from every direction, so it is attenuated far less).
+  vec3 body = refr * trans * mix(vec3(1.0), transSun, 0.62)
             + inScatter * (vec3(1.0) - trans);
 
   /* ---- reflection ---------------------------------------------------------------
@@ -803,19 +858,37 @@ void main(){
    * enormous amount of the water's measured detail. Off-screen rays fall back to the
    * cube. A short depth march on top of that picks up the sea stacks and the beach. */
   vec3 R = reflect(-V, N);
-  R.y = max(R.y, 0.004);
-  vec3 refl = texture(tSky, R).rgb;
+  /* A facet steeper than the view depression sends the reflected ray *below* the
+   * horizon, where it meets the sea again at grazing and comes back as a second,
+   * dimmer reflection over the deep-water colour. Clamping those rays up instead
+   * flattens the back of every crest into the same bright sky the front already
+   * shows, and costs most of the surface's contrast. */
+  float below = clamp(-R.y * 8.0, 0.0, 1.0);
+  vec3 Rs = vec3(R.x, abs(R.y) + 0.002, R.z);
+  vec3 refl = texture(tSky, Rs).rgb;
   {
-    vec4 ci = uViewProj * vec4(R, 0.0);
+    vec4 ci = uViewProj * vec4(Rs, 0.0);
     if (ci.w > 1e-6){
       vec2 uvi = (ci.xy / ci.w) * 0.5 + 0.5;
       vec2 e = min(uvi, 1.0 - uvi);
       float on = smoothstep(0.0, 0.035, min(e.x, e.y));
       if (on > 0.0 && texture(tDepth, clamp(uvi, vec2(0.002), vec2(0.998))).r >= 0.999995){
-        refl = mix(refl, texture(tOpaque, clamp(uvi, vec2(0.002), vec2(0.998))).rgb, on);
+        vec2 uc = clamp(uvi, vec2(0.002), vec2(0.998));
+        vec3 skyPix = texture(tOpaque, uc).rgb;
+        // clouds composites in post, so opaqueRT has no cumulus in it. Its screen
+        // buffer is indexed by view ray direction, and a reflected ray projected to
+        // infinity lands on exactly the pixel whose ray direction it shares — so this
+        // tap is the correct reflected cloud, not an approximation of one.
+        if (uUseClouds > 0.5){
+          vec4 cl = texture(tClouds, uc);
+          skyPix = cl.rgb + skyPix * cl.a;
+        }
+        refl = mix(refl, skyPix, on);
       }
     }
   }
+  vec3 deepBody = uScatterCol * (uSunColor * uSunIntensity * 0.048 * lightIn + uSkyAmbient * 0.75);
+  refl = mix(refl, mix(deepBody, refl * 0.72, 0.55), below);
   if (uUseSSR > 0.5 && viewDist < 165.0 && R.y < 0.32){
     float t = 0.30, dt = 0.30;
     vec3 hitC = vec3(0.0); float hit = 0.0;
@@ -895,25 +968,26 @@ void main(){
     vec2 fs = texture(tFoam, fuv).rg;
     env = fs.x; wet = fs.y;
   }
-  env = max(env, vBrk * 0.85);
+  env = max(env, pow(vBrk, 2.4) * 0.7);
 
   float foamCov = 0.0;
   vec3 foamCol = vec3(0.0);
-  if (env > 0.012){
+  if (env > 0.02){
     vec2 fp2 = vFlat + vec2(0.0, uTime * 1.35) + N.xz * 0.6;
-    float lace = worley2(fp2 * 1.35).x;
-    lace = 1.0 - lace;
-    float lv = smoothstep(0.90, 0.30, fp / 0.75);
-    float bub = 1.0 - worley2(fp2 * 5.4 + 13.0).x;
-    float bv = smoothstep(0.90, 0.30, fp / 0.20);
-    float tex = mix(0.62, lace, lv * 0.85) * mix(1.0, 0.55 + 0.9 * bub, bv * 0.6);
-    tex *= 0.72 + 0.55 * (fbm2(fp2 * 0.55 + 71.0, 3) * 0.5 + 0.5);
-    foamCov = clamp(smoothstep(0.34, 0.86, env * (0.55 + 1.15 * tex)), 0.0, 1.0);
+    float lace = 1.0 - worley2(fp2 * 1.15).x;
+    float lv = smoothstep(0.90, 0.30, fp / 0.85);
+    float bub = 1.0 - worley2(fp2 * 4.6 + 13.0).x;
+    float bv = smoothstep(0.90, 0.30, fp / 0.24);
+    float tex = mix(0.58, lace, lv * 0.92) * mix(1.0, 0.50 + 1.0 * bub, bv * 0.65);
+    tex *= 0.66 + 0.62 * (fbm2(fp2 * 0.60 + 71.0, 3) * 0.5 + 0.5);
+    // A hard threshold against a high-frequency field is what makes foam read as torn
+    // lace with holes in it rather than as a painted alpha wash.
+    foamCov = clamp(smoothstep(0.55, 1.02, env * (0.30 + 1.55 * tex)), 0.0, 1.0);
     // foam is a bright rough dielectric: mostly sky, a little sun, and it is never
     // pure white — the reference's brightest swash sits around 215, not 255
-    foamCol = (uSkyAmbient * 1.45 + uSunColor * uSunIntensity * 0.115 * clamp(uSunDir.y, 0.0, 1.0))
-            * vec3(0.94, 0.965, 1.0);
-    foamCol *= 0.72 + 0.42 * tex;
+    foamCol = (uSkyAmbient * 1.05 + uSunColor * uSunIntensity * 0.085 * clamp(uSunDir.y, 0.0, 1.0))
+            * vec3(0.95, 0.975, 1.0);
+    foamCol *= 0.60 + 0.55 * tex;
     foamCov *= uFoamAmount;
   }
   col = mix(col, foamCol, foamCov);
@@ -1289,6 +1363,8 @@ export function create(opts = {}) {
         tDetail: { value: detailRT.texture },
         tFoam: { value: foamA.texture },
         tSky: { value: null },
+        tClouds: { value: null },
+        uUseClouds: { value: 0 },
         uFoamRect: { value: new THREE.Vector4(DOM.x0, DOM.z0, DOM.x1 - DOM.x0, DOM.z1 - DOM.z0) },
 
         uSunDir: { value: new THREE.Vector3(0.5, 0.7, 0.5) },
@@ -1298,16 +1374,13 @@ export function create(opts = {}) {
         uHorizonColor: { value: new THREE.Color(0.35, 0.42, 0.52) },
         uUseSSR: { value: 1 },
 
-        uExtinction: { value: new THREE.Vector3(0.44, 0.076, 0.052) },
-        uScatterCol: { value: new THREE.Color(0.055, 0.335, 0.365) },
+        uExtinction: { value: new THREE.Vector3(0.365, 0.056, 0.040) },
+        uScatterCol: { value: new THREE.Color(0.048, 0.300, 0.345) },
         uFoamAmount: { value: 1.0 },
         uGlitter: { value: 1.0 },
         uCausticAmount: { value: 1.0 },
         uDetailAmount: { value: 1.0 },
       }, aer);
-      // materialCommon's block is aliased, but the water shader declares one extra
-      // name; keep it defined so the program links on every driver.
-      uniforms.uAerialSunAmount2 = { value: 0 };
 
       mat = new THREE.RawShaderMaterial({
         glslVersion: THREE.GLSL3,
@@ -1415,6 +1488,10 @@ export function create(opts = {}) {
         const crt = sky.getRenderTarget ? sky.getRenderTarget() : null;
         uniforms.tSky.value = crt ? crt.texture : null;
       }
+      const clouds = ctx.get('clouds');
+      const cbuf = clouds && clouds.buffer ? clouds.buffer : null;
+      uniforms.tClouds.value = cbuf;
+      uniforms.uUseClouds.value = cbuf ? 1 : 0;
 
       /* ---- foam simulation ----
        * Re-prime on a time discontinuity (the capture harness sets the clock before it

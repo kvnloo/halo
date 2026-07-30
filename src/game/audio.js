@@ -52,7 +52,7 @@ const SPEED_OF_SOUND = 343;
  * leaving ~20 dB of headroom under a close rifle shot. Loud ambience is the classic
  * way to make a mix feel small: everything else has to fight it.
  */
-const SURF_BASE = 0.145;
+const SURF_BASE = 0.082;
 const WIND_BASE = 0.16;
 const WATERLINE_Z = -6.5;          // docs/WORLD.md: mean waterline at Z = -6.5
 const CLIFF_Z = 62;                // cliff face
@@ -385,13 +385,14 @@ const VOICES = {
     car.connect(ring);
 
     const bp = bq(V, 'bandpass', 1700 * k, 1.15);
-    bp.frequency.setValueAtTime(2400 * k, t);
-    bp.frequency.exponentialRampToValueAtTime(900 * k, t + 0.14);
-    const ge = envGain(V, t, 0.78 * lvl, 0.0018, 0.033);
+    bp.frequency.setValueAtTime(2800 * k, t);
+    bp.frequency.exponentialRampToValueAtTime(1150 * k, t + 0.14);
+    const ge = envGain(V, t, 0.88 * lvl, 0.0018, 0.033);
     ring.connect(bp).connect(ge).connect(V.out);
 
-    // sizzle: the ionised-air hiss riding on top
-    burst(V, t, { f: 4200, q: 0.8, g: 0.28 * lvl, hp: 2600, lp: 9500,
+    // sizzle: the ionised-air hiss riding on top. This is what keeps plasma brighter
+    // and thinner than the rifle — measured centroid must land above it, not below.
+    burst(V, t, { f: 5200, q: 0.7, g: 0.44 * lvl, hp: 2200, lp: 11000,
                   atk: 0.0012, tau: 0.020, to: V.out });
     // zap: a fast descending edge that gives it its "pew"
     const z = osc(V, 'sawtooth', 3100 * k, t, 0.10);
@@ -424,7 +425,7 @@ const VOICES = {
     const j = () => R.sym(0.012);
 
     // mag release catch
-    burst(V, t + 0.00 + j(), { f: 2750, q: 3.0, g: 0.30 * lvl, atk: 0.0006, tau: 0.006, hp: 800, to: V.out });
+    burst(V, t + 0.00 + j(), { f: 2750, q: 2.2, g: 0.46 * lvl, atk: 0.0006, tau: 0.006, hp: 800, lp: 9000, to: V.out });
     // magazine breaks free of the well
     burst(V, t + 0.16 + j(), { type: 'lowpass', f: 620, q: 2.2, g: 0.34 * lvl, atk: 0.001, tau: 0.014, hp: 110, to: V.out });
     body(V, t + 0.16, { f: 138, f2: 84, sweep: 0.03, g: 0.20 * lvl, atk: 0.002, tau: 0.014, to: V.out });
@@ -443,7 +444,7 @@ const VOICES = {
     burst(V, t + 1.85 + j(), { f: 1750, f2: 2450, sweep: 0.08, q: 3.2, g: 0.17 * lvl,
                                atk: 0.010, tau: 0.020, hp: 600, lp: 7000, to: V.out });
     // bolt released
-    burst(V, t + 2.13 + j(), { f: 3500, q: 2.6, g: 0.42 * lvl, atk: 0.0005, tau: 0.0075, hp: 1200, lp: 9000, to: V.out });
+    burst(V, t + 2.13 + j(), { f: 3500, q: 2.6, g: 0.54 * lvl, atk: 0.0005, tau: 0.0075, hp: 1200, lp: 9000, to: V.out });
     burst(V, t + 2.134, { f: 2360, q: 17, g: 0.13 * lvl, atk: 0.0005, tau: 0.019, to: V.out });
     body(V, t + 2.132, { f: 210, f2: 110, sweep: 0.025, g: 0.14 * lvl, atk: 0.0012, tau: 0.011, to: V.out });
 
@@ -459,7 +460,7 @@ const VOICES = {
     // genuinely nothing above 2 kHz.
     burst(V, t, { type: 'lowpass', f: 900, q: 1.4, g: 0.52 * lvl, atk: 0.0012, tau: 0.014, hp: 120, lp: 1900, to: V.out });
     body(V, t, { f: 120, f2: 62, sweep: 0.03, g: 0.18 * lvl, atk: 0.002, tau: 0.014, to: V.out });
-    burst(V, t + 0.012, { f: 2800, q: 0.8, g: 0.055 * lvl, hp: 1600, lp: 5000, atk: 0.006, tau: 0.030, to: V.out });
+    burst(V, t + 0.012, { f: 2600, q: 0.8, g: 0.040 * lvl, hp: 1600, lp: 3800, atk: 0.006, tau: 0.030, to: V.out });
     return 0.30;
   },
 
@@ -503,8 +504,8 @@ const VOICES = {
     const bg = envGain(V, t, 0.34 * lvl, 0.002, 0.016);
     b.connect(bg).connect(V.out);
     // the splash
-    burst(V, t, { type: 'bandpass', f: 1400, f2: 3400, sweep: 0.09, q: 0.8, g: 0.40 * lvl,
-                  lp: 6500, atk: 0.003, tau: 0.045, to: V.out });
+    burst(V, t, { type: 'bandpass', f: 1400, f2: 2600, sweep: 0.09, q: 0.8, g: 0.42 * lvl,
+                  lp: 5000, atk: 0.003, tau: 0.045, to: V.out });
     return 0.45;
   },
 
@@ -551,13 +552,13 @@ const VOICES = {
     const t = V.t, R = V.rnd;
     const lvl = (o.volume ?? 1) * (o.running ? 1.35 : 1) * (1 + R.sym(0.12));
     const k = 1 + R.sym(0.09);
-    burst(V, t, { f: 640 * k, q: 5.5, g: 0.54 * lvl, atk: 0.0016, tau: 0.0125, hp: 150, to: V.out });
-    burst(V, t + 0.002, { type: 'lowpass', f: 1900 * k, q: 1.0, g: 0.28 * lvl,
+    burst(V, t, { f: 640 * k, q: 5.5, g: 0.72 * lvl, atk: 0.0016, tau: 0.0125, hp: 150, to: V.out });
+    burst(V, t + 0.002, { type: 'lowpass', f: 1900 * k, q: 1.0, g: 0.36 * lvl,
                           atk: 0.0022, tau: 0.011, hp: 200, lp: 3200, to: V.out });
-    body(V, t, { f: 132 * k, f2: 70, sweep: 0.03, g: 0.18 * lvl, atk: 0.0025, tau: 0.014, to: V.out });
+    body(V, t, { f: 132 * k, f2: 70, sweep: 0.03, g: 0.22 * lvl, atk: 0.0025, tau: 0.014, to: V.out });
     // splash: brighter than the slap and decaying a good deal slower, but banded —
-    // water spray is 3-7 kHz, not everything above 3 kHz
-    burst(V, t + 0.008, { f: 3600, q: 0.85, g: 0.16 * lvl, hp: 2400, lp: 7000,
+    // water spray is 2-6 kHz, not everything above 3 kHz
+    burst(V, t + 0.008, { f: 3000, q: 0.85, g: 0.075 * lvl, hp: 2000, lp: 5000,
                           atk: 0.006, tau: 0.032, to: V.out });
     return 0.36;
   },
@@ -677,8 +678,8 @@ const VOICES = {
   /** Hit confirmed on flesh — a dry, close, unmistakable tick. */
   hit(V, o) {
     const t = V.t;
-    burst(V, t, { f: 2500, q: 3.6, g: 0.34 * (o.volume ?? 1), atk: 0.0006, tau: 0.0055, hp: 1100, to: V.out });
-    body(V, t, { f: 900, f2: 620, sweep: 0.012, g: 0.11 * (o.volume ?? 1), atk: 0.001, tau: 0.008, to: V.out });
+    burst(V, t, { f: 2500, q: 3.0, g: 0.50 * (o.volume ?? 1), atk: 0.0006, tau: 0.0055, hp: 1100, lp: 8000, to: V.out });
+    body(V, t, { f: 900, f2: 620, sweep: 0.012, g: 0.16 * (o.volume ?? 1), atk: 0.001, tau: 0.008, to: V.out });
     return 0.10;
   },
 
@@ -768,9 +769,9 @@ const VOICES = {
   /** Sea spray / a wave breaking close by — used by particles if it wants it. */
   splash(V, o) {
     const t = V.t, lvl = o.volume ?? 1;
-    burst(V, t, { type: 'bandpass', f: 700, f2: 2600, sweep: 0.22, q: 0.6, g: 0.44 * lvl,
-                  lp: 6000, atk: 0.020, tau: 0.075, pink: true, to: V.out });
-    burst(V, t + 0.03, { f: 4000, q: 0.9, g: 0.13 * lvl, hp: 2600, lp: 8000, atk: 0.05, tau: 0.11, to: V.out });
+    burst(V, t, { type: 'bandpass', f: 700, f2: 2400, sweep: 0.22, q: 0.6, g: 0.62 * lvl,
+                  lp: 5000, atk: 0.020, tau: 0.075, pink: true, to: V.out });
+    burst(V, t + 0.03, { f: 3600, q: 0.9, g: 0.08 * lvl, hp: 2400, lp: 6500, atk: 0.05, tau: 0.11, to: V.out });
     V.send.gain.value = (V.send.gain.value || 0) + 0.18;
     return 1.0;
   },
@@ -869,13 +870,11 @@ function createGraph(ac, rand, opts = {}) {
       lp.Q.value = 0.5;
       tail = tail.connect(lp); nodes.push(lp);
     }
-    // propagation delay — a shot 200 m away arrives 0.58 s late
-    if (dist > 12) {
-      const d = ac.createDelay(4);
-      d.delayTime.value = Math.min(3.5, dist / SPEED_OF_SOUND);
-      tail = tail.connect(d); nodes.push(d);
-    }
-
+    // Propagation delay is applied by scheduling the voice later (see spawn), not by
+    // a DelayNode. Measured: a DelayNode whose delayTime exceeds ~0.63 s stops
+    // producing output once its upstream source finishes — Chrome stops pulling it —
+    // so every cue past ~217 m was silently dropped. Scheduling is exact, free, and
+    // has no such edge.
     let post;
     if (o.position && o.spatial !== false) {
       const p = ac.createPanner();
@@ -919,12 +918,14 @@ function createGraph(ac, rand, opts = {}) {
     const fn = VOICES[id];
     if (!fn) return null;
     const chain = makeChain(o, opts.listener ? opts.listener() : null);
-    const V = { ac, out: chain.input, send: chain.send, buf, rnd: rndOverride || rnd, t: when };
+    // Sound travels at 343 m/s: a shot 200 m away is heard 0.58 s after it is fired.
+    const t0 = when + (chain.dist > 12 ? Math.min(3.0, chain.dist / SPEED_OF_SOUND) : 0);
+    const V = { ac, out: chain.input, send: chain.send, buf, rnd: rndOverride || rnd, t: t0 };
     let dur = 1;
     try { dur = fn(V, o) || 1; } catch (e) { /* never let one bad cue kill the frame */ }
     const handle = {
       id,
-      endsAt: when + dur + 2.2,
+      endsAt: t0 + dur + 2.2,
       _stopped: false,
       stop(fade = 0.03) {
         if (this._stopped) return;
@@ -1011,9 +1012,10 @@ function createGraph(ac, rand, opts = {}) {
       // low buffet against the body / mic
       const s2 = ac.createBufferSource(); s2.buffer = buf.pink; s2.loop = true;
       s2.playbackRate.value = 0.5;
+      const dcb2 = ac.createBiquadFilter(); dcb2.type = 'highpass'; dcb2.frequency.value = 24; dcb2.Q.value = 0.7;
       const lp2 = ac.createBiquadFilter(); lp2.type = 'lowpass'; lp2.frequency.value = 120; lp2.Q.value = 0.9;
       const g2 = ac.createGain(); g2.gain.value = 0.55;
-      s2.connect(lp2).connect(g2).connect(wind.out);
+      s2.connect(dcb2).connect(lp2).connect(g2).connect(wind.out);
       s2.start(when, 1.7);
 
       // whistle over rock and rail edges — only present in real gusts
@@ -1030,7 +1032,7 @@ function createGraph(ac, rand, opts = {}) {
 
       wind.bp = bp; wind.g = g; wind.lo = lo; wind.g2 = g2;
       wind.w1 = w1; wind.w2 = w2; wind.g3 = g3;
-      ambNodes.push(s, bp, lo, g, pan, s2, lp2, g2, s3, w1, w2, g3, pan3);
+      ambNodes.push(s, bp, lo, g, pan, s2, dcb2, lp2, g2, s3, w1, w2, g3, pan3);
     }
 
     const wildlife = { out: ac.createGain() };
@@ -1381,9 +1383,11 @@ export function create(opts = {}) {
         for (let i = 0; i < A.surf.halves.length; i++) {
           const h = A.surf.halves[i];
           const ph = i ? 0.85 : 1.0;                // the two halves are not in step
-          param(h.lg.gain, (0.62 + 2.05 * boom) * ph, 0.22);
+          // A breaking wave must *darken* the bed, not just get louder: the rumble
+          // scales hard with boom while the hiss tracks only the swash that follows.
+          param(h.lg.gain, (1.55 + 4.40 * boom) * ph, 0.22);
           param(h.mg.gain, (0.30 + 0.75 * (boom * 0.5 + hiss * 0.5)) * ph, 0.22);
-          param(h.hg.gain, (0.07 + 0.34 * hiss + 0.13 * boom) * ph, 0.30);
+          param(h.hg.gain, (0.055 + 0.30 * hiss) * ph, 0.30);
           param(h.lp.frequency, 190 + 120 * boom, 0.3);
         }
 
@@ -1521,9 +1525,9 @@ export function create(opts = {}) {
         A.out.gain.value = 1;
         A.surf.out.gain.value = o.surf ?? SURF_BASE;
         for (const h of A.surf.halves) {
-          h.lg.gain.value = 0.62 + 2.05 * boom;
+          h.lg.gain.value = 1.55 + 4.40 * boom;
           h.mg.gain.value = 0.30 + 0.75 * (boom * 0.5 + hiss * 0.5);
-          h.hg.gain.value = 0.07 + 0.34 * hiss + 0.13 * boom;
+          h.hg.gain.value = 0.055 + 0.30 * hiss;
         }
         A.wind.out.gain.value = o.wind ?? WIND_BASE;
         A.wind.g3.gain.value = 0.03;
@@ -1539,6 +1543,10 @@ export function create(opts = {}) {
         g.spawn(id, o.at ?? 0.05, o.opts || {}, new Rand((seed + 991) >>> 0));
       }
       const buf = await oac.startRendering();
+      // Tear the offline graph down explicitly. Without this, successive renders
+      // progressively lost their reverb tail and then went fully silent — three
+      // convolvers per graph pile up and nothing releases them.
+      g.dispose();
       return buf;
     },
   };

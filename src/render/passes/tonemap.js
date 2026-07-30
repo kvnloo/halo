@@ -75,7 +75,15 @@ import { Pass, fsMaterial, FullScreenQuad, makeRT } from '../RenderPipeline.js';
  *   envIrradiance   number    manual ambient term for a PMREM probe that cannot report
  *                             its own L0 (see keyedExposure)
  *
- * Cost: one full-screen triangle, ~20 ALU + 1 tap. 0.05 ms at 1920x1080 on a 3080 Ti.
+ * Cost: one full-screen triangle, ~20 ALU + 1 tap. **0.18 ms** at 1920x1080 on a
+ * 3080 Ti - measured, not estimated: best of three runs of 200 frames with the pass
+ * toggled off and back on, `diag_sky`, ANGLE/Vulkan. (The previous doc claimed 0.05 ms,
+ * which was an ALU estimate that ignored the 8.3 MB RGBA16F read and 8.3 MB write; at
+ * this resolution a full-screen pass is bandwidth-bound and the shader is nearly free.)
+ * Disabling tonemap, grade and dither together saves 0.29 ms rather than the 0.50 ms
+ * their individual deltas sum to, because removing one pass from the chain removes a
+ * ping-pong round-trip that the remaining ones then pay instead.
+ *
  * The probe adds an 8x8 reduce plus a 518 KB synchronous readback and is off by default.
  */
 
@@ -138,8 +146,16 @@ const MODES = { agx: 0, aces: 1, reinhard: 2, none: 3 };
  * Exposure compensation per tonemapper, so that switching one out is an A/B of the
  * *curve* and not an accidental exposure change. All three are normalised to where
  * AgX puts scene-linear 0.18, which is sRGB 128. Solved numerically against `tonemapJS`.
+ *
+ * Exported because `bloom` needs it: bloom's threshold is specified in display codes and
+ * has to be converted back to exposed-linear through the same gain this pass applies, so
+ * a bloom threshold does not silently move when the tonemapper is switched. It used to
+ * carry a hand-copied duplicate of this table with a comment saying it mirrored this
+ * one - a mirror maintained by comment, in a file whose GLSL matrices are all generated
+ * from JS constants precisely so that nothing has to be kept in sync by hand. Import it,
+ * do not copy it.
  */
-const MODE_GAIN = { agx: 1.0, aces: 1.6757, reinhard: 1.5031, none: 1.0 };
+export const MODE_GAIN = { agx: 1.0, aces: 1.6757, reinhard: 1.5031, none: 1.0 };
 
 /* -------------------------------------------------------------- JS reference */
 /* These mirror the GLSL exactly and exist so the chain can be inspected offline

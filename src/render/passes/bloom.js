@@ -41,12 +41,7 @@ import { Pass, fsMaterial, makeRT, FullScreenQuad } from '../RenderPipeline.js';
  * frames in, tonemap is absent and the pass says so instead of silently becoming a
  * different effect.
  *
- * ## 2. The pyramid has to be able to reach
- *
- * Veiling glare is a ~1/r² point-spread function that spans a large fraction of the
- * frame. Six levels with a 1-texel tent bottoms out at a 30×17 mip and a cumulative
- * support of ~126 px at 1080p: a tight Gaussian bud, not a veil. Eight levels with a
- * 2-texel tent reach ~1000 px.
+ * ## 2. The pyramid reaches exactly as far as it can pay for
  *
  * Reach is necessary but not sufficient — the *weights* decide the profile. A single
  * `mix` constant k gives near-geometric octave weights (k=0.55 → 0.45, 0.25, 0.14 …),
@@ -58,24 +53,74 @@ import { Pass, fsMaterial, makeRT, FullScreenQuad } from '../RenderPipeline.js';
  * energy"). A 2-D kernel of scale s has peak density ∝ 1/s², and s doubles per octave,
  * so *equal* octave weights are exactly a 1/r² profile; `falloff` tilts around that.
  *
+ * The previous build ran eight levels at `falloff 0.20`, i.e. octave weights
+ * [.161 .141 .130 .122 .117 .113 .109 .107]. The four widest carried 44.6 % of the
+ * energy — but each over a 4–16× larger area, so their *surface brightness* was
+ * 1/4^i of the first octave's: measured, the halo was within 2.7 code values of the
+ * sky background by r = 200 and within 1.5 by r = 250, i.e. two of those mips were
+ * invisible and three downsample/upsample pairs were being paid for nothing.
+ * So: six levels (cumulative support ≈ 250 px at 1080p, which is where the profile
+ * actually dies) and `falloff 0.75`, which puts a real contrast step between octaves
+ * instead of a monotone featureless ramp. The reference clip agrees — kf_00000 /
+ * kf_00450 / kf_01500 have a short-range, high-contrast glare signature: small hot
+ * cores with a few pixels of bleed, p99 214–226, highlight_frac 0.011. A wide veil
+ * would move `lum_mean` up and `lum_std` down, which is the wrong direction on both.
+ *
+ * What this pass is NOT responsible for: the *sun disc*. Glare is the response to a
+ * bright object; it is not the object. A ~0.5° disc (≈ 9 px at 1080p / 70° hfov) with
+ * a hard edge at 10^3–10^4 exposed-linear has to come out of `sky`, and if it does not
+ * exist then no amount of pyramid produces something that reads as brighter than white.
+ *
  * ## 3. Karis average on the first downsample only
  *
  * Each 2×2 group is weighted by 1/(1+luma) before combining, so one blown-out
  * sub-pixel highlight cannot dominate a 13-tap footprint — sun glitter on the swash
  * otherwise produces crawling fireflies that TAA smears into streaks. The firefly
- * clamp is a multiple of the threshold (`bloomClamp`, 60×) and must stay well clear of
- * the sun: at 140× a 1.12 threshold it was clipping the sun disc to 229 and stealing a
- * quarter of its own halo.
+ * clamp (`bloomClamp`) is in *exposed-linear* units and is deliberately independent of
+ * the knee: while it was expressed as a multiple of the threshold it was the thing
+ * actually setting the halo strength, so *lowering* the threshold made the glare
+ * weaker. The knee decides what glares; the clamp decides how far one firefly may push
+ * it.
  *
- * ## 4. Chromatic, slightly anamorphic
+ * ## 4. Chromatic and anamorphic — for real this time
  *
  * A perfectly neutral radially symmetric Gaussian reads as a filter. Real glare is
  * warm in the core and cool in the skirt (dispersion + coating), and a rectangular
- * aperture stretches it. Each upsample step carries its own tint ratio, so octave j
- * ends up tinted by `∏_{m<j} t_m` — a smooth core→tail chromatic ramp, each step
- * normalised to luma 1 so the octave *energies* are untouched. The stretch is graded
- * across the widest four steps rather than applied to one step carrying 5% of the
- * energy, where it was invisible.
+ * aperture stretches it. Both of those were nominally implemented before and both
+ * measured as *exactly zero* on the frame, for the same underlying reason: they were
+ * applied where they could not compound.
+ *
+ * **Anamorphic.** It used to scale the offsets of the 9-tap tent on the last four
+ * upsample steps — i.e. after every downsample had already made the kernel perfectly
+ * round, it stretched the final 2-texel tent by 25 %. Measured half-above-sky radii
+ * were 37 px horizontal / 30 px vertical, and essentially all of that 1.23 ratio was
+ * the sky's own vertical luminance gradient. The stretch now lives in the *downsample*
+ * chain (`uAniso` on `uT.x`), so octave j is built from j stretched steps and ends up
+ * with a horizontal scale of `aniso^j`: 1.25 becomes 3.1× by the widest octave. That
+ * is a kernel that is genuinely elliptical at every radius the eye can see, and it is
+ * also the right physical model — a slit aperture stretches the PSF at every scale.
+ *
+ * **Chroma.** The ramp used to luma-normalise *each octave* to 1, which is precisely
+ * the operation that throws the colour separation away: [1,.95,.86] and [.88,.92,1.0]
+ * came out as [1.048,.996,.901] and [.959,1.003,1.090], 9 % in R and 17 % in B across
+ * the whole pyramid, riding on a background quantised to ~1 code value per 12 rows.
+ * Now the per-octave tints keep their raw spread and exactly one normalisation is done
+ * — on the *composite*, `Σ_i w_i · luma(T_i) = 1` — so total glare energy is still
+ * conserved while the core→skirt R/B ratio moves by 1.9×.
+ *
+ * ## 5. Dither, because this pass makes the largest smooth ramp in the frame
+ *
+ * A 400 px-wide, 150-code-value gradient quantised to 8 bits is textbook Mach banding:
+ * measured, a sky column held 36 unique blue values over 730 rows with flat runs up to
+ * 49 rows, against 56/250 and a mean run of 2.1 in the reference. The reference carries
+ * ~1 LSB of dither everywhere (high-pass σ 1.22 vs 0.22 here). That dither belongs in
+ * `grain`, keyed off `writesBackbuffer` — but `grain` is currently a pass-through stub,
+ * so the ramp reaches the 8-bit backbuffer naked. `bloomDither` adds an interleaved-
+ * gradient-noise term here instead. It is *multiplicative*: this pass outputs linear
+ * HDR and the display transform is logarithmic over the working range, so a constant
+ * relative perturbation is a constant perturbation in code values regardless of
+ * exposure or of which tonemapper is selected. Set `bloomDither = 0` the moment
+ * `grain` starts dithering, or it will be dithered twice.
  *
  * ctx.config knobs (all live):
  *   bloomIntensity 0.50      fraction of above-knee energy redistributed
@@ -83,17 +128,18 @@ import { Pass, fsMaterial, makeRT, FullScreenQuad } from '../RenderPipeline.js';
  *   bloomThresholdDisplay    optional explicit exposed-linear knee (overrides the solve)
  *   bloomKnee 0.55           soft-knee width, as a fraction of the threshold
  *   bloomRadius 2.0          tent radius in source texels
- *   bloomFalloff 0.20        octave weight exponent; 0 = flat = exactly 1/r²
- *   bloomAnamorphic 1.25     horizontal stretch on the widest steps
+ *   bloomFalloff 0.75        octave weight exponent; 0 = flat = exactly 1/r²
+ *   bloomAnamorphic 1.25     horizontal stretch PER OCTAVE; compounds to aniso^(n-1)
  *   bloomChroma 1.0          strength of the core→tail tint ramp
  *   bloomClamp 500           firefly ceiling on the glare source, exposed-linear
  *   bloomTint [1,1,1]        global tint on top of everything
+ *   bloomDither 0.013        ±½ LSB interleaved-gradient dither, relative units
  *
- * Cost at 1920×1080 on a 3080 Ti: 1 prefilter + 7 downsamples + 7 upsamples +
- * 1 composite ≈ 0.42 ms (the extra two levels are 1/1024 of a frame each).
+ * Cost at 1920×1080 on a 3080 Ti: 1 prefilter + 5 downsamples + 5 upsamples +
+ * 1 composite ≈ 0.30 ms.
  */
 
-const LEVELS = 8;
+const LEVELS = 6;
 
 /* --------------------------------------------------------------- display maths */
 /* A local, neutral-axis-only mirror of `tonemap`'s transfer functions. It exists so
@@ -171,24 +217,36 @@ function blendConstants(w) {
   return k;
 }
 
-const CORE_TINT = [1.00, 0.95, 0.86];   // octave 0: warm
-const TAIL_TINT = [0.88, 0.92, 1.00];   // octave LEVELS-1: cool
+const CORE_TINT = [1.10, 1.00, 0.80];   // octave 0: warm      R/B 1.375
+const TAIL_TINT = [0.82, 0.94, 1.16];   // octave LEVELS-1: cool  R/B 0.707
 const lum709 = (c) => 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
 
-/** Cumulative tint per octave, luma-normalised so only hue moves, then differenced
- *  into the per-step ratios the upsample loop actually applies. */
-function tintRamp(n, chroma) {
+/**
+ * Cumulative tint per octave, differenced into the per-step ratios the upsample loop
+ * applies. Content originating at octave m passes through steps m-1 … 0 and so picks
+ * up ∏ (T[k+1]/T[k]) = T[m]/T[0]; the composite then multiplies by `base`, leaving
+ * octave m tinted by exactly T[m].
+ *
+ * There is exactly ONE luma normalisation and it is on the composite, not per octave.
+ * Normalising each T[i] to luma 1 (which is what this used to do) is algebraically the
+ * same as deleting most of the ramp: it forces every octave to the same brightness and
+ * only the residual hue difference survives, which measured as 9 % in R across the
+ * whole pyramid. Instead `base` is scaled by 1 / Σ w_i·luma(T_i), so the *total* glare
+ * energy is unchanged — which is the quantity `intensity` is defined against — while
+ * the individual octaves keep their full ±20 % spread.
+ */
+function tintRamp(n, chroma, w) {
   const T = [];
   for (let i = 0; i < n; i++) {
     const f = n > 1 ? i / (n - 1) : 0;
-    let c = [0, 1, 2].map((j) => CORE_TINT[j] + (TAIL_TINT[j] - CORE_TINT[j]) * f);
-    const l = Math.max(lum709(c), 1e-4);
-    c = c.map((v) => 1 + (v / l - 1) * chroma);
-    T.push(c);
+    T.push([0, 1, 2].map((j) => 1 + (CORE_TINT[j] + (TAIL_TINT[j] - CORE_TINT[j]) * f - 1) * chroma));
   }
+  let energy = 0;
+  for (let i = 0; i < n; i++) energy += w[i] * lum709(T[i]);
+  const g = 1 / Math.max(energy, 1e-4);
   const step = [];
   for (let i = 0; i < n - 1; i++) step.push([0, 1, 2].map((j) => T[i + 1][j] / Math.max(T[i][j], 1e-4)));
-  return { base: T[0], step };
+  return { base: T[0].map((v) => v * g), step };
 }
 
 /* ------------------------------------------------------------------- shaders */
@@ -254,12 +312,17 @@ void main(){
 }
 `;
 
+/* Same kernel, one octave down. uAniso widens the horizontal footprint: because every
+   octave is built by composing all the downsamples below it, octave j comes out with a
+   horizontal scale of aniso^j. That is what makes a 1.25 knob visible — applying it to
+   the final tent only (as before) stretched 2 texels of an already-round kernel. */
 const DOWNSAMPLE_FRAG = HEAD + /* glsl */`
 uniform sampler2D tSrc;
 uniform vec2 uT;
+uniform float uAniso;
 out vec4 oCol;
 
-vec3 S(vec2 o){ return bSan(texture(tSrc, vUv + o * uT).rgb); }
+vec3 S(vec2 o){ return bSan(texture(tSrc, vUv + o * vec2(uAniso, 1.0) * uT).rgb); }
 
 void main(){
   vec3 a = S(vec2(-2.0, 2.0)), b = S(vec2(0.0, 2.0)), c = S(vec2(2.0, 2.0));
@@ -303,12 +366,24 @@ const COMPOSITE_FRAG = HEAD + /* glsl */`
 uniform sampler2D tSrc;
 uniform sampler2D tBloom;
 uniform vec3  uTint;
-uniform float uIntensity;
+uniform float uIntensity, uDither;
 out vec4 oCol;
+
+/* Jimenez's interleaved gradient noise: uniform on [0,1), decorrelated between
+   neighbours, no texture, and identical every frame — a *fixed* pattern is what breaks
+   a quantisation contour without adding anything that looks like temporal noise. */
+float ign(vec2 p){ return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }
+
 void main(){
   vec3 s = bGuard(texture(tSrc, vUv).rgb);
   vec3 b = bSan(texture(tBloom, vUv).rgb);
-  oCol = vec4(s + b * uTint * uIntensity, 1.0);
+  vec3 o = s + b * uTint * uIntensity;
+  // Multiplicative, so it survives the display transform as a constant number of code
+  // values: every tonemapper in tonemap.js is ~logarithmic over the working range, so
+  // d(code)/d(ln L) is roughly constant and a relative dither is an absolute one after
+  // the curve. See note 5 - this is a stopgap for grain being a pass-through stub.
+  o *= 1.0 + (ign(gl_FragCoord.xy) - 0.5) * uDither;
+  oCol = vec4(o, 1.0);
 }
 `;
 
@@ -326,10 +401,11 @@ export function create(opts = {}) {
     thresholdDisplay: null,   // explicit exposed-linear override; null = solve it
     knee: 0.55,
     radius: 2.0,
-    falloff: 0.20,
+    falloff: 0.75,
     anamorphic: 1.25,
     chroma: 1.0,
     clamp: 500.0,
+    dither: 0.013,
   }, opts.bloom || {});
 
   const tint = new THREE.Vector3(1, 1, 1);
@@ -340,7 +416,7 @@ export function create(opts = {}) {
   let whitePoint = 1;
   let weightKey = '';
   let kStep = [];
-  let ramp = tintRamp(LEVELS, 1.0);
+  let ramp = tintRamp(LEVELS, cfg.chroma, octaveWeights(LEVELS, cfg.falloff));
   let unresolved = 0;
 
   p.init = () => {
@@ -349,7 +425,9 @@ export function create(opts = {}) {
       uT: { value: new THREE.Vector2() },
       uThresh: { value: 1 }, uKnee: { value: cfg.knee }, uClamp: { value: cfg.clamp },
     });
-    mDown = fsMaterial(DOWNSAMPLE_FRAG, { tSrc: { value: null }, uT: { value: new THREE.Vector2() } });
+    mDown = fsMaterial(DOWNSAMPLE_FRAG, {
+      tSrc: { value: null }, uT: { value: new THREE.Vector2() }, uAniso: { value: 1.0 },
+    });
     mUp = fsMaterial(UPSAMPLE_FRAG, {
       tSrc: { value: null }, uT: { value: new THREE.Vector2() },
       uTint: { value: stepTint },
@@ -358,6 +436,7 @@ export function create(opts = {}) {
     mComp = fsMaterial(COMPOSITE_FRAG, {
       tSrc: { value: null }, tBloom: { value: null },
       uTint: { value: tint }, uIntensity: { value: cfg.intensity },
+      uDither: { value: cfg.dither },
     });
 
     for (const m of [mPre, mDown, mComp]) m.blending = THREE.NoBlending;
@@ -426,11 +505,19 @@ export function create(opts = {}) {
     // something to paper over with a second, differently calibrated threshold, which is
     // what the previous `(uExposure > 0) ? … : …` branch did. Frame 0 renders without
     // glare; if it is still unresolved a few frames in, tonemap is missing — say so.
+    //
+    // What this must NOT do is throw. `RenderPipeline.render()` has no try/catch around
+    // the pass loop (grep it: zero occurrences of `try {`), so an exception raised here
+    // aborts tonemap, grade, sharpen, grain AND the final backbuffer present, leaves a
+    // render target bound, and skips `frameIndex++` — which desyncs every temporal pass
+    // in the engine. A configuration problem has to degrade to "a frame without glare",
+    // not to a black screen and a corrupted pipeline. `p.enabled = false` is already the
+    // correct and sufficient mechanism.
     if (typeof c.exposure !== 'number' || !(c.exposure > 0)) {
       if (++unresolved > 4) {
+        console.error('[bloom] ctx.config.exposure unresolved after ' + unresolved
+          + ' frames — the `tonemap` pass must publish it. bloom disabled.');
         p.enabled = false;
-        throw new Error('[bloom] ctx.config.exposure is still not a positive number after '
-          + unresolved + ' frames — the `tonemap` pass must publish it. bloom disabled.');
       }
       pipe.blit(pipe.read.texture, out);
       return;
@@ -447,6 +534,7 @@ export function create(opts = {}) {
       mComp.uniforms.tSrc.value = pipe.read.texture;
       mComp.uniforms.tBloom.value = mips[0].texture;
       mComp.uniforms.uIntensity.value = 0.0;
+      mComp.uniforms.uDither.value = Math.max(c.bloomDither ?? cfg.dither, 0);
       _draw(r, mComp, out);
       return;
     }
@@ -457,8 +545,9 @@ export function create(opts = {}) {
     const wKey = `${falloff}|${chroma}`;
     if (wKey !== weightKey) {
       weightKey = wKey;
-      kStep = blendConstants(octaveWeights(LEVELS, falloff));
-      ramp = tintRamp(LEVELS, chroma);
+      const w = octaveWeights(LEVELS, falloff);
+      kStep = blendConstants(w);
+      ramp = tintRamp(LEVELS, chroma, w);
     }
 
     // ---------------------------------------------------------- 1. prefilter
@@ -476,6 +565,11 @@ export function create(opts = {}) {
     _draw(r, mPre, mips[0]);
 
     // ------------------------------------------------------ 2. downsample chain
+    // Every level is stretched by the same factor, so octave j accumulates aniso^j.
+    // This is where the anamorphic lives; doing it on the tent instead is why the knob
+    // used to measure as zero eccentricity.
+    const aniso = THREE.MathUtils.clamp(c.bloomAnamorphic ?? cfg.anamorphic, 0.5, 2.0);
+    mDown.uniforms.uAniso.value = aniso;
     for (let i = 1; i < LEVELS; i++) {
       const src = mips[i - 1];
       mDown.uniforms.tSrc.value = src.texture;
@@ -484,18 +578,16 @@ export function create(opts = {}) {
     }
 
     // -------------------------------------------------------- 3. upsample chain
+    // The tent carries the same per-step stretch so it reconstructs the elliptical
+    // footprint the downsample built rather than rounding it back off.
     const radius = c.bloomRadius ?? cfg.radius;
-    const aniso = c.bloomAnamorphic ?? cfg.anamorphic;
     mUp.uniforms.uRadius.value = radius;
+    mUp.uniforms.uAniso.value = aniso;
     for (let i = LEVELS - 2; i >= 0; i--) {
       const src = mips[i + 1];
       mUp.uniforms.tSrc.value = src.texture;
       mUp.uniforms.uT.value.set(1 / src.width, 1 / src.height);
       mUp.uniforms.uK.value = kStep[i];
-      // Graded stretch over the widest four steps. Applying it to one step that carries
-      // 5% of the energy, as before, made `bloomAnamorphic` a knob that did nothing.
-      const f = THREE.MathUtils.clamp((i - (LEVELS - 6)) / 4, 0, 1);
-      mUp.uniforms.uAniso.value = 1 + (aniso - 1) * f;
       const t = ramp.step[i];
       stepTint.set(t[0], t[1], t[2]);
       _draw(r, mUp, mips[i]);
@@ -509,6 +601,7 @@ export function create(opts = {}) {
     mComp.uniforms.tSrc.value = pipe.read.texture;
     mComp.uniforms.tBloom.value = mips[0].texture;
     mComp.uniforms.uIntensity.value = intensity;
+    mComp.uniforms.uDither.value = Math.max(c.bloomDither ?? cfg.dither, 0);
     _draw(r, mComp, out);
   };
 

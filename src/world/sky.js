@@ -21,7 +21,7 @@ import { fsMaterial, FullScreenQuad, LAYER } from '../render/RenderPipeline.js';
  *        L = space*T + inscatter*(1 - T*objectCoverage)
  *      which is why the ring and Threshold dissolve into the horizon haze for free,
  *      while the sky itself (coverage 0) keeps the full in-scatter integral.
- *      A thin high-cirrus veil and a 0.3% dither go on last.
+ *      A thin high-cirrus veil and a luminance-correlated TPDF grain go on last.
  *   5. env probe: a 128px cube of the dome, rendered from a private scene so a
  *      screen-space cloud pass on LAYER.SKY can never be dragged into it.
  *
@@ -31,13 +31,24 @@ import { fsMaterial, FullScreenQuad, LAYER } from '../render/RenderPipeline.js';
  *
  * Geometry note — the Halo ring is traced analytically as the inner surface of a
  * cylinder the observer is standing on, so its centre line is a great circle through
- * the zenith and its apparent width flares as 1/sin(elevation), exactly as in the
- * footage. Its azimuth (162.5 deg) and Threshold's (az 210.4, el 24.3, 25.5 deg
- * angular radius) were measured by back-projecting kf_00600 and kf_01500 through the
- * ref_00600 / ref_01500 poses — the band's screen-space edges land within 1-6 px of
- * the reference over 500 px of image. docs/WORLD.md's azimuths for these two are in a
- * different (rotated) convention and do not reproduce the footage; its elevations, the
- * sun and everything else do.
+ * the zenith and its apparent width follows W/(4 R sin el). TWO such cylinders are
+ * traced, each with its own axis, arc extent and leg selection: a single trace can only
+ * put its two legs exactly 180 deg apart on the horizon, which cannot reproduce
+ * docs/WORLD.md's two bands 56 deg apart in kf_00720. Each segment carries an
+ * arc-length window so the band terminates in a feathered chevron the way kf_00450 does
+ * at x 596-634, rather than running off the top of frame at constant width.
+ *
+ * Segment 0's azimuth (162.5 deg) and Threshold's (az 210.4, el 24.3, 25.5 deg angular
+ * radius) were measured by back-projecting kf_00600 and kf_01500 through the ref_00600 /
+ * ref_01500 poses. docs/WORLD.md's azimuths for these two are in a different (rotated)
+ * convention and do not reproduce the footage; its elevations, the sun and everything
+ * else do.
+ *
+ * Photometric contract (all measured on captures, graded-simulated because the `grade`
+ * pass does not currently compile — see the report):
+ *   deep sky el 10-20, away from the sun   R 51 G 89 B 136  lum 85  R/B 0.38
+ *   Threshold disc                          1.5-1.7x the local sky luminance, R/B ~1.0
+ *   ring band                               1.2-2.4x the sky it sits in, never below
  *
  * Public API (consumed by `env`, `clouds`, `ocean`, `lighting`):
  *   radiance(dir, target?)  -> THREE.Color, linear HDR sky radiance in a direction
@@ -62,14 +73,36 @@ const vec3  ATM_bO = vec3(0.650e-3, 1.881e-3, 0.085e-3);     // ozone absorption
 const float ATM_Hr = 8.0;
 const float ATM_Hm = 1.2;
 
-void atmDens(float h, out float dr, out float dm, out float doz){
+/* ---- second aerosol population: the marine boundary layer ----
+ * One aerosol scale height integrates to a smooth exponential airmass, which is why
+ * the horizon ramp came out as a straight line with the blue channel dead flat over
+ * the last six degrees. The reference does not do that: ref/keyframes/kf_01800.png,
+ * column x 1500-1700, rises to a maximum ~3 deg above the waterline (185/197/216) and
+ * then in the last degree R holds while G and B fall (185/188/202) — a distinct Mie
+ * shoulder that turns cream, not pale blue, as it saturates.
+ *
+ * That shape needs a second, much denser and much shallower population whose
+ * extinction exceeds its scattering and is blue-heavy: in-scatter saturates at
+ * bs/be per channel once the optical depth passes 1, so blue caps lowest and the last
+ * degree warms. Hb = 0.9 km puts the knee inside the lowest ~8 deg (airmass 7 at 8 deg,
+ * 29 at 2 deg) and leaves the deep sky untouched (airmass 2 at 30 deg -> od 0.04).
+ * Its phase function is separate from the free-troposphere Mie term: coarse sea-salt
+ * aerosol is far less forward-peaked, so it gets its own g (uHazeG) rather than
+ * inheriting the g = 0.78 that shapes the solar aureole.
+ */
+const float ATM_Hb  = 0.9;                                     // boundary layer, km
+const float ATM_bBs = 1.450e-2;                                // scatter /km
+const vec3  ATM_bBe = vec3(1.546e-2, 1.625e-2, 1.826e-2);      // extinction /km, blue-heavy
+
+void atmDens(float h, out float dr, out float dm, out float doz, out float db){
   dr = exp(-max(h,0.0) / ATM_Hr);
   dm = exp(-max(h,0.0) / ATM_Hm);
+  db = exp(-max(h,0.0) / ATM_Hb);
   doz = max(0.0, 1.0 - abs(h - 25.0) / 15.0);
 }
 vec3 atmExtinction(float h){
-  float dr, dm, doz; atmDens(h, dr, dm, doz);
-  return ATM_bR*dr + vec3(ATM_bMe*dm) + ATM_bO*doz;
+  float dr, dm, doz, db; atmDens(h, dr, dm, doz, db);
+  return ATM_bR*dr + vec3(ATM_bMe*dm) + ATM_bO*doz + ATM_bBe*db;
 }
 /** nearest positive hit of a sphere of radius R centred at the origin, else -1 */
 float atmRaySphere(vec3 ro, vec3 rd, float R){
@@ -214,9 +247,9 @@ void main(){
       vec3 p = ro + rd * (float(i) + 0.5) * dt;
       float rp = length(p);
       float h = rp - ATM_Rg;
-      float dr, dm, doz; atmDens(h, dr, dm, doz);
-      vec3 sc = ATM_bR*dr + vec3(ATM_bMs*dm);
-      vec3 ex = ATM_bR*dr + vec3(ATM_bMe*dm) + ATM_bO*doz;
+      float dr, dm, doz, db; atmDens(h, dr, dm, doz, db);
+      vec3 sc = ATM_bR*dr + vec3(ATM_bMs*dm + ATM_bBs*db);
+      vec3 ex = ATM_bR*dr + vec3(ATM_bMe*dm) + ATM_bO*doz + ATM_bBe*db;
 
       float muSp = dot(p/rp, sunDir);
       float shadow = (atmRaySphere(p, sunDir, ATM_Rg) > 0.0) ? 0.0 : 1.0;
@@ -256,6 +289,7 @@ const SKYVIEW_FRAG = /* glsl */`
 in vec2 vUv;
 layout(location = 0) out vec4 oRayMie;   // rgb = Rayleigh (no phase), a = Mie (no phase)
 layout(location = 1) out vec4 oMulti;    // rgb = isotropic multiple scattering
+                                         // a   = boundary-layer aerosol (no phase)
 uniform sampler2D tTransmittance;
 uniform sampler2D tMultiScatter;
 uniform vec3  uSunDir;
@@ -299,6 +333,7 @@ void main(){
 
   vec3 Lr = vec3(0.0);
   float Lm = 0.0;
+  float Lb = 0.0;
   vec3 Lms = vec3(0.0);
   vec3 T = vec3(1.0);
 
@@ -314,10 +349,11 @@ void main(){
       vec3 p = ro + dir * (ta + dt*0.5);
       float rp = length(p);
       float h = rp - ATM_Rg;
-      float dr, dm, doz; atmDens(h, dr, dm, doz);
+      float dr, dm, doz, db; atmDens(h, dr, dm, doz, db);
       vec3 scR = ATM_bR*dr;
       float scM = ATM_bMs*dm;
-      vec3 ex = ATM_bR*dr + vec3(ATM_bMe*dm) + ATM_bO*doz;
+      float scB = ATM_bBs*db;
+      vec3 ex = ATM_bR*dr + vec3(ATM_bMe*dm) + ATM_bO*doz + ATM_bBe*db;
 
       float muSp = dot(p/rp, sunL);
       float shadow = (atmRaySphere(p, sunL, ATM_Rg) > 0.0) ? 0.0 : 1.0;
@@ -330,7 +366,8 @@ void main(){
 
       Lr  += T * scR * Tsun * iw;
       Lm  += (T.g * scM * Tsun.g * iw.g);
-      Lms += T * (scR + vec3(scM)) * psi * iw;
+      Lb  += (T.g * scB * Tsun.g * iw.g);
+      Lms += T * (scR + vec3(scM + scB)) * psi * iw;
       T *= stepT;
     }
     if (hitGround){
@@ -347,7 +384,7 @@ void main(){
   }
 
   oRayMie = vec4(Lr, Lm);
-  oMulti  = vec4(Lms, 1.0);
+  oMulti  = vec4(Lms, Lb);
 }
 `;
 
@@ -382,20 +419,33 @@ uniform vec3  uAtmTint;
 
 uniform float uStarStrength;
 uniform float uStarDensity;
+uniform float uStarGate;
 uniform vec2  uCirrusOffset;
 uniform float uCirrusStrength;
 uniform vec3  uCirrusColor;
 
-uniform vec3  uRingAxis;        // horizontal, across the band's width
-uniform vec3  uRingEast;        // horizontal, along the circumference
-uniform float uRingRadiusKm;
-uniform float uRingHalfWidthKm;
+uniform float uHazeG;           // boundary-layer aerosol asymmetry
+uniform vec3  uHazeTint;
+uniform float uCircumsolar;     // explicit forward-scatter tail around the sun
+uniform float uSunCorona;
+uniform float uGrain;
+
+#define RING_N 2
+uniform vec3  uRingAxis[RING_N];   // horizontal, across the band's width
+uniform vec3  uRingEast[RING_N];   // horizontal, along the circumference
+uniform float uRingRadiusKm[RING_N];
+uniform float uRingHalfWidthKm[RING_N];
+uniform float uRingArc[RING_N];    // arc extent, radians of theta, before the terminus
+uniform float uRingTipFlare[RING_N];
+uniform float uRingLeg[RING_N];    // 0 = both legs, +-1 = only the leg on that side
+uniform float uRingBright[RING_N];
+uniform float uRingOpacityA[RING_N];
+uniform float uRingSeedA[RING_N];
 uniform float uRingWidthOffset; // where the observer sits across the band, -1..1
-uniform float uRingBrightness;
 uniform float uRingHazeK;
+uniform float uRingRail;
+uniform vec3  uRingRailColor;
 uniform vec3  uRingHazeColor;
-uniform float uRingOpacity;
-uniform float uRingSeed;
 
 uniform vec3  uPlanetDir;
 uniform vec3  uPlanetAxis;
@@ -416,6 +466,7 @@ uniform float uPlanetSeed;
 uniform float uDebugMode;
 uniform float uMsScale;
 uniform float uMieScale;
+uniform float uBelowLift;
 
 ${ATMO_GLSL}
 ${NOISE_GLSL}
@@ -440,15 +491,20 @@ vec3 stars(vec3 dir, float px){
       vec2 o = vec2(float(i), float(j));
       vec2 id = gi + o + face*37.0;
       float h0 = starCellHash(id, 1.0);
-      if (h0 > 0.26) continue;                     // most cells are empty
+      // A 26% occupancy gate on a regular lattice is not "sparse", it is a visible
+      // grid: the reference's clean zenith carries 97 px per 10k above sky+8 but 20 per
+      // 10k above sky+30, i.e. mostly empty with a handful of jewels. 7.5% occupancy
+      // plus a ninth-power magnitude curve reproduces that distribution; the old
+      // fourth-power curve made almost every cell a mid-grey dot.
+      if (h0 > uStarGate) continue;
       vec2 pos = o + vec2(starCellHash(id, 5.0), starCellHash(id, 9.0));
       float d = length((gf - pos) * cell);          // angular-ish distance
       float mag = starCellHash(id, 13.0);
-      float bright = pow(mag, 4.0)*0.95 + 0.05;
-      float rad = px * (0.60 + 0.85*pow(mag, 9.0));
+      float bright = pow(mag, 9.0)*1.55 + 0.0065;
+      float rad = px * (0.55 + 1.75*pow(mag, 12.0));
       float core = exp(-(d*d) / (rad*rad));
       float halo = 0.055 * exp(-(d) / (rad*2.2));
-      vec3 tint = mix(vec3(0.80, 0.92, 1.22), vec3(1.02, 1.0, 0.99), starCellHash(id, 21.0)*0.55);
+      vec3 tint = mix(vec3(0.84, 0.95, 1.26), vec3(1.03, 1.00, 1.01), starCellHash(id, 21.0)*0.60);
       acc += tint * bright * (core + halo);
     }
   }
@@ -482,8 +538,13 @@ float cirrusVeil(vec3 dir){
 
   float w = fbm2(pr*0.42 + 3.3, 3);
   float v = fbm2(pr*sc + w*1.10 + 9.1, 5);
-  float f = fbm2(vec2(pr.x*1.60, pr.y*4.40) + w*0.7 + 21.0, 4);
-  float m = smoothstep(0.26, 0.58, v*0.74 + f*0.44);
+  float f = fbm2(vec2(pr.x*1.35, pr.y*3.10) + w*0.7 + 21.0, 4);
+  float m = smoothstep(0.17, 0.74, v*0.74 + f*0.44);
+
+  // Break each filament along its own length. Without this the flow field draws
+  // uninterrupted uniform-width strokes clear across the hemisphere, which is exactly
+  // what "scratches on the lens" means.
+  m *= smoothstep(0.16, 0.72, fbm2(vec2(pr.x*1.15, pr.y*0.22) + 313.0, 4)*0.5 + 0.5);
 
   // sheet mask: only a couple of broad regions carry cirrus at all
   float sheet = smoothstep(0.10, 0.46, fbm2(p*0.055 + 137.0, 3)*0.5 + 0.5);
@@ -493,53 +554,82 @@ float cirrusVeil(vec3 dir){
 }
 
 /* -------------------------------------------------------------- Halo ring */
-struct RingHit { float t; float a; float theta; vec3 n; bool hit; };
+/* Traced as the inner surface of a cylinder the observer is standing on. A ray at
+ * elevation el meets it at arc position theta = 2*asin(sin el) measured from the
+ * observer's own feet, so theta runs 0 at the horizon to pi at the zenith, and the
+ * band's exact angular half-width is W/(4 R sin el).
+ *
+ * Two independent segments are traced. One cylinder can only ever put its two legs
+ * exactly 180 deg apart on the horizon, which cannot reproduce docs/WORLD.md's two
+ * bands at 56 deg of separation in kf_00720; a second trace with its own axis, arc
+ * extent and leg selection can. Each segment carries an arc-length window so the band
+ * terminates in a feathered chevron the way kf_00450 does at x 596-634, instead of
+ * running off the top of frame at constant width.
+ */
+struct RingHit { float t; float a; float theta; float hw; float term; vec3 n; bool hit; };
 
-RingHit ringTrace(vec3 dir){
+RingHit ringTrace(vec3 dir, int k){
   RingHit h;
-  h.hit = false; h.t = 0.0; h.a = 0.0; h.theta = 0.0; h.n = vec3(0.0,1.0,0.0);
+  h.hit = false; h.t = 0.0; h.a = 0.0; h.theta = 0.0; h.hw = 1.0; h.term = 0.0;
+  h.n = vec3(0.0,1.0,0.0);
   float du = dir.y;                               // dot(dir, up)
   if (du <= 1e-4) return h;
-  vec3 A = uRingAxis;
+  vec3 A = uRingAxis[k];
+  vec3 E = uRingEast[k];
+  float leg = uRingLeg[k];
+  float sd = dot(dir, E);
+  if (leg != 0.0 && sd*leg <= 0.0) return h;
   vec3 e = dir - dot(dir, A)*A;
   float e2 = dot(e, e);
   if (e2 < 1e-6) return h;
-  float R = uRingRadiusKm;
+  float R = uRingRadiusKm[k];
   float t = 2.0*R*du / e2;
   if (t <= 0.0) return h;
-  float a = t*dot(dir, A) + uRingWidthOffset*uRingHalfWidthKm;
+  float a = t*dot(dir, A) + uRingWidthOffset*uRingHalfWidthKm[k];
   h.t = t; h.a = a;
   float sinHalf = clamp(t/(2.0*R), 0.0, 1.0);
   h.theta = 2.0*asin(sinHalf);
   vec3 up = vec3(0.0, 1.0, 0.0);
   h.n = -(t*e - R*up) / R;
-  h.hit = abs(a) <= uRingHalfWidthKm;
+
+  // Exact geometry trumpets as 1/sin(el) — 5x wider by 10 deg of elevation, which is
+  // the flare the reference never shows. kf_00600 measures 53 px at el 53 against 82 px
+  // at el 19: sin^-0.45, not sin^-1, because the ring's own limb haze eats the band's
+  // edges as the slant path through it grows. Compress the flare to the measured law.
+  float hw = uRingHalfWidthKm[k] * pow(clamp(du, 0.05, 1.0), 0.70);
+
+  // arc-length window -> feathered chevron terminus
+  float x = h.theta / max(uRingArc[k], 1e-3);
+  float fx = (x - 0.90)*7.0;
+  float flare = 1.0 + uRingTipFlare[k] * exp(-fx*fx);
+  float term = 1.0 - smoothstep(0.93, 1.04, x);
+  h.hw = hw * flare * (0.10 + 0.90*term);
+  h.term = term;
+  h.hit = abs(a) <= h.hw;
   return h;
 }
 
-vec3 ringSurface(float s, float v, out float lum){
-  // s: arc length along the circumference (km), v: across the band, -1..1.
-  // One unit = 300 km, so continents land at the right scale and the finest octave
-  // resolves individual weather systems rather than noise.
-  // s: arc length along the circumference (km), v: across the band, -1..1.
-  // The divisor was 300 km, so with the 0.27 multiplier below one noise period spanned
-  // ~1100 km while the band is only 520 km wide - the entire band width fell inside a
-  // quarter of one period, which is exactly why it read as a uniform pastel wash with
-  // no continents. 80 km per unit puts ~1.7 continent/ocean cycles across the band.
-  vec2 q = vec2(s, v*uRingHalfWidthKm) / 115.0 + vec2(uRingSeed, uRingSeed*0.37);
+/* The band's surface. Screen-space arc-length compression along s is ~2 orders of
+ * magnitude greater than across the band (the visible arc is 15,700 km long and 200 km
+ * wide, drawn into a strip ~30 px across), so an isotropic noise frame in km — which is
+ * what this used to sample — produces round blotches at the wrong scale in the only
+ * direction that has room for them. It read as lichen. The frame here is 15:1
+ * anisotropic: everything is a lengthwise striation, which is what kf_00600 shows. */
+vec3 ringSurface(float s, float v, float hwKm, float seed, out float lum){
+  vec2 q = vec2(s/1400.0, v*hwKm/95.0) + vec2(seed, seed*0.37);
 
   float cont = warpedFbm2(q*0.24, 4, 1.55);
   float shelf = smoothstep(-0.035, 0.045, cont);
   float land  = smoothstep(0.080, 0.155, cont);
   float alt   = smoothstep(0.150, 0.310, cont);
 
-  // Seen through the ring's own air the ocean reads as a muted cyan-navy. It must go
-  // DARKER than the surrounding sky - previously the band's darkest pixel was brighter
-  // than the sky behind it, so the whole strip floated instead of reading as terrain.
-  vec3 deep    = vec3(0.011, 0.044, 0.104);
-  vec3 shallow = vec3(0.150, 0.360, 0.455);
-  vec3 grass   = vec3(0.205, 0.300, 0.225);
-  vec3 dry     = vec3(0.430, 0.395, 0.290);
+  // 10,000 km of intervening air is 10,000 km of aerial perspective. Even the ring's
+  // deepest ocean cannot arrive darker than the sky it is seen through — the previous
+  // palette put its minima at 71 against a sky of 89-99 and the band read as a hole.
+  vec3 deep    = vec3(0.115, 0.205, 0.300);
+  vec3 shallow = vec3(0.230, 0.400, 0.470);
+  vec3 grass   = vec3(0.235, 0.320, 0.265);
+  vec3 dry     = vec3(0.430, 0.400, 0.310);
   vec3 rock    = vec3(0.480, 0.470, 0.445);
 
   vec3 c = mix(deep, shallow, shelf);
@@ -551,27 +641,22 @@ vec3 ringSurface(float s, float v, out float lum){
   float riv = 1.0 - smoothstep(0.0, 0.075, abs(ridged2(q*0.38 + 4.3, 2) - 0.58));
   c = mix(c, shallow*0.9, riv*land*0.7);
 
-  // Cloud deck: compact bright clumps sheared along the circumference. In the
-  // reference these are the only genuinely white thing on the band; everything else
-  // is translucent pale cyan.
-  vec2 cq = vec2(q.x*0.55, q.y*0.95);
+  // Cloud deck, sheared hard along the circumference into lengthwise filaments.
+  vec2 cq = vec2(q.x*0.10, q.y*1.5);
   float cw = fbm2(cq*0.70 + 21.0, 3);
   float cb = fbm2(cq*0.62 + vec2(cw*1.6, cw*0.4) + 51.0, 4);
-  float cd = fbm2(cq*0.90 + vec2(cw*0.8, 0.0) + 77.0, 3);   // popcorn cumulus
+  float cd = fbm2(cq*0.90 + vec2(cw*0.8, 0.0) + 77.0, 3);
   float cm = smoothstep(0.110, 0.295, cb*0.78 + cd*0.55);
-  // Cloud tops are the only thing on the band that should reach white and clip.
-  vec3 cloud = vec3(2.55, 3.05, 3.80);
+  vec3 cloud = vec3(2.15, 2.55, 3.10);
 
-  // The global overcast veil lifted the whole band's floor, flattening the sea/land
-  // contrast that carries most of its structure. Keep a trace of it, no more.
   c = mix(c, cloud*0.30, smoothstep(-0.09, 0.30, cb) * 0.09);
   c = mix(c, cloud, cm);
   c = mix(c, cloud*1.12, cm * smoothstep(0.20, 0.52, cd) * 0.55);
 
-  // Large-scale weather / illumination banding. Widened: the old 0.74+0.52 range both
-  // lifted the floor and capped the ceiling, so nothing was ever dark or ever clipped.
-  c *= 0.50 + 1.02*(fbm2(q*0.14 + 91.0, 3)*0.5 + 0.5);
+  // lengthwise illumination banding — long, never blotchy
+  c *= 0.72 + 0.60*(fbm2(vec2(q.x*0.14, q.y*1.10) + 91.0, 3)*0.5 + 0.5);
 
+  c = mix(vec3(0.35, 0.45, 0.55), c, vec3(lessThan(c, vec3(1.0e6))));   // NaN guard
   lum = dot(c, vec3(0.30, 0.59, 0.11));
   return c;
 }
@@ -582,31 +667,78 @@ vec3 planetSurface(vec3 n, out float detail){
   vec3 bx = normalize(cross(ax, vec3(0.0, 0.0, 1.0) + vec3(0.13, 0.0, 0.0)));
   vec3 bz = cross(ax, bx);
   float lat = asin(clamp(dot(n, ax), -1.0, 1.0));
-  float lon = atan(dot(n, bz), dot(n, bx));
+  // atan(0,0) is undefined, and with the pole inside the visible disc exactly that
+  // happens on a handful of pixels: the NaN survives every bloom downsample and lands
+  // as a black blob after the tonemap.
+  float cbx = dot(n, bx), cbz = dot(n, bz);
+  float lon = (abs(cbx) + abs(cbz) < 1e-6) ? 0.0 : atan(cbz, cbx);
 
   vec2 q = vec2(lon*1.05, lat*2.2) + uPlanetSeed;
   // Two-level domain warp: turbulent belts instead of stripes.
-  // The finest warp term used to run at 2.30 with 3 octaves, which at ~900 px of
-  // on-screen disc diameter resolves nothing below ~40 px - the disc measured 3x short
-  // on fine structure. Push the second warp up in frequency and depth.
   vec2 w1 = vec2(fbm2(q*0.85 + 3.7, 5), fbm2(q*0.85 + 9.1, 5));
   vec2 w2 = vec2(fbm2(q*5.40 + w1*1.1 + 17.3, 6), fbm2(q*5.40 + w1*1.1 + 27.9, 6));
-  float y = lat*7.0 + 1.30*w1.y + 0.40*w2.y;
+  // lat*7.0 put barely two belt cycles across the visible face where the reference
+  // shows fifteen to twenty. A vertical luminance scan of kf_00720 through the disc
+  // gives mean|dLum/dy| = 0.62 with peaks at 6.5; the old surface managed 0.12/3.9.
+  float y = lat*22.0 + 2.55*w1.y + 0.62*w2.y + 1.15*fbm2(q*0.26 + 401.0, 3);
 
   float b1 = 0.5 + 0.5*sin(y*1.30);
   float b2 = 0.5 + 0.5*sin(y*3.10 + 1.7);
   float b3 = 0.5 + 0.5*sin(y*7.90 + 4.1);
-  float b4 = 0.5 + 0.5*sin(y*18.0 + 2.0);       // fine striation
+  // y*18 puts one cycle every 4.5 px on a disc this large - above Nyquist, so it
+  // contributed aliasing noise rather than visible striation and inflated the vertical
+  // gradient statistic without adding any structure a viewer can see.
+  float b4 = 0.5 + 0.5*sin(y*11.0 + 2.0);       // fine striation
+
+  // Filaments concentrate in the mid-latitudes and fade out over the poles, and there
+  // is one distinctly darker equatorial belt — both plainly visible in kf_00720.
+  float al = abs(lat);
+  float env = smoothstep(0.04, 0.34, al) * (1.0 - smoothstep(0.86, 1.38, al));
 
   vec3 c = mix(uPlanetColA, uPlanetColB, smoothstep(0.06, 0.94, b1));
   c = mix(c, uPlanetColC, b2*0.38);
-  c = mix(c, uPlanetColD, smoothstep(0.62, 1.30, abs(lat)));
-  c *= 0.93 + 0.12*b3;
-  c *= 0.975 + 0.055*b4;
+  c = mix(c, uPlanetColD, smoothstep(0.62, 1.30, al));
+
+  // Not every latitude is equally banded. A constant-amplitude belt stack is a candy
+  // stripe; the reference alternates sharply ruled zones with almost featureless ones.
+  float amp = 0.30 + 1.00*(fbm2(vec2(q.x*0.30, q.y*0.55) + 211.0, 3)*0.5 + 0.5);
+
+  // Belt separation has to happen in VALUE, not only in hue. Every detail term used to
+  // be a +-5% multiplier on a smooth gradient, which is why the disc read as two soft
+  // diagonal smudges; adjacent zones in the reference differ by 20-35% in luminance
+  // across a hard filamentary edge, not a sine.
+  c *= mix(1.0, mix(0.885, 1.125, smoothstep(0.28, 0.72, b1)), amp);
+  c *= mix(1.0, mix(0.935, 1.065, smoothstep(0.22, 0.78, b2)), amp);
+  // One knife-edged zone boundary per b2 cycle. smoothstep over 0.10 of a sine that
+  // runs 68 radians across the visible face is a sub-pixel step; it is the only thing
+  // that reaches the reference's peak vertical gradient of 5.5 codes/px on a 20 px
+  // column average, which no smooth stack of sines can produce at any amplitude.
+  c *= mix(1.0, mix(0.915, 1.058, smoothstep(0.45, 0.55, b2)), amp*0.85);
+  c *= mix(1.0, 0.964 + 0.072*smoothstep(0.16, 0.60, b3), amp*(0.45 + 0.55*env));
+  c *= 0.962 + 0.076*smoothstep(0.28, 0.72, b4)*(0.30 + 0.70*env);
+  float eqx = lat/0.075;
+  c *= mix(1.0, 0.76, exp(-eqx*eqx));                       // equatorial belt
   c *= 0.92 + 0.16*(fbm2(q*0.42 + 61.0, 4)*0.5 + 0.5);
   // Fine filamentary shear - the octaves that carry the disc's high-frequency detail.
-  c *= 0.955 + 0.090*(fbm2(q*3.10 + w2*0.9 + 131.0, 5)*0.5 + 0.5);
-  c *= 0.978 + 0.044*(ridged2(q*7.40 + w2*1.4 + 203.0, 4));
+  c *= 0.915 + 0.170*(fbm2(q*3.10 + w2*0.9 + 131.0, 5)*0.5 + 0.5);
+  c *= 0.958 + 0.084*(ridged2(q*7.40 + w2*1.4 + 203.0, 4));
+  // Thin sheared threads drawn along the belts. These are what carry the disc's
+  // maximum luminance gradient: the reference peaks at 5.5 codes/px on a 20 px column
+  // average, which a smooth sine stack cannot reach at any amplitude.
+  float thr = smoothstep(0.52, 0.88, ridged2(vec2(q.x*0.85, q.y*13.0) + w2*1.1 + 303.0, 3));
+  c *= 1.0 + (0.16*thr - 0.062) * (0.35 + 0.65*env);
+
+  // A couple of broad zones go distinctly warm - the tan/ochre belts that carry most of
+  // kf_00720's colour interest. Without this the whole disc is one lavender hue.
+  float warm = smoothstep(0.10, 0.62, fbm2(vec2(q.x*0.22, q.y*0.85) + 137.0, 3)*0.5 + 0.5);
+  c = mix(c, c * vec3(1.16, 1.03, 0.77), warm*0.55);
+
+  // gnoise2 normalises a hashed gradient vector, so on the handful of lattice cells
+  // where the hash lands exactly on (0.5,0.5) it evaluates normalize(vec2(0)) = NaN.
+  // At the finest octave one such cell is ~3 px on a disc this size, and the NaN
+  // survives every bloom downsample to land as a black blob after the tonemap.
+  // Any comparison against a NaN is false, so this catches NaN and +Inf both.
+  c = mix(uPlanetColB * 0.55, c, vec3(lessThan(c, vec3(1.0e6))));
 
   // storm ovals and shear wisps
   float storm = ridged2(q*1.1 + w2*0.5 + 40.0, 3);
@@ -627,13 +759,21 @@ void main(){
   float cosT = dot(dir, uSunDir);
   vec3 termR = rm.rgb * phaseRayleigh(cosT);
   vec3 termM = vec3(rm.a) * phaseMie(cosT, uMieG) * uMieScale;
+  vec3 termB = vec3(texture(tSkyMulti, svUv).a) * phaseMie(cosT, uHazeG) * uHazeTint;
   vec3 termS = ms * uMsScale;
   if (uDebugMode > 0.5){
-    if (uDebugMode < 1.5) { termM = vec3(0.0); termS = vec3(0.0); }
+    if (uDebugMode < 1.5) { termM = vec3(0.0); termS = vec3(0.0); termB = vec3(0.0); }
     else if (uDebugMode < 2.5) { termR = vec3(0.0); termS = vec3(0.0); }
-    else if (uDebugMode < 3.5) { termR = vec3(0.0); termM = vec3(0.0); }
+    else if (uDebugMode < 3.5) { termR = vec3(0.0); termM = vec3(0.0); termB = vec3(0.0); }
   }
-  vec3 inscatter = (termR + termM + termS) * uSolarIrradiance * uSunTint;
+  // Everything below the horizon in this dome is the sky-view LUT's ground term, which
+  // is folded into the multiple-scatter channel and therefore rides on uMsScale and
+  // uAtmTint - both of which are atmosphere knobs. env PMREMs this dome, so its lower
+  // hemisphere is the image-based ambient arriving on the underside of every object in
+  // the scene, and it must not move when the sky's own colour is retuned. Lift it back.
+  termS *= mix(1.0, uBelowLift, smoothstep(0.015, -0.05, dir.y));
+
+  vec3 inscatter = (termR + termM + termB + termS) * uSolarIrradiance * uSunTint;
   inscatter *= uAtmTint;
 
   vec3 Tview = atmSampleTr(tTransmittance, r, clamp(dir.y, -1.0, 1.0));
@@ -641,6 +781,18 @@ void main(){
     // below the horizon the transmittance LUT parameterisation degenerates; the
     // ground blocks everything anyway.
     Tview *= smoothstep(-0.02, 0.0, dir.y);
+  }
+
+  /* Circumsolar forward-scatter tail. The sky-view LUT is 256 wide, so however sharp
+   * the per-pixel phase is, the Mie *integral* it multiplies is bilinearly smeared over
+   * ~0.7 deg and the aureole it can carry dies by 8 deg out. Measured on the reference
+   * the sky is still 13 codes above baseline at 7 deg and does not reach baseline until
+   * past 10; a real g=0.78 aerosol plus multiple forward scattering lifts the sky for
+   * 20-25 deg. This is that missing tail, evaluated analytically per pixel. */
+  {
+    float fs = max(cosT, 0.0);
+    float tail = 0.30*pow(fs, 26.0) + 0.075*pow(fs, 7.0) + 0.016*pow(fs, 2.2);
+    inscatter += uCircumsolar * tail * Tview * uSunTint * uSolarIrradiance;
   }
 
   /* ---- "space" content, composited back to front ---- */
@@ -664,12 +816,14 @@ void main(){
       vec3 base = planetSurface(n, detail);
 
       float ndl = dot(n, uSunDir);
-      // A 100-degree-wide terminator ramp lit the whole disc uniformly and read as a
-      // flat sticker. The real terminator on a body this size is a narrow band.
-      float lam = smoothstep(-0.08, 0.55, ndl);
+      float lam = smoothstep(-0.34, 0.72, ndl);
       float shade = mix(1.0, lam, uPlanetTerminator);
       float ndv = max(dot(n, -dir), 0.0);
-      float limb = mix(0.66, 1.0, pow(ndv, 0.30));
+      // An optically thick, strongly forward-scattering gas giant has essentially no
+      // limb darkening — kf_00720 is if anything limb-BRIGHTENED by its haze layer.
+      // mix(0.66, 1.0, pow(ndv,0.30)) darkened the outer 40% of the disc by up to a
+      // third and was the single loudest "this is a Lambert sphere primitive" tell.
+      float limb = mix(0.93, 1.0, pow(ndv, 0.5));
 
       vec3 col = base * shade * limb * uPlanetBrightness;
 
@@ -689,8 +843,10 @@ void main(){
 
       // Thin bright limb thread, as its own additive term rather than a by-product of
       // the haze mix - that is what makes the edge read as an atmosphere seen edge-on.
-      col += vec3(0.085, 0.098, 0.132) * exp(-(1.0 - ndv) * 38.0)
-             * (0.35 + 1.05 * smoothstep(-0.30, 0.60, ndl));
+      // kf_00720's limb is BRIGHTER than the disc interior - a haze layer seen through
+      // a long slant path, warm and wide, not the thin blue thread this used to draw.
+      col += vec3(0.300, 0.238, 0.278) * exp(-(1.0 - ndv) * 13.0)
+             * (0.45 + 0.95 * smoothstep(-0.30, 0.60, ndl));
 
       // Aurora: applied AFTER the haze mix (it was being washed out by it), confined to
       // a narrow angular band near the terminator rather than smeared over the limb.
@@ -710,39 +866,57 @@ void main(){
   }
 
   /* -- Halo ring -- */
-  RingHit rh = ringTrace(dir);
-  if (rh.t > 0.0){
-    float v = rh.a / uRingHalfWidthKm;
+  for (int k = 0; k < RING_N; k++){
+    if (uRingOpacityA[k] <= 0.001) continue;
+    RingHit rh = ringTrace(dir, k);
+    if (rh.t <= 0.0) continue;
+    float v = rh.a / max(rh.hw, 1e-4);
     float av = abs(v);
     float aaw = max(fwidth(v), 1e-4);
     float band = 1.0 - smoothstep(1.0 - aaw*2.0, 1.0 + aaw*2.0, av);
-    band *= smoothstep(0.010, 0.075, dir.y);      // merge into the horizon
+    float dissolve = smoothstep(0.010, 0.075, dir.y);   // merge into the horizon
+    band *= dissolve;
+
+    // The view ray meets the inner surface at grazing incidence cos(i) = sin(elevation),
+    // so the path through the ring's own air is an airmass of 1/sin(el).
+    float am = 1.0 / max(dir.y, 0.010);
+    float hz = 1.0 - exp(-uRingHazeK * pow(max(am - 1.0, 0.0), 1.4));
+
     if (band > 0.001){
-      float s = uRingRadiusKm * rh.theta * sign(dot(dir, uRingEast));
+      float s = uRingRadiusKm[k] * rh.theta * sign(dot(dir, uRingEast[k]));
       float lum;
-      vec3 surf = ringSurface(s, v, lum);
+      vec3 surf = ringSurface(s, v, rh.hw, uRingSeedA[k], lum);
 
       float ndl = dot(rh.n, uSunDir);
       float lit = mix(0.68, 1.06, smoothstep(-1.0, 1.0, ndl));
-      surf *= lit * uRingBrightness;
+      surf *= lit * uRingBright[k];
 
-      // The ring's own air. The view ray meets its inner surface at grazing incidence
-      // cos(i) = sin(elevation), so the path through the ring's atmosphere is an
-      // airmass of 1/sin(el): the band dissolves as it approaches the horizon exactly
-      // the way the reference does, and stays crisp overhead.
-      float am = 1.0 / max(dir.y, 0.010);
-      float hz = 1.0 - exp(-uRingHazeK * pow(max(am - 1.0, 0.0), 1.4));
+      // Aerial perspective. The band is 2R = 10,000 km away, but the old haze term went
+      // to exactly zero at the zenith, so overhead there was no distance cue at all and
+      // the surface arrived at full contrast with its oceans sitting BELOW the sky
+      // luminance. A hard floor of 45% toward the in-scatter independent of elevation,
+      // with the grazing term on top, is what makes it read as impossibly far away.
       vec3 hazeCol = mix(uRingHazeColor * (0.34 + 0.52*lit), inscatter * 1.05, min(1.0, 0.10 + 0.85*hz));
-      surf = mix(surf, hazeCol, hz);
+      surf = mix(surf, hazeCol, clamp(0.45 + 0.55*hz, 0.45, 1.0));
+      surf = max(surf, inscatter * 0.9);
 
-      // bright scattering fringe where the air is seen along the band wall
-      float fringe = smoothstep(0.78, 1.0, av);
-      surf += uRingHazeColor * fringe * 0.13 * (1.0 - hz*0.6);
+      // Two bright rails on the band's edges - the rim walls seen edge-on. In kf_00450
+      // they are the brightest thing in frame: 225-246 against an interior of 120-186
+      // and a sky of 95-120.
+      float r1 = (av - 0.90)/0.075, r2 = (av - 0.45)/0.42;
+      float rail = exp(-r1*r1) + 0.30*exp(-r2*r2);
+      surf += uRingRailColor * rail * uRingRail * (1.0 - hz*0.40) * rh.term;
 
-      float alpha = band * uRingOpacity;
+      float alpha = band * uRingOpacityA[k];
       space = mix(space, surf, alpha);
       coverage = max(coverage, alpha);
     }
+
+    // Soft glow bleeding into the sky outside the band. Without it the edge is
+    // stencilled; the reference lifts the sky for roughly half a band-width out.
+    float outer = max(av - 1.0, 0.0);
+    float glow = exp(-outer * 5.5) * (1.0 - band) * dissolve * rh.term;
+    space += uRingRailColor * glow * uRingRail * 0.26 * (1.0 - hz*0.8) * uRingOpacityA[k];
   }
 
   /* -- sun disc -- */
@@ -756,19 +930,47 @@ void main(){
     vec3 limbD = vec3(1.0) - u*(vec3(1.0) - pow(vec3(mu), vec3(0.55)));
     space += uSunDiscRadiance * limbD * uSunTint * discMask * (1.0 - coverage);
   }
+  /* Inner corona, 1-3 solar radii. At 900 units of disc radiance the AgX curve clipped
+   * a region 1.5x the geometric disc to flat (255,255,255) and the per-channel limb
+   * darkening above was destroyed. Dropping the disc lets the limb gradient survive;
+   * this warm additive lobe gives the blown core chromatic structure instead of the
+   * white-sticker look. */
+  {
+    float rr = ang / max(uSunAngularRadius, 1e-5);
+    space += vec3(1.00, 0.72, 0.42) * uSunCorona * exp(-rr*0.85) * (1.0 - coverage);
+  }
 
   /* ---- fold space through the atmosphere ---- */
   vec3 col = space * Tview + inscatter * (1.0 - Tview*coverage);
 
   /* ---- high cirrus, in front of everything but the sun's own disc ---- */
   if (uCirrusStrength > 0.001){
-    float cv = cirrusVeil(dir) * uCirrusStrength;
-    float sunLit = 0.72 + 0.55*pow(max(cosT, 0.0), 6.0);
-    col = mix(col, uCirrusColor * sunLit * mix(0.55, 1.0, clamp(Tview.g*1.3, 0.0, 1.0)), clamp(cv, 0.0, 1.0));
+    float dens = cirrusVeil(dir);
+    if (dens > 0.0008){
+      // A flat mix toward a constant colour gives constant-opacity streaks that read as
+      // scratches on the lens. Shading the filament with its own optical depth makes
+      // thick regions transmit less of the sunward glow, so they go grey-blue while the
+      // thin edges stay silver - that is what makes it read as weather.
+      float cv = clamp(dens * uCirrusStrength * 3.4, 0.0, 1.0);
+      float selfT = exp(-dens * 3.1);
+      float fwd = 0.60 + 0.95*pow(max(cosT, 0.0), 7.0);
+      vec3 lit = uCirrusColor * (0.30 + 0.86*fwd*selfT) * mix(0.62, 1.0, clamp(Tview.g*1.3, 0.0, 1.0));
+      col = mix(col, lit + inscatter*0.34*(1.0 - selfT), cv);
+    }
   }
 
-  /* ---- 8-bit-safe dither: HDR skies band badly without it ---- */
-  col *= 1.0 + (hash12(gl_FragCoord.xy) - 0.5) * 0.006;
+  /* ---- grain ----
+   * The reference's clean deep sky carries a highpass std of 1.25 codes and a per-patch
+   * RGB std of 4-5; a 0.3% multiplicative dither (about +-0.5 codes of white noise)
+   * delivered 0.46 and the frame read as vinyl. This is TPDF and scales with the square
+   * root of local luminance - photon statistics - so it survives the tonemap in the
+   * midtones without lifting or crawling in the shadows, and it still breaks the
+   * 8-bit banding the old dither existed to break. */
+  {
+    float gl = dot(col, vec3(0.2126, 0.7152, 0.0722));
+    float gn = hash12(gl_FragCoord.xy) + hash12(gl_FragCoord.yx + 17.31) - 1.0;
+    col += gn * uGrain * sqrt(max(gl, 0.0));
+  }
 
   if (uDebugMode > 3.5){
     if (uDebugMode < 4.5) col = Tview;                 // transmittance to space
@@ -777,7 +979,8 @@ void main(){
     else col = ms * 3.0;                               // multiple scattering
   }
 
-  col = max(col, vec3(0.0));
+  col = mix(inscatter, col, vec3(lessThan(col, vec3(1.0e9))));   // NaN / Inf guard
+  col = clamp(col, vec3(0.0), vec3(60000.0));
 
   oColor = vec4(col, 1.0);
 }
@@ -787,38 +990,67 @@ void main(){
 
 export function create(opts = {}) {
   const S = {
-    /* --- placement, measured off the reference frames (see header) --- */
-    ringAzimuthDeg: 162.5,     // horizon azimuth where the band rises (az = atan2(x,z))
-    ringRadiusKm: 5000,
-    ringWidthRatio: 0.104,     // W / R  -> 520 km band
+    /* --- the Halo ring, one entry per visible segment --------------------------
+     * ringWidthRatio is W/R. The analytic zenith half-width is W/(4R), so the old
+     * 0.104 (520 km on a 5000 km radius) drew a 2.98-deg band at the zenith and only
+     * widened off it — measured 130 px at ref_00600 against the reference's 53. 0.040
+     * gives 200 km -> 1.15 deg, inside docs/WORLD.md's stated 0.6-1.2 deg.
+     * arcDeg is the theta extent before the feathered chevron terminus; theta is 0 at
+     * the observer's own feet and 180 at the zenith. leg selects one side of the
+     * cylinder (0 = both), which is what lets two segments sit at an arbitrary
+     * separation instead of the 180 deg a single trace is stuck with. */
+    rings: [
+      { azimuthDeg: 162.5, radiusKm: 5000, widthRatio: 0.040, arcDeg: 176,
+        brightness: 1.90, opacity: 0.94, tipFlare: 0.85, leg: 0, seed: 0.0 },
+      { azimuthDeg: 106.5, radiusKm: 5000, widthRatio: 0.030, arcDeg: 84,
+        brightness: 1.30, opacity: 0.40, tipFlare: 0.55, leg: 1, seed: 7.9 },
+    ],
     ringWidthOffset: 0.0,
-    ringBrightness: 2.10,
-    ringHazeZenithOD: 0.22,   // optical depth of the ring's own air, straight down
-    ringOpacity: 0.915,
+    ringHazeZenithOD: 0.085,  // optical depth of the ring's own air, straight down
+    ringRail: 1.35,           // the two bright edge rails
 
     planetAzimuthDeg: 210.4,
     planetElevationDeg: 24.3,
     planetAngularRadiusDeg: 25.5,
-    planetBrightness: 0.285,
-    planetAurora: 1.0,
-    planetTerminator: 1.00,   // was 0.50: a 100-deg ramp lit the whole disc flat
+    // kf_00720 measures the disc at 1.63x the luminance of the sky beside it
+    // (125.7 against 77.0). 0.285 landed it at 0.59x - a 2.8x value inversion, and the
+    // largest single screen-area error in the frame.
+    planetBrightness: 0.82,
+    planetAurora: 0.0,   // kf_00720 shows none, and the term is a NaN source
+    // 1.00 with a smoothstep(-0.08,0.55) ramp is 36 deg of shading across a disc whose
+    // visible portion in the reference is close to uniformly lit.
+    planetTerminator: 0.35,
     planetLimbHaze: 0.55,    // was 2.30: bleached 76% of the mid-disc into sky
     planetAtmo: 0.05,
-    planetPoleAzDeg: 95.0,
-    planetPoleElDeg: 43.0,
+    // The rotation axis projects to 49 deg off vertical at the ref_00720 camera, which
+    // drew the belts as steep diagonal stripes. A gas giant's belts are lines of
+    // latitude: with the pole near screen-vertical they sweep across the disc almost
+    // horizontally and curve as great circles, which is what kf_00720 shows.
+    planetPoleAzDeg: 40.0,
+    planetPoleElDeg: 35.0,
 
     solarIrradiance: 9.4,
     mieG: 0.78,
-    sunDiscRadiance: 900.0,
+    hazeG: 0.45,             // boundary-layer aerosol is much less forward-peaked
+    circumsolar: 0.055,
+    sunDiscRadiance: 320.0,  // was 900: clipped 1.5x the geometric disc to flat white
+    sunCorona: 48.0,
     groundAlbedo: 0.14,
-    starStrength: 0.55,
+    starStrength: 3.05,
     starDensity: 56.0,
+    starGate: 0.075,         // cell occupancy; 0.26 was a visible lattice
     cirrusDrift: 0.00045,
-    cirrusStrength: 0.060,   // was 0.175: the streaks read as lint on the lens
-    atmTint: [0.605, 0.578, 1.105],
+    cirrusStrength: 0.075,
+    grain: 0.0240,
+    msScale: 0.22,
+    belowLift: 6.0,
+    atmTint: [0.430, 0.456, 0.912],
     cubeSize: 128,
   };
   Object.assign(S, opts.sky || {});
+  const RN = 2;
+  const rings = [];
+  for (let i = 0; i < RN; i++) rings.push(S.rings[i] || { ...S.rings[0], opacity: 0 });
 
   const uniforms = {
     tTransmittance: { value: null },
@@ -836,20 +1068,32 @@ export function create(opts = {}) {
 
     uStarStrength: { value: S.starStrength },
     uStarDensity: { value: S.starDensity },
+    uStarGate: { value: S.starGate },
     uCirrusOffset: { value: new THREE.Vector2(0, 0) },
     uCirrusStrength: { value: S.cirrusStrength },
     uCirrusColor: { value: new THREE.Vector3(1.55, 1.62, 1.78) },
 
-    uRingAxis: { value: new THREE.Vector3(1, 0, 0) },
-    uRingEast: { value: new THREE.Vector3(0, 0, 1) },
-    uRingRadiusKm: { value: S.ringRadiusKm },
-    uRingHalfWidthKm: { value: S.ringRadiusKm * S.ringWidthRatio * 0.5 },
+    uHazeG: { value: S.hazeG },
+    uHazeTint: { value: new THREE.Vector3(1.10, 1.00, 0.86) },
+    uCircumsolar: { value: S.circumsolar },
+    uSunCorona: { value: S.sunCorona },
+    uGrain: { value: S.grain },
+
+    uRingAxis: { value: [new THREE.Vector3(1, 0, 0), new THREE.Vector3(1, 0, 0)] },
+    uRingEast: { value: [new THREE.Vector3(0, 0, 1), new THREE.Vector3(0, 0, 1)] },
+    uRingRadiusKm: { value: rings.map((r) => r.radiusKm) },
+    uRingHalfWidthKm: { value: rings.map((r) => r.radiusKm * r.widthRatio * 0.5) },
+    uRingArc: { value: rings.map((r) => THREE.MathUtils.degToRad(r.arcDeg)) },
+    uRingTipFlare: { value: rings.map((r) => r.tipFlare) },
+    uRingLeg: { value: rings.map((r) => r.leg) },
+    uRingBright: { value: rings.map((r) => r.brightness) },
+    uRingOpacityA: { value: rings.map((r) => r.opacity) },
+    uRingSeedA: { value: rings.map(() => 0) },
     uRingWidthOffset: { value: S.ringWidthOffset },
-    uRingBrightness: { value: S.ringBrightness },
     uRingHazeK: { value: S.ringHazeZenithOD },
+    uRingRail: { value: S.ringRail },
+    uRingRailColor: { value: new THREE.Vector3(0.68, 0.94, 1.28) },
     uRingHazeColor: { value: new THREE.Vector3(0.50, 0.78, 1.30) },
-    uRingOpacity: { value: S.ringOpacity },
-    uRingSeed: { value: 0 },
 
     uPlanetDir: { value: new THREE.Vector3(0, 0.4, -1).normalize() },
     uPlanetAxis: { value: new THREE.Vector3(0, 1, 0) },
@@ -859,13 +1103,18 @@ export function create(opts = {}) {
     uPlanetLimbHaze: { value: S.planetLimbHaze },
     uPlanetAtmo: { value: S.planetAtmo },
     uPlanetAuroraq: { value: S.planetAurora },
-    uPlanetColA: { value: new THREE.Vector3(0.643, 0.247, 0.247) },
-    uPlanetColB: { value: new THREE.Vector3(1.362, 0.696, 0.588) },
-    uPlanetColC: { value: new THREE.Vector3(0.955, 0.361, 0.559) },
-    uPlanetColD: { value: new THREE.Vector3(0.560, 0.452, 0.740) },
+    // kf_00720's disc measures R/G/B 139/120/141 - green is the LOWEST channel. That is
+    // mauve / dusty rose, and it is what the palette has to average out to after the
+    // atmosphere in front of it has added its blue. The old set averaged to a brick red
+    // that the sky then dragged to R/B 0.44, i.e. bluer than it was red.
+    uPlanetColA: { value: new THREE.Vector3(0.538, 0.312, 0.470) },   // dark mauve belt
+    uPlanetColB: { value: new THREE.Vector3(1.200, 0.815, 1.045) },   // pale rose zone
+    uPlanetColC: { value: new THREE.Vector3(1.030, 0.720, 0.470) },   // tan / ochre belt
+    uPlanetColD: { value: new THREE.Vector3(0.735, 0.505, 0.805) },   // polar violet
     uPlanetSeed: { value: 0 },
 
     uDebugMode: { value: 0 },
+    uBelowLift: { value: S.belowLift },
     uMsScale: { value: S.msScale ?? 1.0 },
     uMieScale: { value: S.mieScale ?? 1.0 },
   };
@@ -876,6 +1125,7 @@ export function create(opts = {}) {
   let quad = null, trMat = null, msMat = null, svMat = null;
   let _sunKey = '';
   let _ctx = null;
+  let _bare = false;   // measurement hook, see ctx.config.skyBare
 
   /* --------------------------------------------------- CPU atmosphere (radiance) */
   const CPU = {
@@ -883,7 +1133,10 @@ export function create(opts = {}) {
     bR: [5.802e-3, 13.558e-3, 33.100e-3],
     bMs: 3.996e-3, bMe: 4.4e-3,
     bO: [0.650e-3, 1.881e-3, 0.085e-3],
-    Hr: 8, Hm: 1.2,
+    // mirror of ATM_Hb / ATM_bBs / ATM_bBe so `radiance()` (which `lighting` and `env`
+    // key ambient off) sees the same boundary layer the GPU does
+    bBs: 1.450e-2, bBe: [1.546e-2, 1.625e-2, 1.826e-2],
+    Hr: 8, Hm: 1.2, Hb: 0.9,
   };
   function cpuRaySphere(ox, oy, oz, dx, dy, dz, R) {
     const b = ox * dx + oy * dy + oz * dz;
@@ -910,10 +1163,11 @@ export function create(opts = {}) {
       const h = Math.sqrt(px * px + py * py + pz * pz) - CPU.Rg;
       const dr = Math.exp(-Math.max(h, 0) / CPU.Hr);
       const dm = Math.exp(-Math.max(h, 0) / CPU.Hm);
+      const db = Math.exp(-Math.max(h, 0) / CPU.Hb);
       const doz = Math.max(0, 1 - Math.abs(h - 25) / 15);
-      a += (CPU.bR[0] * dr + CPU.bMe * dm + CPU.bO[0] * doz) * dt;
-      b += (CPU.bR[1] * dr + CPU.bMe * dm + CPU.bO[1] * doz) * dt;
-      c += (CPU.bR[2] * dr + CPU.bMe * dm + CPU.bO[2] * doz) * dt;
+      a += (CPU.bR[0] * dr + CPU.bMe * dm + CPU.bO[0] * doz + CPU.bBe[0] * db) * dt;
+      b += (CPU.bR[1] * dr + CPU.bMe * dm + CPU.bO[1] * doz + CPU.bBe[1] * db) * dt;
+      c += (CPU.bR[2] * dr + CPU.bMe * dm + CPU.bO[2] * doz + CPU.bBe[2] * db) * dt;
     }
     out[0] = a; out[1] = b; out[2] = c;
   }
@@ -944,12 +1198,13 @@ export function create(opts = {}) {
       const h = rp - CPU.Rg;
       const dr = Math.exp(-Math.max(h, 0) / CPU.Hr);
       const dm = Math.exp(-Math.max(h, 0) / CPU.Hm);
+      const db = Math.exp(-Math.max(h, 0) / CPU.Hb);
       const doz = Math.max(0, 1 - Math.abs(h - 25) / 15);
       const muS = (px * sun.x + py * sun.y + pz * sun.z) / rp;
       cpuOpticalDepth(rp, muS, _od);
       for (let k = 0; k < 3; k++) {
-        const scR = CPU.bR[k] * dr, scM = CPU.bMs * dm;
-        const ex = CPU.bR[k] * dr + CPU.bMe * dm + CPU.bO[k] * doz;
+        const scR = CPU.bR[k] * dr, scM = CPU.bMs * dm + CPU.bBs * db;
+        const ex = CPU.bR[k] * dr + CPU.bMe * dm + CPU.bO[k] * doz + CPU.bBe[k] * db;
         const st = Math.exp(-ex * dt);
         const iw = (1 - st) / Math.max(ex, 1e-8);
         const Ts = Math.exp(-_od[k]);
@@ -1016,7 +1271,7 @@ export function create(opts = {}) {
       const { renderer } = ctx;
       const rnd = ctx.rand.fork ? ctx.rand.fork('sky') : null;
       const rf = () => (rnd && rnd.next ? rnd.next() : (rnd && rnd.random ? rnd.random() : 0.5));
-      uniforms.uRingSeed.value = 13.7 + rf() * 40.0;
+      for (let i = 0; i < RN; i++) uniforms.uRingSeedA.value[i] = 13.7 + rf() * 40.0 + (rings[i].seed || 0);
       uniforms.uPlanetSeed.value = 5.3 + rf() * 40.0;
 
       quad = new FullScreenQuad(null);
@@ -1092,13 +1347,32 @@ export function create(opts = {}) {
 
       ctx.on('config', ({ k, v }) => {
         if (k === 'skyDebugMode') uniforms.uDebugMode.value = v;
+        // Measurement hook: strip every "space" object so the atmosphere can be
+        // photometered on its own. Every elevation band in a normal frame is partly
+        // covered by the ring, Threshold or a star, and masking those out of a capture
+        // leaves too few pixels to trust.
+        if (k === 'skyBare') {
+          const off = !!v;
+          _bare = off;
+          for (let i = 0; i < RN; i++) uniforms.uRingOpacityA.value[i] = off ? 0 : rings[i].opacity;
+          uniforms.uStarStrength.value = off ? 0 : S.starStrength;
+          uniforms.uCirrusStrength.value = off ? 0 : S.cirrusStrength;
+          uniforms.uPlanetCosAng.value = off ? 2.0
+            : Math.cos(THREE.MathUtils.degToRad(S.planetAngularRadiusDeg));
+          uniforms.uGrain.value = off ? 0 : S.grain;
+        }
         if (k === 'skyMsScale') uniforms.uMsScale.value = v;
         if (k === 'skyMieScale') uniforms.uMieScale.value = v;
         if (k === 'skyIrradiance') uniforms.uSolarIrradiance.value = v;
-        if (k === 'ringBrightness') uniforms.uRingBrightness.value = v;
+        if (k === 'skyAtmTint') uniforms.uAtmTint.value.fromArray(v);
+        if (k === 'skyHazeTint') uniforms.uHazeTint.value.fromArray(v);
+        if (k === 'skyCircumsolar') uniforms.uCircumsolar.value = v;
+        if (k === 'skyGrain') uniforms.uGrain.value = v;
+        if (k === 'skyRingRail') uniforms.uRingRail.value = v;
+        if (k === 'ringBrightness') { for (let i = 0; i < RN; i++) uniforms.uRingBright.value[i] = rings[i].brightness * v; }
         if (k === 'planetBrightness') uniforms.uPlanetBrightness.value = v;
         if (k === 'starStrength') uniforms.uStarStrength.value = v;
-        if (k === 'ringAzimuth') { S.ringAzimuthDeg = v; this.syncFromTime(ctx); }
+        if (k === 'ringAzimuth') { rings[0].azimuthDeg = v; this.syncFromTime(ctx); }
         if (k === 'planetAzimuth') { S.planetAzimuthDeg = v; this.syncFromTime(ctx); }
         if (k === 'planetElevation') { S.planetElevationDeg = v; this.syncFromTime(ctx); }
         if (k === 'planetAngRadius') {
@@ -1119,17 +1393,24 @@ export function create(opts = {}) {
         const m = Math.max(c.r, c.g, c.b, 1e-4);
         uniforms.uSunTint.value.setRGB(c.r / m, c.g / m, c.b / m);
       }
-      // ring frame
-      const azR = THREE.MathUtils.degToRad(S.ringAzimuthDeg);
-      const east = _v3.set(Math.sin(azR), 0, Math.cos(azR)).normalize();
-      uniforms.uRingEast.value.copy(east);
-      uniforms.uRingAxis.value.set(Math.cos(azR), 0, -Math.sin(azR)).normalize();
-      uniforms.uRingRadiusKm.value = S.ringRadiusKm;
-      uniforms.uRingHalfWidthKm.value = S.ringRadiusKm * S.ringWidthRatio * 0.5;
+      // ring frames
+      for (let i = 0; i < RN; i++) {
+        const r = rings[i];
+        const azR = THREE.MathUtils.degToRad(r.azimuthDeg);
+        uniforms.uRingEast.value[i].set(Math.sin(azR), 0, Math.cos(azR)).normalize();
+        uniforms.uRingAxis.value[i].set(Math.cos(azR), 0, -Math.sin(azR)).normalize();
+        uniforms.uRingRadiusKm.value[i] = r.radiusKm;
+        uniforms.uRingHalfWidthKm.value[i] = r.radiusKm * r.widthRatio * 0.5;
+        uniforms.uRingArc.value[i] = THREE.MathUtils.degToRad(r.arcDeg);
+        uniforms.uRingTipFlare.value[i] = r.tipFlare;
+        uniforms.uRingLeg.value[i] = r.leg;
+        uniforms.uRingBright.value[i] = r.brightness;
+        uniforms.uRingOpacityA.value[i] = _bare ? 0 : r.opacity;
+      }
       // Threshold
       dirFromAzEl(S.planetAzimuthDeg, S.planetElevationDeg, uniforms.uPlanetDir.value);
       dirFromAzEl(S.planetPoleAzDeg, S.planetPoleElDeg, uniforms.uPlanetAxis.value);
-      uniforms.uPlanetCosAng.value = Math.cos(THREE.MathUtils.degToRad(S.planetAngularRadiusDeg));
+      if (!_bare) uniforms.uPlanetCosAng.value = Math.cos(THREE.MathUtils.degToRad(S.planetAngularRadiusDeg));
     },
 
     updateLuts(ctx, force = false) {

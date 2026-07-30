@@ -13,9 +13,52 @@
  */
 import puppeteer from 'puppeteer';
 import { spawn } from 'node:child_process';
-import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { writeFileSync, mkdirSync, existsSync, openSync, closeSync, unlinkSync, readdirSync, statSync } from 'node:fs';
+import { dirname, resolve, join as pjoin } from 'node:path';
+import { tmpdir } from 'node:os';
 import net from 'node:net';
+
+/**
+ * Global capture semaphore.
+ *
+ * A dozen-plus agents build concurrently, and each capture spawns its own vite + Chrome
+ * with a 1080p WebGL context. Unbounded, that exhausts system memory long before it
+ * saturates the GPU — measured 14 GB of 15 GB used with 17 agents in flight. The GPU is
+ * the real bottleneck anyway (89% busy at 4 concurrent), so serialising past that point
+ * costs nothing in throughput and buys back all the headroom.
+ *
+ * Slots are lock files in a shared tmp dir, taken with O_EXCL and released on exit.
+ * Stale slots (holder died) are reaped by age.
+ */
+const SEM_DIR = pjoin(tmpdir(), 'halo-capture-sem');
+const SEM_SLOTS = Number(process.env.HALO_CAPTURE_SLOTS || 4);
+const SEM_STALE_MS = 8 * 60 * 1000;
+let heldSlot = null;
+
+async function acquireSlot() {
+  mkdirSync(SEM_DIR, { recursive: true });
+  const t0 = Date.now();
+  for (;;) {
+    // reap stale holders
+    for (const f of readdirSync(SEM_DIR)) {
+      try {
+        if (Date.now() - statSync(pjoin(SEM_DIR, f)).mtimeMs > SEM_STALE_MS) unlinkSync(pjoin(SEM_DIR, f));
+      } catch { }
+    }
+    for (let i = 0; i < SEM_SLOTS; i++) {
+      const p = pjoin(SEM_DIR, `slot${i}.lock`);
+      try { closeSync(openSync(p, 'wx')); heldSlot = p; return; } catch { }
+    }
+    if (Date.now() - t0 > 15 * 60 * 1000) return;   // never deadlock a build
+    await new Promise((r) => setTimeout(r, 500 + Math.floor(Math.random() * 900)));
+  }
+}
+function releaseSlot() {
+  if (heldSlot) { try { unlinkSync(heldSlot); } catch { } heldSlot = null; }
+}
+process.on('exit', releaseSlot);
+process.on('SIGINT', () => { releaseSlot(); process.exit(1); });
+process.on('SIGTERM', () => { releaseSlot(); process.exit(1); });
 
 const argv = process.argv.slice(2);
 const arg = (k, d = null) => { const i = argv.indexOf('--' + k); return i >= 0 ? (argv[i + 1]?.startsWith('--') ? true : argv[i + 1]) : d; };
@@ -59,6 +102,7 @@ async function waitForServer(url, ms = 60000) {
 }
 
 async function main() {
+  await acquireSlot();          // bounded concurrency: see the semaphore above
   const port = OPT.port || await freePort();
   const server = spawn('node', ['node_modules/vite/bin/vite.js', '--port', String(port), '--strictPort', '--host', '127.0.0.1'],
     { cwd: ROOT, stdio: OPT.verbose ? 'inherit' : 'ignore', env: { ...process.env, NODE_ENV: 'development' } });
@@ -96,7 +140,7 @@ async function main() {
       '--disable-frame-rate-limit', '--disable-gpu-vsync',
       '--force-device-scale-factor=1', '--hide-scrollbars',
       `--window-size=${OPT.w},${OPT.h}`,
-      '--js-flags=--max-old-space-size=6144',
+      '--js-flags=--max-old-space-size=2048',
     ],
     defaultViewport: { width: OPT.w, height: OPT.h, deviceScaleFactor: 1 },
     protocolTimeout: OPT.timeout,
@@ -163,6 +207,7 @@ async function main() {
 
   await browser.close();
   if (!OPT.keepServer) cleanup();
+  releaseSlot();
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

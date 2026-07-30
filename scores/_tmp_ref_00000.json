@@ -1,0 +1,65 @@
+{
+  "tag": "ref_00000",
+  "ref": "kf_00000.png",
+  "test": "ref_00000.png",
+  "ssim": 0.0013589468339617135,
+  "ms_ssim": 0.0009059217520495272,
+  "hist": 0.9922683492048201,
+  "grad_hist": 1.0,
+  "lap_ratio": 0.0,
+  "edge_ratio": 0.0,
+  "lpips": 1.0015150308609009,
+  "spectral_slope_ref": -2.5481660179995127,
+  "spectral_slope_test": 0.0,
+  "ref_stats": {
+    "lum_mean": 112.1946551890432,
+    "lum_std": 51.69905817522571,
+    "p01": 16,
+    "p50": 116,
+    "p99": 228,
+    "shadow_frac": 0.03764805169753086,
+    "highlight_frac": 0.01380883487654321,
+    "sat_mean": 77.8595490933642,
+    "sat_std": 39.03175691593746,
+    "lab_a": 2.479930555555569,
+    "lab_b": 4.6720042438271605,
+    "lap_var": 598.7577440906099,
+    "edge_density": 0.0982494212962963,
+    "local_contrast": 0.18719816207885742,
+    "rgb_mean": [
+      117.44304301697531,
+      110.91217640817901,
+      105.09936149691357
+    ]
+  },
+  "test_stats": {
+    "lum_mean": 0.0,
+    "lum_std": 0.0,
+    "p01": 0,
+    "p50": 0,
+    "p99": 0,
+    "shadow_frac": 1.0,
+    "highlight_frac": 0.0,
+    "sat_mean": 0.0,
+    "sat_std": 0.0,
+    "lab_a": 0.0,
+    "lab_b": 0.0,
+    "lap_var": 0.0,
+    "edge_density": 0.0,
+    "local_contrast": 0.0,
+    "rgb_mean": [
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "axes": {
+    "structure": 0.0,
+    "grade": 0.0,
+    "perceptual": 0.0,
+    "detail": 0.0,
+    "geometry": 0.0,
+    "spectrum": 0.0
+  },
+  "score": 0.0
+}

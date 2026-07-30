@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>HALO — Silent Cartographer</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin:0; padding:0; height:100%; background:#000; overflow:hidden; }
+  body { font-family: "Segoe UI", Roboto, system-ui, sans-serif; cursor:default; }
+  #view { display:block; width:100vw; height:100vh; }
+  #hud { position:fixed; inset:0; pointer-events:none; }
+  #boot {
+    position:fixed; inset:0; display:flex; flex-direction:column; align-items:center;
+    justify-content:center; gap:22px; background:#04070b; color:#cfe6ff; z-index:50;
+    transition:opacity .6s ease; letter-spacing:.32em; text-transform:uppercase;
+  }
+  #boot.hidden { opacity:0; pointer-events:none; }
+  #boot h1 { font-size:13px; font-weight:600; margin:0; opacity:.62; }
+  #bar { width:280px; height:2px; background:#12202e; overflow:hidden; }
+  #barfill { height:100%; width:0%; background:linear-gradient(90deg,#2b6f9e,#7fd4ff); transition:width .25s ease; }
+  #bootmsg { font-size:10px; opacity:.4; letter-spacing:.18em; min-height:12px; }
+  #click {
+    position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+    background:rgba(2,5,9,.72); color:#bfe2ff; z-index:40; font-size:12px;
+    letter-spacing:.34em; text-transform:uppercase; backdrop-filter:blur(3px);
+  }
+  #click.hidden { display:none; }
+</style>
+</head>
+<body>
+  <canvas id="view"></canvas>
+  <div id="hud"></div>
+  <div id="click" class="hidden">Click to engage</div>
+  <div id="boot">
+    <h1>Silent Cartographer</h1>
+    <div id="bar"><div id="barfill"></div></div>
+    <div id="bootmsg">initialising</div>
+  </div>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

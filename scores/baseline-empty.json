@@ -1,0 +1,79 @@
+{
+  "tag": "baseline-empty",
+  "n": 1,
+  "score": 0,
+  "axes": {
+    "structure": 0,
+    "grade": 0,
+    "perceptual": 0,
+    "detail": 0,
+    "geometry": 0,
+    "spectrum": 0
+  },
+  "raw": {
+    "ssim": 0.0014,
+    "ms_ssim": 0.0009,
+    "hist": 0.9923,
+    "lpips": 1.0015,
+    "lap_ratio": 0,
+    "edge_ratio": 0
+  },
+  "render_stats": {
+    "lum_mean": 0,
+    "lum_std": 0,
+    "sat_mean": 0,
+    "lap_var": 0,
+    "edge_density": 0,
+    "local_contrast": 0,
+    "shadow_frac": 1,
+    "highlight_frac": 0
+  },
+  "ref_stats": {
+    "lum_mean": 112.1947,
+    "lum_std": 51.6991,
+    "sat_mean": 77.8595,
+    "lap_var": 598.7577,
+    "edge_density": 0.0982,
+    "local_contrast": 0.1872,
+    "shadow_frac": 0.0376,
+    "highlight_frac": 0.0138
+  },
+  "spectral": {
+    "ref": -2.548,
+    "test": 0
+  },
+  "perf": {
+    "fps": 0,
+    "ms": 0,
+    "drawCalls": 14,
+    "tris": 14
+  },
+  "worst": [
+    {
+      "pose": "ref_00000",
+      "score": 0,
+      "axes": {
+        "structure": 0,
+        "grade": 0,
+        "perceptual": 0,
+        "detail": 0,
+        "geometry": 0,
+        "spectrum": 0
+      }
+    }
+  ],
+  "per_pose": [
+    {
+      "pose": "ref_00000",
+      "score": 0,
+      "axes": {
+        "structure": 0,
+        "grade": 0,
+        "perceptual": 0,
+        "detail": 0,
+        "geometry": 0,
+        "spectrum": 0
+      }
+    }
+  ]
+}

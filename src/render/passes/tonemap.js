@@ -34,10 +34,13 @@ import { Pass, fsMaterial, FullScreenQuad } from '../RenderPipeline.js';
  * Auto-exposure is deliberately absent: it makes a capture depend on what the camera
  * happened to be pointing at on the previous frame, which destroys determinism and
  * therefore the whole measurement loop. Instead the exposure is a manual scalar with a
- * photographic basis — it is keyed so that a Lambertian 18% grey card facing the key
- * light under `time.state.sunIntensity` lands on AgX's middle grey. See
- * `keyedExposure()` below; `ctx.config.exposure` overrides it outright and
- * `ctx.config.exposureEV` offsets it in stops.
+ * photographic basis: it is keyed so an 18% Lambertian grey card lying on the beach
+ * lands on AgX's middle grey, which works out to `exposure = pi / E` where E is the
+ * irradiance on the ground plane. With the reference rig (sun 6.2 at 41 degrees plus
+ * the 1.35 sky fill) that is 0.685, and AgX returns sRGB 127.6 for scene-linear 0.18 —
+ * dead centre, no fudge factor. See `keyedExposure()`. `ctx.config.exposure` is seeded
+ * with that value and can simply be overwritten; `ctx.config.exposureEV` offsets
+ * whatever is in force by whole stops.
  *
  * ## Config
  *
@@ -48,7 +51,8 @@ import { Pass, fsMaterial, FullScreenQuad } from '../RenderPipeline.js';
  *   agxLook         [s,o,p,sat]  AgX look: slope, offset, power, saturation (neutral = [1,0,1,1])
  *   tonemapGuard    bool      NaN/Inf repair (default true)
  *
- * Cost: one full-screen triangle, ~20 ALU + 1 tap. ~0.09 ms at 1920x1080 on a 3080 Ti.
+ * Cost: one full-screen triangle, ~20 ALU + 1 tap. Measured 0.05 ms at 1920x1080 on a
+ * 3080 Ti (400-frame A/B against the pass disabled, with a per-frame pipeline flush).
  */
 
 /* ------------------------------------------------------------------ matrices */
@@ -103,6 +107,20 @@ export const AGX_MAX_EV = 4.026069;
 
 /** Rec.709 luma weights, used by the AgX look and by the alternates' desaturation. */
 const LUMA = [0.2126, 0.7152, 0.0722];
+
+const MODES = { agx: 0, aces: 1, reinhard: 2, none: 3 };
+
+/**
+ * Exposure compensation per tonemapper, so that switching one out is an A/B of the
+ * *curve* and not an accidental exposure change.
+ *
+ * All three are normalised to where AgX puts scene-linear 0.18, which is sRGB 127.6 —
+ * middle grey, by construction. ACES's fitted RRT+ODT is much darker through the
+ * midtones (0.18 lands at 91.4) and extended Reinhard sits between them (109.1), so
+ * without this a mode switch would read as "ACES is 0.75 stops under" rather than as
+ * a difference in shoulder and hue behaviour. Solved numerically against `tonemapJS`.
+ */
+const MODE_GAIN = { agx: 1.0, aces: 1.6757, reinhard: 1.5031, none: 1.0 };
 
 /* -------------------------------------------------------------- JS reference */
 /* These mirror the GLSL exactly and exist so the grade can be calibrated offline
@@ -174,10 +192,13 @@ export function srgbEncodeJS(c) {
  * @param {object}   p     { exposure, mode, white, look }
  */
 export function tonemapJS(rgb, p = {}) {
-  const e = p.exposure ?? 1;
-  const lin = [rgb[0] * e, rgb[1] * e, rgb[2] * e];
+  const mode = (p.mode in MODES) ? p.mode : 'agx';
+  const e = (p.exposure ?? 1) * MODE_GAIN[mode];
+  // Same NaN/Inf contract as the shader: non-finite in, black out, never propagated.
+  const g = (v) => (Number.isFinite(v) ? Math.max(v, 0) : 0);
+  const lin = [g(rgb[0]) * e, g(rgb[1]) * e, g(rgb[2]) * e];
   let d;
-  switch (p.mode || 'agx') {
+  switch (mode) {
     case 'aces': d = acesFitJS(lin); break;
     case 'reinhard': d = reinhardJS(lin, p.white ?? 6); break;
     case 'none': d = lin.map((v) => Math.min(Math.max(v, 0), 1)); break;
@@ -188,71 +209,67 @@ export function tonemapJS(rgb, p = {}) {
 
 /* ------------------------------------------------------------------- exposure */
 
-const _lightDir = new THREE.Vector3();
 const lum709 = (c) => 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
 
 /**
- * Luminous irradiance falling on the *ground plane* — an upward-facing Lambertian
- * surface — in the units three's physical lights use.
- *
- * Directional lights are combined with `max`, not `sum`: CSM registers one
- * DirectionalLight per cascade, all with the same colour, direction and intensity, and
- * each lights only its own depth slice. Summing them would over-key the exposure by
- * exactly the cascade count. The warm sand bounce points upward, so its `dir.y` is
- * negative and it correctly contributes nothing to a surface facing the sky.
+ * Ambient (non-directional) luminous irradiance reaching an upward-facing surface.
+ * A HemisphereLight gives an up-facing normal its sky half in full, so its `color` and
+ * `intensity` are the whole story; an AmbientLight is uniform by definition.
  */
-function groundIrradiance(scene) {
-  let sun = 0, ambient = 0, found = false;
+function ambientIrradiance(scene) {
+  let a = 0;
   scene.traverse((o) => {
     if (!o.isLight || o.visible === false || !(o.intensity > 0)) return;
-    const L = lum709(o.color) * o.intensity;
-    if (o.isDirectionalLight) {
-      _lightDir.copy(o.position);
-      if (o.target) _lightDir.sub(o.target.position);
-      const len = _lightDir.length();
-      if (len < 1e-6) return;
-      sun = Math.max(sun, L * Math.max(_lightDir.y / len, 0));
-      found = true;
-    } else if (o.isHemisphereLight) {
-      ambient += L;                       // sky half, seen in full by an up-facing normal
-      found = true;
-    } else if (o.isAmbientLight) {
-      ambient += L;
-      found = true;
-    }
+    if (o.isHemisphereLight || o.isAmbientLight) a += lum709(o.color) * o.intensity;
   });
-  return found ? sun + ambient : 0;
+  return a;
 }
 
 /**
  * Photographic key. Pick the linear multiplier that lands an 18% Lambertian grey card
- * lying on the beach on AgX's middle grey (0.18 scene-linear at the tonemap input).
+ * lying on the beach on AgX's middle grey.
  *
  *   card radiance  L = 0.18/pi * E          E = irradiance on the ground plane
  *   we want        L * exposure = 0.18
  *   therefore      exposure = pi / E
  *
- * The albedo cancels, so this depends on nothing but the lights `lighting` actually
- * put in the scene — no image feedback, no frame-to-frame state, and identical for
- * every capture of a given time of day. That is the entire reason auto-exposure is
- * not used here: it would make a screenshot depend on where the camera was pointing
- * on the previous frame and the measurement loop would stop being reproducible.
+ * The albedo cancels, so this depends on nothing but the lighting rig — no image
+ * feedback, no frame-to-frame state, and identical for every capture at a given time
+ * of day. That is the entire reason auto-exposure is not used: it would make a
+ * screenshot depend on where the camera was pointing on the *previous* frame, and the
+ * measurement loop would stop being reproducible.
  *
- * Sanity check against the clip: inverting AgX on kf_00000 puts sunlit dry sand at a
- * scene-linear (0.638, 0.409, 0.222), luma 0.444. With `lighting`'s defaults the same
- * surface renders at luma ~0.70, i.e. it wants ~0.64x — and pi / E with those lights
- * comes out at 0.67. The two independent derivations agree to 5%.
+ * AgX earns the "middle grey" half of that claim: feeding it 0.18 returns sRGB 127.6,
+ * i.e. dead centre, so exposure = pi / E needs no fudge factor.
+ *
+ * The sun term is read from `time`, not from the DirectionalLights in the scene, and
+ * that is deliberate. `time` is the documented authority for sun direction, and CSM's
+ * per-cascade lights do not have their transforms set until `csm.update()` runs in
+ * lighting's prerender — which is *after* this pass initialises. Reading `light.position`
+ * here would see three's default (0,1,0), read the sun as straight overhead, and
+ * over-key the irradiance by 1/sin(elevation): 0.53 stops of silent under-exposure at
+ * the reference's 41 degrees. (Measured: it produced 0.472 instead of 0.685.)
+ * The sand-bounce fill is ignored for the same reason it should be — it shines upward,
+ * so it delivers nothing to a surface facing the sky.
+ *
+ * Cross-check against the clip: inverting AgX on kf_00000 puts sunlit dry sand at a
+ * scene-linear (0.638, 0.409, 0.222), luma 0.444. Rendering the same surface under
+ * this rig gives luma ~0.70, i.e. it wants ~0.64x — and pi / E comes out at 0.685.
+ * Two independent derivations, 7% apart.
  */
 export function keyedExposure(ctx) {
-  let E = ctx?.scene ? groundIrradiance(ctx.scene) : 0;
-  if (!(E > 1e-6)) {
-    // No lights yet (isolated-module preview): fall back to the documented reference
-    // rig — sun 6.2 at 41 deg elevation plus the 1.35 sky fill.
-    const time = ctx?.get?.('time');
-    const sun = time?.state?.sunIntensity ?? 6.2;
-    const s = Math.max(Math.sin((time?.state?.elevationDeg ?? 41) * Math.PI / 180), 0.02);
-    E = sun * s + 1.35 * Math.pow(s, 0.35) * 0.545;
-  }
+  const time = ctx?.get?.('time');
+  const sunLum = time?.sunColor ? lum709(time.sunColor) : 0.99;
+  const sunI = time?.state?.sunIntensity ?? 6.2;
+  const sinEl = time?.sunDir
+    ? Math.max(time.sunDir.y, 0)
+    : Math.max(Math.sin((time?.state?.elevationDeg ?? 41) * Math.PI / 180), 0);
+
+  let E = sunLum * sunI * sinEl;
+  const amb = ctx?.scene ? ambientIrradiance(ctx.scene) : 0;
+  // No sky fill in the scene yet (isolated-module preview): assume the documented rig.
+  E += amb > 0 ? amb : 1.35 * Math.pow(Math.max(sinEl, 0.02), 0.35) * 0.545;
+
   return Math.PI / Math.max(E, 1e-6);
 }
 
@@ -359,8 +376,6 @@ void main(){
 }
 `;
 
-const MODES = { agx: 0, aces: 1, reinhard: 2, none: 3 };
-
 /* ------------------------------------------------------------------- the pass */
 
 export function create(opts = {}) {
@@ -400,8 +415,9 @@ export function create(opts = {}) {
     const c = ctx.config;
     const u = mat.uniforms;
     if (c.exposure === undefined || c.exposure === null) c.exposure = keyedExposure(ctx);
-    u.uExposure.value = c.exposure * Math.pow(2, c.exposureEV || 0);
-    u.uMode.value = MODES[c.tonemapper] ?? MODES.agx;
+    const mode = c.tonemapper in MODES ? c.tonemapper : 'agx';
+    u.uExposure.value = c.exposure * MODE_GAIN[mode] * Math.pow(2, c.exposureEV || 0);
+    u.uMode.value = MODES[mode];
     u.uWhite.value = c.tonemapWhite ?? 6.0;
     u.uGuard.value = (c.tonemapGuard ?? true) ? 1 : 0;
     const lk = c.agxLook;

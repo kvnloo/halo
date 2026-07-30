@@ -18,20 +18,23 @@ import { Pass, fsMaterial, makeRT, FullScreenQuad } from '../RenderPipeline.js';
  *     1/(1+luma) before it is combined, so a single blown-out sub-pixel highlight
  *     cannot dominate a 13-tap footprint. Without it, sun glitter on the swash
  *     produces crawling fireflies that the temporal pass then smears into streaks.
- *  2. **Exposure-relative threshold.** The chain carries log2(luma) in alpha all the
- *     way down; a 1×1 reduction of the smallest mip is the frame's geometric-mean
- *     luminance, and the knee sits at `bloomThresholdRel ×` that. The pass therefore
- *     does the same thing whatever absolute scale the HDR buffer happens to be in and
- *     whatever exposure the tonemapper later picks — only genuinely bright things
- *     (sun disc, specular glints) ever cross the knee. One frame of latency, which is
- *     deterministic under the capture harness.
+ *  2. **Display-referred threshold.** The knee must land at "brighter than white on
+ *     screen", not at some absolute linear number, or it means something different
+ *     every time anyone re-keys the exposure. If the tonemapper publishes
+ *     `ctx.config.exposure`, the knee is `bloomThresholdDisplay / exposure` — bloom
+ *     starts just above display white, full stop. If it does not, the pass calibrates
+ *     itself: the chain carries log2(luma) in alpha all the way down, a 1×1 reduction
+ *     of the smallest mip is the frame's geometric-mean luminance, and the knee sits
+ *     at `bloomThresholdRel ×` that. Either way only genuinely bright things (sun
+ *     disc, wet-sand glints) cross it. The fallback costs one frame of latency, which
+ *     is deterministic under the capture harness.
  *  3. **Unit-energy upsample.** Each step is `mix(dst, tent(src), k)`, done with
  *     fixed-function blending (src=One, dst=OneMinusSrcAlpha, alpha=k), so the mip
  *     weights sum to exactly 1 and `intensity` means "fraction of glare energy",
  *     not "arbitrary brightness knob". The reference is not hazy: default is low.
  *
  * ctx.config knobs (all live):
- *   bloomIntensity 0.28   bloomThresholdRel 3.1   bloomThresholdAbs 0.02
+ *   bloomIntensity 0.28   bloomThresholdRel 3.1   bloomThresholdDisplay 1.12
  *   bloomKnee 0.55        bloomRadius 1.0         bloomMix 0.55
  *   bloomAnamorphic 1.35  bloomClamp 140          bloomTint [1,1,1]
  */
@@ -41,7 +44,11 @@ const LEVELS = 6;
 const HEAD = /* glsl */`
 in vec2 vUv;
 float bLum(vec3 c){ return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+/** For glare energy: NaN-safe, non-negative — scattered light cannot be negative. */
 vec3 bSan(vec3 c){ return clamp(mix(vec3(0.0), c, vec3(equal(c, c))), vec3(0.0), vec3(60000.0)); }
+/** For the scene passing through: NaN/Inf-safe only. Wide-gamut transforms legitimately
+ *  carry small negatives and the tonemapper owns what to do with them — not this pass. */
+vec3 bGuard(vec3 c){ return clamp(mix(vec3(0.0), c, vec3(equal(c, c))), vec3(-60000.0), vec3(60000.0)); }
 `;
 
 /* 13-tap "dual filter" kernel, offsets in source texels.
@@ -54,7 +61,7 @@ const PREFILTER_FRAG = HEAD + /* glsl */`
 uniform sampler2D tSrc;
 uniform sampler2D tAvg;
 uniform vec2  uT;
-uniform float uThreshRel, uThreshAbs, uKnee, uClamp;
+uniform float uThreshRel, uThreshAbs, uThreshDisplay, uExposure, uKnee, uClamp;
 out vec4 oCol;
 
 vec3 S(vec2 o){ return bSan(texture(tSrc, vUv + o * uT).rgb); }
@@ -83,9 +90,12 @@ void main(){
   float w4 = 0.500 / (1.0 + bLum(g4));
   vec3 col = (g0*w0 + g1*w1 + g2*w2 + g3*w3 + g4*w4) / (w0 + w1 + w2 + w3 + w4);
 
-  // exposure-relative soft knee
+  // Soft knee placed in *display*-referred terms so the pass is invariant to whatever
+  // absolute scale the HDR buffer is in. If the tonemapper publishes ctx.config.exposure
+  // that is authoritative; otherwise fall back to the frame's own geometric-mean luma.
   float avgL = max(exp2(texture(tAvg, vec2(0.5)).r) - 1e-3, 0.0);
-  float thr  = max(uThreshAbs, uThreshRel * avgL);
+  float thr  = (uExposure > 0.0) ? (uThreshDisplay / uExposure)
+                                 : max(uThreshAbs, uThreshRel * avgL);
   float knee = max(uKnee * thr, 1e-4);
   float br   = max(col.r, max(col.g, col.b));
   float sq   = clamp(br - thr + knee, 0.0, 2.0 * knee);
@@ -165,7 +175,7 @@ uniform vec3  uTint;
 uniform float uIntensity;
 out vec4 oCol;
 void main(){
-  vec3 s = bSan(texture(tSrc, vUv).rgb);
+  vec3 s = bGuard(texture(tSrc, vUv).rgb);
   vec3 b = bSan(texture(tBloom, vUv).rgb);
   oCol = vec4(s + b * uTint * uIntensity, 1.0);
 }
@@ -185,6 +195,7 @@ export function create(opts = {}) {
     intensity: 0.28,
     thresholdRel: 3.1,
     thresholdAbs: 0.02,
+    thresholdDisplay: 1.12,
     knee: 0.55,
     radius: 1.0,
     mix: 0.55,
@@ -199,6 +210,7 @@ export function create(opts = {}) {
       tSrc: { value: null }, tAvg: { value: null },
       uT: { value: new THREE.Vector2() },
       uThreshRel: { value: cfg.thresholdRel }, uThreshAbs: { value: cfg.thresholdAbs },
+      uThreshDisplay: { value: cfg.thresholdDisplay }, uExposure: { value: 0 },
       uKnee: { value: cfg.knee }, uClamp: { value: cfg.clamp },
     });
     mDown = fsMaterial(DOWNSAMPLE_FRAG, { tSrc: { value: null }, uT: { value: new THREE.Vector2() } });
@@ -227,7 +239,7 @@ export function create(opts = {}) {
 
     avgRT = makeRT(1, 1, { minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter });
     p._seedAvg(ctx);
-    p.setSize(pipe.w || ctx.size.w, pipe.h || ctx.size.h, ctx);
+    p.setSize(Math.max(2, pipe.w > 2 ? pipe.w : ctx.size.w), Math.max(2, pipe.h > 2 ? pipe.h : ctx.size.h), ctx);
   };
 
   /** Deterministic starting exposure estimate: log2(1.0). */
@@ -242,7 +254,7 @@ export function create(opts = {}) {
   };
 
   p.setSize = (w, h, ctx) => {
-    if (!mPre || (w === W && h === H)) return;
+    if (!mPre || (w === W && h === H && mips.length === LEVELS)) return;
     W = w; H = h;
     for (const rt of mips) rt.dispose();
     mips = [];
@@ -269,10 +281,24 @@ export function create(opts = {}) {
     if (!avgSeeded) p._seedAvg(ctx);
 
     const intensity = c.bloomIntensity ?? cfg.intensity;
-    if (intensity <= 0.0) { pipe.blit(pipe.read.texture, out); return; }
+    if (intensity <= 0.0) {
+      // Straight through — but via the composite, not pipe.blit(): the pipeline's copy
+      // material is NormalBlending and passes the source alpha through, so on a target
+      // holding stale contents it blends rather than copies. The composite forces a=1.
+      mComp.uniforms.tSrc.value = pipe.read.texture;
+      mComp.uniforms.tBloom.value = mips[0].texture;
+      mComp.uniforms.uIntensity.value = 0.0;
+      _draw(r, mComp, out);
+      return;
+    }
 
     mPre.uniforms.uThreshRel.value = c.bloomThresholdRel ?? cfg.thresholdRel;
     mPre.uniforms.uThreshAbs.value = c.bloomThresholdAbs ?? cfg.thresholdAbs;
+    mPre.uniforms.uThreshDisplay.value = c.bloomThresholdDisplay ?? cfg.thresholdDisplay;
+    // >0 means "the tonemapper told us its exposure"; 0 means "self-calibrate".
+    // Must include exposureEV — that is the stop offset the tonemap actually applies.
+    mPre.uniforms.uExposure.value = (typeof c.exposure === 'number' && c.exposure > 0)
+      ? c.exposure * Math.pow(2, c.exposureEV || 0) : 0;
     mPre.uniforms.uKnee.value = c.bloomKnee ?? cfg.knee;
     mPre.uniforms.uClamp.value = c.bloomClamp ?? cfg.clamp;
 

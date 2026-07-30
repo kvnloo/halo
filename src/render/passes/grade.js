@@ -63,52 +63,99 @@ import { Pass, fsMaterial, FullScreenQuad } from '../RenderPipeline.js';
  *   gradeLutSize      number   LUT grid resolution (default 32; a rebuild reallocates)
  *
  * Cost: 4 texelFetch from a 512 KB RGBA32F volume that lives in L2, plus ~10 ALU.
- * ~0.07 ms at 1920x1080 on a 3080 Ti. LUT rebuild is ~2 ms of CPU, off the hot path.
+ * Measured 0.21 ms at 1920x1080 on a 3080 Ti; 0.26 ms for tonemap + grade together.
+ * The 32^3 lattice is accurate to 0.43 code values against the exact transform, and the
+ * rebuild is 9.6 ms of CPU that only runs when a parameter actually changes.
  */
 
 /* --------------------------------------------------------------- the defaults */
 /*
- * Calibrated against the reference clip. The reasoning behind each number:
+ * How these were calibrated
+ * -------------------------
+ * The AgX in `tonemap` is exactly invertible, which makes the reference clip usable as
+ * ground truth without a renderer. Inverting sRGB then AgX on a keyframe recovers a
+ * scene-linear HDR estimate; pushing that back through the forward transform at
+ * exposure 1 with the grade bypassed reproduces the keyframe to three decimal places
+ * on every statistic (verified: lum_mean 112.195 in, 112.195 out; sat_mean 77.860 vs
+ * 77.859). So in display space the grade's *input distribution is the reference clip
+ * itself*, and the defaults can be fitted directly against it.
  *
- *  - slope is a warm push of +1.2% red / -1.4% blue. The clip's mean lab_a is +2.6 and
- *    lab_b hovers around zero, i.e. a very slight magenta-warm bias with *no* yellow
- *    cast. Pushing red and pulling blue while leaving green alone moves a and leaves b
- *    almost untouched, which is exactly that signature. Nudging red/yellow instead —
- *    the reflex "make it warm" move — overshoots lab_b and lands in the orange-and-teal
- *    look the reference conspicuously does not have.
- *  - saturation 1.075: the reference sits at sat_mean 83.9/255 against a neutral AgX
- *    render's ~78. AgX's inset/outset pair deliberately leaves a little saturation on
- *    the table in exchange for its highlight behaviour; this puts it back.
- *  - contrast 1.045 about a 0.42 pivot: matches lum_std 52.3 / local_contrast 0.192
- *    without steepening the toe, because the pivot sits below the midpoint.
- *  - the split tone is deliberately tiny (2 code values at 8 bits). Its job is to keep
- *    the sky-fill in the shadows reading as *sky* rather than as grey, and to let the
- *    sand bounce read as warm, not to be a look.
- *  - toe/shoulder as derived from the clip's measured tails, above.
+ * The fit ran over the eight keyframes the loop actually scores (kf_00000 … kf_02220),
+ * collapsed into a 64^3 RGB histogram, minimising weighted squared error against the
+ * target signature. Measured afterwards at full resolution through this exact code
+ * path — 32^3 LUT, tetrahedral fetch and all — mean over those eight frames:
+ *
+ *      stat             ungraded    graded    target
+ *      lum_mean          105.87     106.69    107.8
+ *      lum_std            52.30      51.98     52.3
+ *      p01                14.88      17.88     17
+ *      p50               100.63     101.75    105
+ *      p99               222.50     221.25    221
+ *      shadow_frac        0.058      0.056    0.050
+ *      highlight_frac     0.009      0.008    0.007
+ *      sat_mean           77.87      84.09     83.9
+ *      lab_a               2.81       3.24      3.2
+ *      lab_b              -1.91       1.35      1.4
+ *      local_contrast     0.193      0.192    0.192
+ *
+ * and the tails, which is the part that matters most: darkest pixel 10, brightest 241,
+ * zero pixels at 0 and zero at 255 across all eight frames.
+ *
+ * (p50 is the one holdout. The keyframes' own ungraded p50 is 100.6 against a target of
+ * 105, so most of that gap is already in the source; closing it with the grade would
+ * have cost lum_mean and shadow_frac. Midtone placement belongs to exposure, not to
+ * the grade — ctx.config.exposureEV is the correct knob once the scene is real.)
+ *
+ * The search was constrained to grades a colourist would actually dial, because the
+ * unconstrained optimum was a fake: it hit every number with a 0.01-wide shoulder knee
+ * (a hard clip at 245 wearing a roll-off costume), a cyan highlight tint and a contrast
+ * pivot up at 0.81. The numbers are a proxy for the look, not the look.
+ *
+ * What each number is doing
+ * -------------------------
+ *  - slope +1.5% red / -2.6% blue, green untouched. The clip's bias is lab_a +3.2 with
+ *    lab_b only +1.4 — a faint magenta-warm cast, not a yellow one. Lifting red and
+ *    trimming blue moves a hard and b gently, which is that signature. The reflex
+ *    "make it warm" move — push red and yellow together — overshoots lab_b by 3x and
+ *    lands squarely in the orange-and-teal look the reference conspicuously avoids.
+ *  - gamma 1.02/1.02/0.98 keeps that same warm bias in the midtones without touching
+ *    either endpoint, where the slope alone would have tilted the whole ramp.
+ *  - saturation 1.10. AgX's inset/outset pair deliberately leaves some saturation on
+ *    the table in exchange for its highlight behaviour; this puts it back, and it is
+ *    the single largest contributor to sat_mean 77.9 -> 84.1.
+ *  - contrast is left at 1.0 about a 0.52 pivot. The reference does not want a contrast
+ *    trim on top of AgX's own sigmoid; the knob is here, unused, for the loop.
+ *  - the split tone is tiny by design: 3 code values of blue into the shadows and 3 of
+ *    red into the highlights. Its job is to keep the sky fill in shadow reading as
+ *    *sky* rather than as grey, and to let the sand bounce read warm. It is not a look.
+ *  - toe (floor 0.005, knee 0.100) puts pure black at code 10 and is imperceptible
+ *    above code 26. Shoulder (ceiling 1.0, knee at 0.85) puts pure white at 241 and is
+ *    imperceptible below 217 (it maps 1.0 to 241 before the warm slope). Both are
+ *    derived from the clip's measured tails.
  */
 const DEFAULTS = {
   gradeEnabled: true,
 
-  gradeCdlSlope: [1.012, 1.000, 0.986],
-  gradeCdlOffset: [0.000, 0.000, 0.000],
+  gradeCdlSlope: [1.015, 1.000, 0.974],
+  gradeCdlOffset: [0.000, -0.004, -0.004],
   gradeCdlPower: [1.000, 1.000, 1.000],
 
   gradeLift: [0.000, 0.000, 0.000],
-  gradeGamma: [1.000, 1.000, 1.000],
+  gradeGamma: [1.020, 1.020, 0.980],
   gradeGain: [1.000, 1.000, 1.000],
 
-  gradeContrast: 1.045,
-  gradePivot: 0.420,
-  gradeSaturation: 1.075,
+  gradeContrast: 1.000,
+  gradePivot: 0.520,
+  gradeSaturation: 1.100,
 
-  gradeShadowTint: [-0.004, 0.000, 0.008],
-  gradeHighlightTint: [0.008, 0.003, -0.006],
+  gradeShadowTint: [0.0000, 0.0000, 0.0120],
+  gradeHighlightTint: [0.0105, -0.0035, 0.0000],
   gradeSplitPivot: 0.500,
 
-  gradeBlackFloor: 0.010,
-  gradeToeStart: 0.075,
-  gradeWhiteCeil: 1.000,
-  gradeShoulderStart: 0.870,
+  gradeBlackFloor: 0.0050,
+  gradeToeStart: 0.1000,
+  gradeWhiteCeil: 1.0000,
+  gradeShoulderStart: 0.8500,
 
   gradeDither: 1.0,
   gradeLutSize: 32,

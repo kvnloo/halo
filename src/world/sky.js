@@ -38,8 +38,8 @@ const ATMO_GLSL = /* glsl */`
 const float ATM_Rg = 6360.0;                       // km, ground
 const float ATM_Rt = 6420.0;                       // km, top of atmosphere
 const vec3  ATM_bR = vec3(5.802e-3, 13.558e-3, 33.100e-3);   // Rayleigh scatter /km
-const float ATM_bMs = 3.996e-3;                    // Mie scatter /km
-const float ATM_bMe = 4.400e-3;                    // Mie extinction /km
+const float ATM_bMs = 1.900e-3;                    // Mie scatter /km
+const float ATM_bMe = 2.150e-3;                    // Mie extinction /km
 const vec3  ATM_bO = vec3(0.650e-3, 1.881e-3, 0.085e-3);     // ozone absorption /km
 const float ATM_Hr = 8.0;
 const float ATM_Hm = 1.2;
@@ -383,6 +383,9 @@ uniform vec3  uPlanetAxis;
 uniform float uPlanetCosAng;    // cos of the angular radius
 uniform float uPlanetBrightness;
 uniform float uPlanetTerminator;
+uniform float uPlanetLimbHaze;
+uniform float uPlanetAtmo;
+uniform float uPlanetAuroraq;
 uniform vec3  uPlanetColA;
 uniform vec3  uPlanetColB;
 uniform vec3  uPlanetColC;
@@ -417,15 +420,15 @@ vec3 stars(vec3 dir, float px){
       vec2 o = vec2(float(i), float(j));
       vec2 id = gi + o + face*37.0;
       float h0 = starCellHash(id, 1.0);
-      if (h0 > 0.30) continue;                     // most cells are empty
+      if (h0 > 0.24) continue;                     // most cells are empty
       vec2 pos = o + vec2(starCellHash(id, 5.0), starCellHash(id, 9.0));
       float d = length((gf - pos) * cell);          // angular-ish distance
       float mag = starCellHash(id, 13.0);
       float bright = pow(mag, 5.0) + 0.06;
-      float rad = px * (0.85 + 1.5*pow(mag, 8.0));
+      float rad = px * (0.78 + 1.1*pow(mag, 8.0));
       float core = exp(-(d*d) / (rad*rad));
       float halo = 0.10 * exp(-(d) / (rad*2.6));
-      vec3 tint = mix(vec3(0.82, 0.88, 1.0), vec3(1.0, 0.90, 0.78), starCellHash(id, 21.0));
+      vec3 tint = mix(vec3(0.68, 0.84, 1.28), vec3(1.0, 0.99, 0.97), starCellHash(id, 21.0)*0.45);
       acc += tint * bright * (core + halo);
     }
   }
@@ -458,41 +461,46 @@ RingHit ringTrace(vec3 dir){
 }
 
 vec3 ringSurface(float s, float v, out float lum){
-  // s: arc length along the circumference (km), v: across the band, -1..1
-  vec2 q = vec2(s, v*uRingHalfWidthKm) / 190.0 + vec2(uRingSeed, uRingSeed*0.37);
+  // s: arc length along the circumference (km), v: across the band, -1..1.
+  // One unit = 300 km, so the coarse octaves land at continent scale and the finest
+  // around 20 km — enough to read as weather rather than as noise.
+  vec2 q = vec2(s, v*uRingHalfWidthKm) / 300.0 + vec2(uRingSeed, uRingSeed*0.37);
 
-  float cont = warpedFbm2(q*0.42, 5, 1.15);
-  float shelf = smoothstep(-0.045, 0.010, cont);
-  float land  = smoothstep(0.010, 0.075, cont);
-  float alt   = smoothstep(0.05, 0.24, cont);
+  float cont = warpedFbm2(q*0.50, 6, 1.40);
+  float shelf = smoothstep(-0.085, -0.010, cont);
+  float land  = smoothstep(-0.010, 0.050, cont);
+  float alt   = smoothstep(0.040, 0.215, cont);
 
-  vec3 deep    = vec3(0.048, 0.115, 0.255);
-  vec3 shallow = vec3(0.150, 0.420, 0.520);
-  vec3 grass   = vec3(0.130, 0.215, 0.115);
-  vec3 dry     = vec3(0.330, 0.300, 0.190);
-  vec3 rock    = vec3(0.430, 0.415, 0.360);
+  vec3 deep    = vec3(0.030, 0.090, 0.270);
+  vec3 shallow = vec3(0.110, 0.330, 0.560);
+  vec3 grass   = vec3(0.100, 0.170, 0.150);
+  vec3 dry     = vec3(0.290, 0.280, 0.245);
+  vec3 rock    = vec3(0.400, 0.410, 0.430);
 
   vec3 c = mix(deep, shallow, shelf);
-  vec3 ground = mix(grass, dry, smoothstep(0.0, 1.0, fbm2(q*1.7 + 11.0, 4)*0.5 + 0.5));
-  ground = mix(ground, rock, alt*0.8);
+  vec3 ground = mix(grass, dry, fbm2(q*1.05 + 11.0, 3)*0.5 + 0.5);
+  ground = mix(ground, rock, alt*0.75);
   c = mix(c, ground, land);
 
-  // rivers / lake glints scratched into the land
-  float riv = 1.0 - smoothstep(0.0, 0.035, abs(ridged2(q*1.05 + 4.3, 4) - 0.62));
-  c = mix(c, shallow*0.8, riv*land*0.55);
+  // inland seas and river systems scratched into the land
+  float riv = 1.0 - smoothstep(0.0, 0.050, abs(ridged2(q*0.85 + 4.3, 4) - 0.58));
+  c = mix(c, shallow*0.9, riv*land*0.65);
 
-  // cloud deck: stretched along the circumference, the dominant visual
-  vec2 cq = vec2(q.x*0.85, q.y*2.1);
-  float cw = fbm2(cq*1.15 + 21.0, 4);
-  float cl = fbm2(cq*2.3 + vec2(cw*1.4, cw*0.6) + 51.0, 6);
-  float cover = smoothstep(-0.055, 0.135, cl);
-  float wisp = smoothstep(-0.16, 0.22, cl) * 0.45;
-  vec3 cloud = vec3(1.02, 1.05, 1.10);
+  // cloud deck, sheared along the circumference: two scales so the band keeps
+  // detail from the zenith all the way down to the haze.
+  vec2 cq = vec2(q.x*0.55, q.y*1.9);
+  float cw = fbm2(cq*0.70 + 21.0, 3);
+  float cl = fbm2(cq*1.05 + vec2(cw*1.9, cw*0.5) + 51.0, 5);
+  float cf = fbm2(cq*3.30 + vec2(cw*1.1, 0.0) + 77.0, 4);
+  float cover = smoothstep(-0.010, 0.150, cl + cf*0.30);
+  float wisp  = smoothstep(-0.200, 0.250, cl) * 0.45;
+  vec3 cloud = vec3(0.70, 0.95, 1.36);
 
-  c = mix(c, cloud*0.85, wisp);
+  c = mix(c, cloud*0.78, wisp);
   c = mix(c, cloud, cover);
+  // storm-front brightening where the two cloud scales agree
+  c = mix(c, cloud*1.18, smoothstep(0.30, 0.62, cl)*smoothstep(0.10, 0.45, cf)*0.7);
 
-  // the ring's own atmosphere sitting on top of all of it
   lum = dot(c, vec3(0.30, 0.59, 0.11));
   return c;
 }
@@ -505,24 +513,27 @@ vec3 planetSurface(vec3 n, out float detail){
   float lat = asin(clamp(dot(n, ax), -1.0, 1.0));
   float lon = atan(dot(n, bz), dot(n, bx));
 
-  vec2 q = vec2(lon*1.15, lat*2.6) + uPlanetSeed;
+  vec2 q = vec2(lon*1.05, lat*2.2) + uPlanetSeed;
   // two-level domain warp: turbulent belts instead of stripes
-  vec2 w1 = vec2(fbm2(q*1.30 + 3.7, 5), fbm2(q*1.30 + 9.1, 5));
-  vec2 w2 = vec2(fbm2(q*3.10 + w1*1.6 + 17.3, 4), fbm2(q*3.10 + w1*1.6 + 27.9, 4));
-  float y = lat*7.4 + 1.85*w1.y + 0.62*w2.y;
+  vec2 w1 = vec2(fbm2(q*0.85 + 3.7, 4), fbm2(q*0.85 + 9.1, 4));
+  vec2 w2 = vec2(fbm2(q*2.30 + w1*1.1 + 17.3, 3), fbm2(q*2.30 + w1*1.1 + 27.9, 3));
+  float y = lat*7.0 + 1.30*w1.y + 0.40*w2.y;
 
-  float b1 = 0.5 + 0.5*sin(y*1.55);
-  float b2 = 0.5 + 0.5*sin(y*3.90 + 1.7);
-  float b3 = 0.5 + 0.5*sin(y*8.30 + 4.1);
+  float b1 = 0.5 + 0.5*sin(y*1.30);
+  float b2 = 0.5 + 0.5*sin(y*3.10 + 1.7);
+  float b3 = 0.5 + 0.5*sin(y*7.90 + 4.1);
+  float b4 = 0.5 + 0.5*sin(y*18.0 + 2.0);       // fine striation
 
-  vec3 c = mix(uPlanetColA, uPlanetColB, b1);
-  c = mix(c, uPlanetColC, b2*0.55);
-  c = mix(c, uPlanetColD, smoothstep(0.55, 1.15, abs(lat)));
-  c *= 0.86 + 0.28*b3;
+  vec3 c = mix(uPlanetColA, uPlanetColB, smoothstep(0.06, 0.94, b1));
+  c = mix(c, uPlanetColC, b2*0.38);
+  c = mix(c, uPlanetColD, smoothstep(0.62, 1.30, abs(lat)));
+  c *= 0.93 + 0.12*b3;
+  c *= 0.975 + 0.055*b4;
+  c *= 0.92 + 0.16*(fbm2(q*0.42 + 61.0, 4)*0.5 + 0.5);
 
   // storm ovals and shear wisps
-  float storm = ridged2(q*2.2 + w2*0.8 + 40.0, 4);
-  c = mix(c, uPlanetColB*1.22, smoothstep(0.62, 0.93, storm)*0.55);
+  float storm = ridged2(q*1.1 + w2*0.5 + 40.0, 3);
+  c = mix(c, uPlanetColB*1.14, smoothstep(0.70, 0.97, storm)*0.30);
   detail = b1*0.5 + b2*0.3 + storm*0.2;
   return c;
 }
@@ -604,13 +615,22 @@ void main(){
       float lam = smoothstep(-0.55, 0.85, ndl);
       float shade = mix(1.0, lam, uPlanetTerminator);
       float ndv = max(dot(n, -dir), 0.0);
-      float limb = mix(0.42, 1.0, pow(ndv, 0.42));
+      float limb = mix(0.66, 1.0, pow(ndv, 0.30));
 
       vec3 col = base * shade * limb * uPlanetBrightness;
-      // atmospheric limb: a thin scattering rim, brightest on the sunward side
-      float rim = pow(1.0 - ndv, 7.0);
+      // Threshold's own atmosphere: at grazing angles the line of sight runs through
+      // hundreds of km of its air, which is why the reference's limb dissolves into
+      // the sky rather than ending on a hard edge.
+      float limbHaze = uPlanetAtmo + pow(1.0 - ndv, 1.60) * uPlanetLimbHaze;
+      col = mix(col, inscatter * 1.12 + vec3(0.008, 0.016, 0.026), clamp(limbHaze, 0.0, 1.0));
+      // aurora / airglow streaks along the sunward limb, the reference's green fringe
+      float aur = smoothstep(0.62, 0.16, ndv) * smoothstep(-0.10, 0.55, ndl);
+      float streak = fbm2(vec2(atan(dot(n, uPlanetAxis), ndv)*7.0, ndv*22.0) + uPlanetSeed, 4)*0.5 + 0.5;
+      col += vec3(0.010, 0.048, 0.026) * aur * smoothstep(0.42, 0.92, streak) * uPlanetAuroraq;
+      // a thin scattering rim, brightest on the sunward side
+      float rim = pow(1.0 - ndv, 5.0);
       float sunSide = smoothstep(-0.25, 0.65, ndl);
-      col += vec3(0.055, 0.105, 0.075) * rim * (0.35 + 0.9*sunSide) * uPlanetBrightness;
+      col += vec3(0.030, 0.075, 0.055) * rim * (0.30 + 1.15*sunSide);
       space = mix(space, col, edge);
       coverage = max(coverage, edge);
     }
@@ -626,22 +646,28 @@ void main(){
     float av = abs(v);
     float aaw = max(fwidth(v), 1e-4);
     float band = 1.0 - smoothstep(1.0 - aaw*2.0, 1.0 + aaw*2.0, av);
+    band *= smoothstep(0.004, 0.055, dir.y);      // merge into the horizon
     if (band > 0.001){
       float s = uRingRadiusKm * rh.theta * sign(dot(dir, uRingEast));
       float lum;
       vec3 surf = ringSurface(s, v, lum);
 
       float ndl = dot(rh.n, uSunDir);
-      float lit = mix(0.70, 1.05, smoothstep(-1.0, 1.0, ndl));
+      float lit = mix(0.68, 1.06, smoothstep(-1.0, 1.0, ndl));
       surf *= lit * uRingBrightness;
 
-      // the ring's own air: hundreds to thousands of km of it
-      float hz = 1.0 - exp(-rh.t * uRingHazeK);
-      surf = mix(surf, uRingHazeColor * (0.72 + 0.55*lit), hz*0.62);
+      // The ring's own air. The view ray meets its inner surface at grazing incidence
+      // cos(i) = sin(elevation), so the path through the ring's atmosphere is an
+      // airmass of 1/sin(el): the band dissolves as it approaches the horizon exactly
+      // the way the reference does, and stays crisp overhead.
+      float am = 1.0 / max(dir.y, 0.012);
+      float hz = 1.0 - exp(-uRingHazeK * am);
+      vec3 hazeCol = mix(uRingHazeColor * (0.55 + 0.60*lit), inscatter * 1.15, 0.30 + 0.55*hz);
+      surf = mix(surf, hazeCol, hz);
 
-      // bright scattering fringe at the band edges (air seen along the wall)
-      float fringe = smoothstep(0.80, 1.0, av);
-      surf += uRingHazeColor * fringe * 0.30;
+      // bright scattering fringe where the air is seen along the band wall
+      float fringe = smoothstep(0.78, 1.0, av);
+      surf += uRingHazeColor * fringe * 0.22 * (1.0 - hz*0.6);
 
       float alpha = band * uRingOpacity;
       space = mix(space, surf, alpha);
@@ -687,26 +713,30 @@ export function create(opts = {}) {
     /* --- placement, measured off the reference frames (see header) --- */
     ringAzimuthDeg: 162.5,     // horizon azimuth where the band rises (az = atan2(x,z))
     ringRadiusKm: 5000,
-    ringWidthRatio: 0.100,     // W / R  -> 500 km band
+    ringWidthRatio: 0.104,     // W / R  -> 520 km band
     ringWidthOffset: 0.0,
-    ringBrightness: 1.62,
-    ringHazeKmInv: 1.0 / 3100,
+    ringBrightness: 2.35,
+    ringHazeZenithOD: 0.20,   // optical depth of the ring's own air, straight down
     ringOpacity: 0.965,
 
-    planetAzimuthDeg: 207.5,
-    planetElevationDeg: 22.0,
-    planetAngularRadiusDeg: 27.5,
-    planetBrightness: 0.62,
-    planetTerminator: 0.42,
-    planetTiltDeg: 14.0,
+    planetAzimuthDeg: 210.4,
+    planetElevationDeg: 24.3,
+    planetAngularRadiusDeg: 25.5,
+    planetBrightness: 0.26,
+    planetAurora: 1.0,
+    planetTerminator: 0.50,
+    planetLimbHaze: 2.30,
+    planetAtmo: 0.05,
+    planetPoleAzDeg: 95.0,
+    planetPoleElDeg: 43.0,
 
-    solarIrradiance: 7.6,
+    solarIrradiance: 9.4,
     mieG: 0.78,
-    sunDiscRadiance: 340.0,
+    sunDiscRadiance: 900.0,
     groundAlbedo: 0.14,
-    starStrength: 0.85,
-    starDensity: 46.0,
-    atmTint: [1.0, 0.94, 1.06],
+    starStrength: 0.55,
+    starDensity: 34.0,
+    atmTint: [0.62, 0.55, 1.12],
     exposureHint: 1.0,
     cubeSize: 128,
   };
@@ -737,8 +767,8 @@ export function create(opts = {}) {
     uRingHalfWidthKm: { value: S.ringRadiusKm * S.ringWidthRatio * 0.5 },
     uRingWidthOffset: { value: S.ringWidthOffset },
     uRingBrightness: { value: S.ringBrightness },
-    uRingHazeK: { value: S.ringHazeKmInv },
-    uRingHazeColor: { value: new THREE.Vector3(0.62, 0.76, 0.98) },
+    uRingHazeK: { value: S.ringHazeZenithOD },
+    uRingHazeColor: { value: new THREE.Vector3(0.50, 0.78, 1.30) },
     uRingOpacity: { value: S.ringOpacity },
     uRingSeed: { value: 0 },
 
@@ -747,10 +777,13 @@ export function create(opts = {}) {
     uPlanetCosAng: { value: Math.cos(THREE.MathUtils.degToRad(S.planetAngularRadiusDeg)) },
     uPlanetBrightness: { value: S.planetBrightness },
     uPlanetTerminator: { value: S.planetTerminator },
-    uPlanetColA: { value: new THREE.Vector3(0.255, 0.160, 0.150) },
-    uPlanetColB: { value: new THREE.Vector3(0.560, 0.430, 0.375) },
-    uPlanetColC: { value: new THREE.Vector3(0.380, 0.245, 0.290) },
-    uPlanetColD: { value: new THREE.Vector3(0.290, 0.280, 0.360) },
+    uPlanetLimbHaze: { value: S.planetLimbHaze },
+    uPlanetAtmo: { value: S.planetAtmo },
+    uPlanetAuroraq: { value: S.planetAurora },
+    uPlanetColA: { value: new THREE.Vector3(0.520, 0.300, 0.300) },
+    uPlanetColB: { value: new THREE.Vector3(1.150, 0.780, 0.720) },
+    uPlanetColC: { value: new THREE.Vector3(0.780, 0.450, 0.560) },
+    uPlanetColD: { value: new THREE.Vector3(0.540, 0.480, 0.640) },
     uPlanetSeed: { value: 0 },
 
     uDebugTonemap: { value: 0 },
@@ -933,7 +966,7 @@ export function create(opts = {}) {
         uSunDir: uniforms.uSunDir,
         uCamAltKm: uniforms.uCamAltKm,
         uGroundAlbedo: { value: S.groundAlbedo },
-        uGroundTint: { value: new THREE.Vector3(0.78, 0.74, 0.66) },
+        uGroundTint: { value: new THREE.Vector3(0.62, 0.66, 0.72) },
       });
       uniforms.tSkyRayMie.value = svRT.textures[0];
       uniforms.tSkyMulti.value = svRT.textures[1];
@@ -1020,8 +1053,7 @@ export function create(opts = {}) {
       uniforms.uRingHalfWidthKm.value = S.ringRadiusKm * S.ringWidthRatio * 0.5;
       // Threshold
       dirFromAzEl(S.planetAzimuthDeg, S.planetElevationDeg, uniforms.uPlanetDir.value);
-      const tilt = THREE.MathUtils.degToRad(S.planetTiltDeg);
-      uniforms.uPlanetAxis.value.set(Math.sin(tilt) * 0.6, Math.cos(tilt), Math.sin(tilt) * 0.8).normalize();
+      dirFromAzEl(S.planetPoleAzDeg, S.planetPoleElDeg, uniforms.uPlanetAxis.value);
       uniforms.uPlanetCosAng.value = Math.cos(THREE.MathUtils.degToRad(S.planetAngularRadiusDeg));
     },
 

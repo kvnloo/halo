@@ -208,3 +208,26 @@ The bar is a reviewer who cannot reliably tell which is which. If you are a revi
 look at the sheet, pick the one that looks better, and say why — **do not go looking
 for the key**. Guessing from telltales rather than from quality is the one way to make
 this measurement worthless.
+
+## Fitting the poses
+
+`src/world/poses.js` was authored by hand from `docs/WORLD.md`, so the framing is close
+but not exact — and a few degrees of yaw is worth more `structure` score than most
+rendering work. `tools/fitpose.mjs` searches (x, y, z, pitch, yaw, fov) for the framing
+that best matches a reference frame:
+
+```bash
+node tools/fitpose.mjs --pose ref_00000 --iters 260 --verbose   # report only
+node tools/fitpose.mjs --all --apply                            # rewrite poses.js
+```
+
+It drives one live browser session and scores candidates in-page with a multi-scale
+normalised gradient correlation — robust to the brightness and colour differences that
+still exist between our render and the reference, and sensitive to exactly what matters
+here: where edges and silhouettes sit. A few hundred samples takes seconds.
+
+**Only run `--apply` against a complete scene.** Fitting while terrain or rocks are
+missing optimises the camera against a world that is not there yet, and bakes that
+mistake into every score afterwards. And because the whole history is keyed on these
+poses, applying a fit invalidates every previously recorded score — re-baseline
+immediately after.

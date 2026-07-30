@@ -352,6 +352,7 @@ layout(location = 0) out vec4 oColor;
 uniform sampler2D tTransmittance;
 uniform sampler2D tSkyRayMie;
 uniform sampler2D tSkyMulti;
+uniform sampler2D tMsLut;
 
 uniform vec3  uSunDir;
 uniform vec3  uSunTint;
@@ -662,6 +663,15 @@ void main(){
 
   /* ---- fold space through the atmosphere ---- */
   vec3 col = space * Tview + inscatter * (1.0 - Tview*coverage);
+
+  if (uDebugMode > 3.5){
+    if (uDebugMode < 4.5) col = Tview;
+    else if (uDebugMode < 5.5) col = rm.rgb * 3.0;
+    else if (uDebugMode < 6.5) col = vec3(rm.a) * 30.0;
+    else if (uDebugMode < 7.5) col = ms * 3.0;
+    else if (uDebugMode < 8.5) col = texture(tMsLut, gl_FragCoord.xy/vec2(1920.0,1080.0)).rgb;
+    else col = texture(tTransmittance, gl_FragCoord.xy/vec2(1920.0,1080.0)).rgb;
+  }
 
   col = max(col, vec3(0.0));
   if (uDebugTonemap > 0.5) col = dbgAgx(col * uExposureHint);

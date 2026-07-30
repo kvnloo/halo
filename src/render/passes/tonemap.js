@@ -188,26 +188,72 @@ export function tonemapJS(rgb, p = {}) {
 
 /* ------------------------------------------------------------------- exposure */
 
+const _lightDir = new THREE.Vector3();
+const lum709 = (c) => 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+
 /**
- * Photographic key: pick the linear multiplier that puts an 18% Lambertian grey card,
- * oriented toward the key light, on AgX's middle grey (0.18 scene-linear in).
+ * Luminous irradiance falling on the *ground plane* — an upward-facing Lambertian
+ * surface — in the units three's physical lights use.
  *
- * Radiance of that card, in the units three's physical lights use, is
- *     L = albedo/pi * (sunIntensity * NdotL + ambientIrradiance)
- * so the multiplier that maps it to 0.18 is 0.18 / L. `lighting` drives the sun and
- * the two fills, so this reads them from `time` when it can and falls back to the
- * documented reference values (sunIntensity 6.2, elevation 41 deg) when it cannot.
+ * Directional lights are combined with `max`, not `sum`: CSM registers one
+ * DirectionalLight per cascade, all with the same colour, direction and intensity, and
+ * each lights only its own depth slice. Summing them would over-key the exposure by
+ * exactly the cascade count. The warm sand bounce points upward, so its `dir.y` is
+ * negative and it correctly contributes nothing to a surface facing the sky.
+ */
+function groundIrradiance(scene) {
+  let sun = 0, ambient = 0, found = false;
+  scene.traverse((o) => {
+    if (!o.isLight || o.visible === false || !(o.intensity > 0)) return;
+    const L = lum709(o.color) * o.intensity;
+    if (o.isDirectionalLight) {
+      _lightDir.copy(o.position);
+      if (o.target) _lightDir.sub(o.target.position);
+      const len = _lightDir.length();
+      if (len < 1e-6) return;
+      sun = Math.max(sun, L * Math.max(_lightDir.y / len, 0));
+      found = true;
+    } else if (o.isHemisphereLight) {
+      ambient += L;                       // sky half, seen in full by an up-facing normal
+      found = true;
+    } else if (o.isAmbientLight) {
+      ambient += L;
+      found = true;
+    }
+  });
+  return found ? sun + ambient : 0;
+}
+
+/**
+ * Photographic key. Pick the linear multiplier that lands an 18% Lambertian grey card
+ * lying on the beach on AgX's middle grey (0.18 scene-linear at the tonemap input).
+ *
+ *   card radiance  L = 0.18/pi * E          E = irradiance on the ground plane
+ *   we want        L * exposure = 0.18
+ *   therefore      exposure = pi / E
+ *
+ * The albedo cancels, so this depends on nothing but the lights `lighting` actually
+ * put in the scene — no image feedback, no frame-to-frame state, and identical for
+ * every capture of a given time of day. That is the entire reason auto-exposure is
+ * not used here: it would make a screenshot depend on where the camera was pointing
+ * on the previous frame and the measurement loop would stop being reproducible.
+ *
+ * Sanity check against the clip: inverting AgX on kf_00000 puts sunlit dry sand at a
+ * scene-linear (0.638, 0.409, 0.222), luma 0.444. With `lighting`'s defaults the same
+ * surface renders at luma ~0.70, i.e. it wants ~0.64x — and pi / E with those lights
+ * comes out at 0.67. The two independent derivations agree to 5%.
  */
 export function keyedExposure(ctx) {
-  const time = ctx?.get?.('time');
-  const sun = time?.state?.sunIntensity ?? 6.2;
-  const elev = time?.state?.elevationDeg ?? 41;
-  // A card held square to the sun sees the full beam; the sky fill and sand bounce
-  // arrive over the hemisphere and are roughly this fraction of it at 41 deg.
-  const ndotl = 1.0;
-  const ambient = 1.35 * Math.pow(Math.max(Math.sin(elev * Math.PI / 180), 0.02), 0.35) + 0.42 * 0.66;
-  const cardRadiance = (0.18 / Math.PI) * (sun * ndotl + ambient);
-  return 0.18 / Math.max(cardRadiance, 1e-6);
+  let E = ctx?.scene ? groundIrradiance(ctx.scene) : 0;
+  if (!(E > 1e-6)) {
+    // No lights yet (isolated-module preview): fall back to the documented reference
+    // rig — sun 6.2 at 41 deg elevation plus the 1.35 sky fill.
+    const time = ctx?.get?.('time');
+    const sun = time?.state?.sunIntensity ?? 6.2;
+    const s = Math.max(Math.sin((time?.state?.elevationDeg ?? 41) * Math.PI / 180), 0.02);
+    E = sun * s + 1.35 * Math.pow(s, 0.35) * 0.545;
+  }
+  return Math.PI / Math.max(E, 1e-6);
 }
 
 /* ------------------------------------------------------------------ the shader */
@@ -251,12 +297,14 @@ bool isBad(vec3 c){
 vec3 fetchGuarded(vec2 uv){
   vec3 c = texture(tSrc, uv).rgb;
   if (uGuard < 0.5 || !isBad(c)) return max(c, vec3(0.0));
+  // textureLod, not texture: these taps sit inside divergent control flow, where
+  // implicit-derivative LOD selection is undefined.
   vec3 sum = vec3(0.0); float n = 0.0;
   vec3 s;
-  s = texture(tSrc, uv + vec2( uTexel.x, 0.0)).rgb; if (!isBad(s)) { sum += max(s, vec3(0.0)); n += 1.0; }
-  s = texture(tSrc, uv + vec2(-uTexel.x, 0.0)).rgb; if (!isBad(s)) { sum += max(s, vec3(0.0)); n += 1.0; }
-  s = texture(tSrc, uv + vec2(0.0,  uTexel.y)).rgb; if (!isBad(s)) { sum += max(s, vec3(0.0)); n += 1.0; }
-  s = texture(tSrc, uv + vec2(0.0, -uTexel.y)).rgb; if (!isBad(s)) { sum += max(s, vec3(0.0)); n += 1.0; }
+  s = textureLod(tSrc, uv + vec2( uTexel.x, 0.0), 0.0).rgb; if (!isBad(s)) { sum += max(s, vec3(0.0)); n += 1.0; }
+  s = textureLod(tSrc, uv + vec2(-uTexel.x, 0.0), 0.0).rgb; if (!isBad(s)) { sum += max(s, vec3(0.0)); n += 1.0; }
+  s = textureLod(tSrc, uv + vec2(0.0,  uTexel.y), 0.0).rgb; if (!isBad(s)) { sum += max(s, vec3(0.0)); n += 1.0; }
+  s = textureLod(tSrc, uv + vec2(0.0, -uTexel.y), 0.0).rgb; if (!isBad(s)) { sum += max(s, vec3(0.0)); n += 1.0; }
   return n > 0.0 ? sum / n : vec3(0.0);
 }
 
@@ -322,7 +370,10 @@ export function create(opts = {}) {
   p.init = (ctx) => {
     const c = ctx.config;
     // Seed defaults so a debug UI / the capture harness can enumerate and poke them.
-    if (c.exposure === undefined) c.exposure = keyedExposure(ctx);
+    // `pipeline` is order 1000, so `lighting` (order 12) has already populated the
+    // scene by the time this runs and the key is measured against the real rig.
+    // Setting ctx.config.exposure = null at any point re-derives it.
+    if (c.exposure === undefined || c.exposure === null) c.exposure = keyedExposure(ctx);
     if (c.exposureEV === undefined) c.exposureEV = 0;
     if (c.tonemapper === undefined) c.tonemapper = 'agx';
     if (c.tonemapWhite === undefined) c.tonemapWhite = 6.0;
@@ -348,8 +399,8 @@ export function create(opts = {}) {
   p.render = (ctx, pipe, out) => {
     const c = ctx.config;
     const u = mat.uniforms;
-    const base = c.exposure !== undefined ? c.exposure : keyedExposure(ctx);
-    u.uExposure.value = base * Math.pow(2, c.exposureEV || 0);
+    if (c.exposure === undefined || c.exposure === null) c.exposure = keyedExposure(ctx);
+    u.uExposure.value = c.exposure * Math.pow(2, c.exposureEV || 0);
     u.uMode.value = MODES[c.tonemapper] ?? MODES.agx;
     u.uWhite.value = c.tonemapWhite ?? 6.0;
     u.uGuard.value = (c.tonemapGuard ?? true) ? 1 : 0;

@@ -98,6 +98,12 @@ export function createGBufferMaterial() {
         #include <morphtarget_vertex>
         #include <skinning_vertex>
 
+        // gl_Position MUST be computed exactly the way three's <project_vertex> does
+        // it. The main opaque pass re-renders this geometry with LEQUAL against the
+        // depth this pass writes; any difference in operation order changes the last
+        // bits of gl_Position.z and the surface tears into z-fighting stripes.
+        #include <project_vertex>
+
         vec4 localPos = vec4( transformed, 1.0 );
         #ifdef USE_BATCHING
           localPos = batchingMatrix * localPos;
@@ -106,13 +112,11 @@ export function createGBufferMaterial() {
           localPos = instanceMatrix * localPos;
         #endif
 
-        vec4 worldPos = modelMatrix * localPos;
+        vec4 worldPos  = modelMatrix * localPos;
         vec4 prevWorld = uPrevModelMatrix * localPos;
 
         vCurClip  = uCurrViewProj * worldPos;
         vPrevClip = uPrevViewProj * prevWorld;
-
-        gl_Position = projectionMatrix * ( viewMatrix * worldPos );
       }
     `,
     fragmentShader: /* glsl */`

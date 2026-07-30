@@ -155,9 +155,11 @@ export class RenderPipeline {
     this.rtB = makeRT(1, 1, { type: this.opts.hdrType });
     this.read = this.rtA; this.write = this.rtB;
 
+    // Alpha is forced to 1: the capture harness reads the canvas with toDataURL, and
+    // a zero alpha would produce a transparent PNG that every viewer renders as white.
     this._copyMat = fsMaterial(/* glsl */`
       in vec2 vUv; uniform sampler2D tSrc; out vec4 oCol;
-      void main(){ oCol = texture(tSrc, vUv); }`, { tSrc: { value: null } });
+      void main(){ oCol = vec4( texture(tSrc, vUv).rgb, 1.0 ); }`, { tSrc: { value: null } });
     this._copyQuad = new FullScreenQuad(this._copyMat);
 
     for (const p of this.passes) await p.init?.(ctx, this);

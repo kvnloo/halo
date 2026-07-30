@@ -53,6 +53,7 @@ export function createScenePass() {
 
     // -------------------------------------------------- 2/3. sky then opaque
     renderer.setRenderTarget(pipe.sceneRT);
+    renderer.setClearColor(0x000000, 1);  // opaque: captures go through toDataURL
     renderer.clear(true, false, false);   // keep the pre-pass depth
 
     // Sky writes no depth and tests against the far plane; the opaque pass then

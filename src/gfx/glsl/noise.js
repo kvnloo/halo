@@ -160,7 +160,7 @@ float warpedFbm2(vec2 p, int oct, float warp){
 
 export const TRIPLANAR_GLSL = /* glsl */`
 // ------------------------------------------------------------- tri-planar
-/** Blend weights from a world normal. `sharp` 4..12; higher = less cross-fade. */
+/** Blend weights from a world normal. sharp 4..12; higher = less cross-fade. */
 vec3 triWeights(vec3 n, float sharp){
   vec3 w = pow(abs(n), vec3(sharp));
   return w / max(w.x + w.y + w.z, 1e-5);

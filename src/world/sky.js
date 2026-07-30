@@ -444,9 +444,9 @@ float cirrusVeil(vec3 dir){
   if (dir.y < 0.015) return 0.0;
   vec2 p = dir.xz / max(dir.y, 0.015) * 1.25 + uCirrusOffset;
   float w = fbm2(p*0.42 + 3.3, 3);
-  float v = fbm2(vec2(p.x*0.18, p.y*4.10) + w*1.10 + 9.1, 5);
-  float f = fbm2(vec2(p.x*0.70, p.y*13.0) + w*0.7 + 21.0, 4);
-  float m = smoothstep(0.24, 0.52, v*0.72 + f*0.45);
+  float v = fbm2(vec2(p.x*0.62, p.y*1.55) + w*1.10 + 9.1, 5);
+  float f = fbm2(vec2(p.x*1.60, p.y*4.40) + w*0.7 + 21.0, 4);
+  float m = smoothstep(0.26, 0.58, v*0.74 + f*0.44);
   return m * smoothstep(0.03, 0.34, dir.y) * smoothstep(7.0, 2.4, length(p - uCirrusOffset));
 }
 
@@ -477,48 +477,47 @@ RingHit ringTrace(vec3 dir){
 
 vec3 ringSurface(float s, float v, out float lum){
   // s: arc length along the circumference (km), v: across the band, -1..1.
-  // One unit = 300 km, so the coarse octaves land at continent scale and the finest
-  // around 20 km — enough to read as weather rather than as noise.
+  // One unit = 300 km, so continents land at the right scale and the finest octave
+  // resolves individual weather systems rather than noise.
   vec2 q = vec2(s, v*uRingHalfWidthKm) / 300.0 + vec2(uRingSeed, uRingSeed*0.37);
 
-  float cont = warpedFbm2(q*0.50, 6, 1.40);
-  float shelf = smoothstep(-0.085, -0.010, cont);
-  float land  = smoothstep(-0.010, 0.050, cont);
-  float alt   = smoothstep(0.040, 0.215, cont);
+  float cont = warpedFbm2(q*0.27, 6, 1.45);
+  float shelf = smoothstep(-0.035, 0.045, cont);
+  float land  = smoothstep(0.080, 0.155, cont);
+  float alt   = smoothstep(0.150, 0.310, cont);
 
-  vec3 deep    = vec3(0.030, 0.090, 0.270);
-  vec3 shallow = vec3(0.110, 0.330, 0.560);
-  vec3 grass   = vec3(0.100, 0.170, 0.150);
-  vec3 dry     = vec3(0.290, 0.280, 0.245);
-  vec3 rock    = vec3(0.400, 0.410, 0.430);
+  // Seen through the ring's own air the ocean reads as a pale cyan, not deep blue.
+  vec3 deep    = vec3(0.045, 0.175, 0.390);
+  vec3 shallow = vec3(0.240, 0.545, 0.645);
+  vec3 grass   = vec3(0.160, 0.230, 0.185);
+  vec3 dry     = vec3(0.300, 0.285, 0.225);
+  vec3 rock    = vec3(0.330, 0.335, 0.330);
 
   vec3 c = mix(deep, shallow, shelf);
   vec3 ground = mix(grass, dry, fbm2(q*1.05 + 11.0, 3)*0.5 + 0.5);
-  ground = mix(ground, rock, alt*0.75);
+  ground = mix(ground, rock, alt*0.7);
   c = mix(c, ground, land);
 
   // inland seas and river systems scratched into the land
   float riv = 1.0 - smoothstep(0.0, 0.050, abs(ridged2(q*0.85 + 4.3, 4) - 0.58));
-  c = mix(c, shallow*0.9, riv*land*0.65);
+  c = mix(c, shallow*0.9, riv*land*0.7);
 
-  // cloud deck, sheared along the circumference: two scales so the band keeps
-  // detail from the zenith all the way down to the haze.
-  vec2 cq = vec2(q.x*0.55, q.y*1.9);
+  // Cloud deck: compact bright clumps sheared along the circumference. In the
+  // reference these are the only genuinely white thing on the band; everything else
+  // is translucent pale cyan.
+  vec2 cq = vec2(q.x*0.55, q.y*1.75);
   float cw = fbm2(cq*0.70 + 21.0, 3);
-  float cl = fbm2(cq*1.05 + vec2(cw*1.9, cw*0.5) + 51.0, 5);
-  float cf = fbm2(cq*3.30 + vec2(cw*1.1, 0.0) + 77.0, 4);
-  float cover = smoothstep(-0.010, 0.150, cl + cf*0.30);
-  float wisp  = smoothstep(-0.200, 0.250, cl) * 0.45;
-  vec3 cloud = vec3(0.70, 0.95, 1.36);
+  float cb = fbm2(cq*1.05 + vec2(cw*1.6, cw*0.4) + 51.0, 5);
+  float cd = fbm2(cq*3.60 + vec2(cw*0.8, 0.0) + 77.0, 5);
+  float cm = smoothstep(0.110, 0.295, cb*0.78 + cd*0.55);
+  vec3 cloud = vec3(1.02, 1.22, 1.52);
 
-  c = mix(c, cloud*0.78, wisp);
-  c = mix(c, cloud, cover);
-  // storm-front brightening where the two cloud scales agree
-  c = mix(c, cloud*1.18, smoothstep(0.30, 0.62, cl)*smoothstep(0.10, 0.45, cf)*0.7);
-  // fine cellular break-up: this is where the band's high-frequency energy comes from
-  float fine = fbm2(cq*9.0 + 133.0, 4);
-  c *= 0.86 + 0.30*(fine*0.5 + 0.5);
-  c = mix(c, cloud*1.10, smoothstep(0.34, 0.66, fine)*cover*0.45);
+  c = mix(c, cloud*0.72, smoothstep(-0.09, 0.30, cb) * 0.22);   // thin overcast veil
+  c = mix(c, cloud, cm);
+  c = mix(c, cloud*1.12, cm * smoothstep(0.20, 0.52, cd) * 0.55);
+
+  // large-scale weather / illumination banding so the strip is not uniformly busy
+  c *= 0.74 + 0.52*(fbm2(q*0.21 + 91.0, 3)*0.5 + 0.5);
 
   lum = dot(c, vec3(0.30, 0.59, 0.11));
   return c;
@@ -640,7 +639,7 @@ void main(){
     float av = abs(v);
     float aaw = max(fwidth(v), 1e-4);
     float band = 1.0 - smoothstep(1.0 - aaw*2.0, 1.0 + aaw*2.0, av);
-    band *= smoothstep(0.004, 0.055, dir.y);      // merge into the horizon
+    band *= smoothstep(0.010, 0.075, dir.y);      // merge into the horizon
     if (band > 0.001){
       float s = uRingRadiusKm * rh.theta * sign(dot(dir, uRingEast));
       float lum;
@@ -718,14 +717,14 @@ export function create(opts = {}) {
     ringRadiusKm: 5000,
     ringWidthRatio: 0.104,     // W / R  -> 520 km band
     ringWidthOffset: 0.0,
-    ringBrightness: 2.35,
-    ringHazeZenithOD: 0.28,   // optical depth of the ring's own air, straight down
-    ringOpacity: 0.965,
+    ringBrightness: 2.10,
+    ringHazeZenithOD: 0.36,   // optical depth of the ring's own air, straight down
+    ringOpacity: 0.915,
 
     planetAzimuthDeg: 210.4,
     planetElevationDeg: 24.3,
     planetAngularRadiusDeg: 25.5,
-    planetBrightness: 0.26,
+    planetBrightness: 0.285,
     planetAurora: 1.0,
     planetTerminator: 0.50,
     planetLimbHaze: 2.30,
@@ -740,8 +739,8 @@ export function create(opts = {}) {
     starStrength: 0.55,
     starDensity: 56.0,
     cirrusDrift: 0.00045,
-    cirrusStrength: 0.24,
-    atmTint: [0.62, 0.55, 1.12],
+    cirrusStrength: 0.175,
+    atmTint: [0.605, 0.578, 1.105],
     cubeSize: 128,
   };
   Object.assign(S, opts.sky || {});
@@ -971,7 +970,7 @@ export function create(opts = {}) {
         uSunDir: uniforms.uSunDir,
         uCamAltKm: uniforms.uCamAltKm,
         uGroundAlbedo: { value: S.groundAlbedo },
-        uGroundTint: { value: new THREE.Vector3(0.46, 0.50, 0.56) },
+        uGroundTint: { value: new THREE.Vector3(0.54, 0.50, 0.45) },
       });
       uniforms.tSkyRayMie.value = svRT.textures[0];
       uniforms.tSkyMulti.value = svRT.textures[1];

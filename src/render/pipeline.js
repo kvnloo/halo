@@ -7,15 +7,27 @@ import { createScenePass } from './passes/scene.js';
  * Pass files land independently, so a missing one is warned about and skipped
  * rather than taking the renderer down. Order here IS the post chain order.
  */
+/**
+ * Post chain order. This IS the order they run in.
+ *
+ * TAA resolves BEFORE bloom, DoF and motion blur, and that ordering is not negotiable:
+ * bloom's threshold test fires on different sub-pixel highlights on every jitter phase
+ * if it is fed a jittered, un-resolved image, which shows up as highlights crawling and
+ * sparkling frame to frame. DoF and motion blur likewise want a clean, converged image
+ * to gather from — blurring aliased input just spreads the aliasing.
+ *
+ * ssao and ssr are off-chain producers (needsSwap = false): they write their own targets
+ * for the forward materials and later passes to sample, and leave the chain untouched.
+ */
 const PASS_MANIFEST = [
   { name: 'ssao',           load: () => import('./passes/ssao.js') },
   { name: 'ssr',            load: () => import('./passes/ssr.js') },
   { name: 'cloudComposite', load: () => import('./passes/cloudComposite.js') },
   { name: 'volumetricFog',  load: () => import('./passes/volumetricFog.js') },
-  { name: 'bloom',          load: () => import('./passes/bloom.js') },
-  { name: 'motionBlur',     load: () => import('./passes/motionBlur.js') },
-  { name: 'dof',            load: () => import('./passes/dof.js') },
   { name: 'taa',            load: () => import('./passes/taa.js') },
+  { name: 'dof',            load: () => import('./passes/dof.js') },
+  { name: 'motionBlur',     load: () => import('./passes/motionBlur.js') },
+  { name: 'bloom',          load: () => import('./passes/bloom.js') },
   { name: 'tonemap',        load: () => import('./passes/tonemap.js') },
   { name: 'grade',          load: () => import('./passes/grade.js') },
   { name: 'sharpen',        load: () => import('./passes/sharpen.js') },

@@ -97,3 +97,19 @@ come from a PNG the renderer wrote — never from a reference frame you transfor
 
 This generalises: any subsystem that tunes itself against the reference rather than
 against its own output is measuring the target instead of the work.
+
+---
+
+## 5. Post-chain order corrected — TAA now resolves before bloom/DoF/motion blur
+
+`src/render/pipeline.js` originally registered `bloom, motionBlur, dof, taa`, so bloom
+was fed a jittered, un-resolved image and its threshold test fired on different
+sub-pixel highlights on every jitter phase — highlights crawl and sparkle frame to
+frame. Fixed to `taa, dof, motionBlur, bloom`; `docs/ARCHITECTURE.md` updated to match.
+
+Verified deterministic across two full-pipeline captures at `diag_sky` after the change.
+Note this is evidence at one pose, not a proof across all of them — the Phase 2
+integration pass re-checks determinism at every scored pose.
+
+Anyone tuning bloom, DoF or motion blur against measurements taken **before** this
+change should re-take them; their input image was different.

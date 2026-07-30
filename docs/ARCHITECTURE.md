@@ -123,9 +123,15 @@ your own, otherwise your object will punch a hole in AO, SSR and TAA.
 ### Pass order (post chain, all HDR until `tonemap`)
 
 ```
-ssao → ssr → cloudComposite → water(refraction consumer) → volumetricFog
-     → bloom → motionBlur → dof → taa → tonemap → grade → sharpen → grain
+ssao → ssr → cloudComposite → volumetricFog
+     → taa → dof → motionBlur → bloom → tonemap → grade → sharpen → grain
 ```
+
+**TAA resolves before bloom, DoF and motion blur.** Feeding bloom a jittered,
+un-resolved image makes its threshold test fire on different sub-pixel highlights
+every jitter phase, which reads as highlights crawling and sparkling frame to frame.
+DoF and motion blur want a converged image to gather from for the same reason —
+blurring aliased input spreads the aliasing rather than hiding it.
 
 A pass with `needsSwap = false` writes to its own target for later passes to sample
 (e.g. `ssao`) and leaves the main chain alone. A pass with `scenePass = true` runs

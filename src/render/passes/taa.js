@@ -8,6 +8,13 @@ import { Pass, fsMaterial, makeRT, FullScreenQuad } from '../RenderPipeline.js';
  * pass exists and is enabled (RenderPipeline._applyJitter), so every frame is a
  * different sub-pixel sample of the same image. This pass is the accumulator.
  *
+ * It must run *first* in the post chain — ahead of dof, motionBlur and bloom. All three
+ * read sub-pixel structure: bloom's threshold test in particular fires on a different
+ * set of highlights on every jitter phase if it is fed a jittered, un-resolved image,
+ * which is a direct path to sparkle crawl. `PASS_MANIFEST` orders it that way;
+ * `_hoist()` re-asserts it at runtime and complains loudly if the manifest regresses,
+ * because that regression is invisible in a still and expensive in motion.
+ *
  * Design notes, in order of how much they matter to *not softening the picture*:
  *
  * 1. **Reprojection is derived from depth, not from the G-buffer velocity, for
@@ -26,37 +33,50 @@ import { Pass, fsMaterial, makeRT, FullScreenQuad } from '../RenderPipeline.js';
  * 2. **Catmull-Rom history resampling** (5 bilinear taps, MJP's optimisation). At
  *    f = 0 the weights collapse to the centre tap exactly, so a stationary image
  *    never loses energy to resampling.
- * 3. **YCoCg variance clipping.** Plain 3×3 min/max leaves an enormous box on this
- *    scene's sand and shingle, and the history then wobbles inside it as the jitter
- *    phase cycles. mean ± γ·σ, intersected with a rounded (box+cross)/2 min/max,
- *    then *clipped* toward the box centre rather than clamped per-channel.
- * 4. **Blending happens in tone-mapped space** (c/(1+luma)), which is exactly the
+ * 3. **YCoCg variance clipping** — mean ± γ·σ intersected with a rounded
+ *    (box+cross)/2 min/max, then *clipped* toward the box centre rather than clamped
+ *    per channel. Two things are deliberately NOT done to that box:
+ *      - it is built from the **unsharpened** neighbourhood. Widening the ghost-
+ *        rejection box by exactly the unsharp amount, at every edge, every frame, is
+ *        letting stale history through in precisely the place it is visible.
+ *      - it is **not** what velocity modulates. Raising α under motion (the previous
+ *        build went 0.09 → 0.47 on a 180 °/s turn) switches the accumulator off for
+ *        the whole of a firefight and snaps sharp when you stop. Motion instead
+ *        *tightens* γ, which rejects ghosts without throwing accumulation away.
+ * 4. **Point highlights are not averaged into the background.** A lone bright texel
+ *    in a dark 3×3 has μ = S/9 and σ = 0.314·S, so the variance box tops out at
+ *    0.58·S and the accumulator converges to ~0.62·S — a star, a distant specular
+ *    glint or a wet-sand sparkle loses a third of its peak on top of the honest
+ *    sub-pixel dilution. `spike` detects single-tap dominance (top1 − top2 bigger than
+ *    half the rest of the range), opens the box to the true 3×3 extent there, and
+ *    lifts α so the highlight tracks the frame rather than the 16-phase mean. This is
+ *    the same problem UE solves with `bResponsiveAA` and COD with stencil-tagged
+ *    particles; without a stencil channel to key off, the image itself is the signal.
+ * 5. **Disocclusion is a plane test, not a relative-depth test.** A scalar tolerance
+ *    cannot tell a grazing surface from a disocclusion: the beach fills the lower half
+ *    of every reference frame and its depth changes several percent per pixel, so any
+ *    tolerance loose enough not to reject it (the old 5.5 %) never rejects anything,
+ *    and everything smears. The allowance is now the depth change the *surface* can
+ *    legitimately produce over the reprojection footprint, from the G-buffer view
+ *    normal and the camera's tan(fov/2):  dz/dpixel = 2·z·|n.x|·tanX / (W·|n.z|).
+ *    Grazing geometry gets a large allowance because it earns one; a silhouette does
+ *    not, because the *surface* there is not grazing. That lets the relative term drop
+ *    from 5.5 % to 1 %.
+ * 6. **Blending happens in tone-mapped space** (c/(1+luma)), which is exactly the
  *    luminance weighting that stops one 5000-nit sun sample from dragging a whole
  *    neighbourhood, and it is inverted exactly afterwards.
- * 5. **Disocclusion from depth.** The history's alpha carries linear view depth; the
- *    current pixel's world position is pushed through the previous view matrix and
- *    compared against the four texels under the reprojected position. Any match
- *    accepts, so silhouettes are not rejected every frame (which would leave them
- *    permanently aliased).
+ * 7. **The unsharp is not a sharpness result.** Accumulating 16 sub-pixel phases
+ *    convolves by well under a 1-px box, so the honest deconvolution is small;
+ *    calibrating it upward until lap_var matches supersampled ground truth is fitting
+ *    the metric. Default 0.15, and it is decoupled from `accept` — scaling it by how
+ *    much history is in play left every newly disoccluded region soft and gave moving
+ *    silhouettes a visible soft wake that faded in over ~1/α frames.
  *
- * Convergence, measured: with a static camera the motion vector is exactly zero and
- * the resolve is a 1/α exponential average over the 16-phase Halton pattern. Against a
- * 200-frame reference the image is settled by frame 24 (mean |Δ| 0.4/255) and does not
- * move after that; the only residual is a deterministic period-16 phase ripple.
- * Two runs of the capture harness are byte-identical.
- *
- * Sharpness, measured against 3× supersampled ground truth on a deliberately
- * alias-heavy test scene:
- *     no TAA            lap_var 1616   slope −1.687   edge 0.1557  (that is aliasing)
- *     3× SSAA (truth)   lap_var  577   slope −2.010   edge 0.1241
- *     this pass         lap_var  540   slope −2.014   edge 0.1185
- * i.e. it lands on the supersampled image rather than a blurred one, and its power
- * spectrum matches ground truth to 0.004. With the history blend forced off (α = 1)
- * it reproduces the un-TAA'd frame to within 11 lap_var, so the pass contributes no
- * resampling blur of its own — all of the difference is genuine anti-aliasing.
- *
- * ctx.config knobs: taaAlpha 0.09, taaGamma 1.5, taaSharpen 0.35, taaClipBoost 0.25,
- *                   taaDepthTol 0.055, taaVelBoost 0.006
+ * ctx.config knobs:
+ *   taaAlpha 0.09        taaGamma 1.6        taaGammaMoving 0.85
+ *   taaSharpen 0.15      taaClipBoost 0.25   taaSpike 0.35
+ *   taaDepthTol 0.01     taaSlopeScale 2.5   taaVelGamma 0.02
+ *   taaVelBoost 0.0008   taaVelAlphaMax 0.10
  */
 
 const FRAG = /* glsl */`
@@ -65,17 +85,20 @@ in vec2 vUv;
 uniform sampler2D tCur;
 uniform sampler2D tHist;
 uniform sampler2D tDepth;
+uniform sampler2D tGbuf0;
 uniform sampler2D tGbuf1;
 
 uniform vec2  uTexel;
 uniform vec2  uRes;
 uniform vec2  uJitter;
+uniform vec2  uTanHalf;
 uniform mat4  uInvVPJit;
 uniform mat4  uCurrVP;
 uniform mat4  uPrevVP;
 uniform mat4  uPrevView;
 uniform float uNear, uFar;
-uniform float uAlpha, uGamma, uValid, uSharp, uClipBoost, uDepthTol, uVelBoost;
+uniform float uAlpha, uGamma, uGammaMoving, uValid, uSharp, uClipBoost, uSpike;
+uniform float uDepthTol, uSlopeScale, uVelGamma, uVelBoost, uVelAlphaMax;
 
 out vec4 oCol;
 
@@ -148,21 +171,26 @@ void main(){
 
   vec3 m1 = vec3(0.0), m2 = vec3(0.0);
   vec3 boxMin = n[0], boxMax = n[0];
+  float top1 = -1e9, top2 = -1e9;          // two brightest taps, for spike detection
   for (int i = 0; i < 9; i++) {
     m1 += n[i];
     m2 += n[i] * n[i];
     boxMin = min(boxMin, n[i]);
     boxMax = max(boxMax, n[i]);
+    float y = n[i].x;
+    if (y > top1) { top2 = top1; top1 = y; } else if (y > top2) { top2 = y; }
   }
   vec3 crossMin = min(n[4], min(min(n[1], n[3]), min(n[5], n[7])));
   vec3 crossMax = max(n[4], max(max(n[1], n[3]), max(n[5], n[7])));
   vec3 rMin = 0.5 * (boxMin + crossMin);
   vec3 rMax = 0.5 * (boxMax + crossMax);
-
   vec3 mu = m1 / 9.0;
   vec3 sigma = sqrt(max(m2 / 9.0 - mu * mu, vec3(0.0)));
-  vec3 mn = max(mu - uGamma * sigma, rMin);
-  vec3 mx = min(mu + uGamma * sigma, rMax);
+
+  // One tap much brighter than every other == a sub-pixel point highlight, not an
+  // edge (an edge puts several taps near the top, so top1 - top2 is small).
+  float spike = clamp(((top1 - top2) - 0.5 * (top2 - boxMin.x))
+                      / max(top1 - boxMin.x, 1e-5), 0.0, 1.0);
 
   // ------------------------------------------------------------- reprojection
   float dz = texture(tDepth, vUv).r;
@@ -181,13 +209,14 @@ void main(){
 
   // Dynamic geometry: MRT1.rg is (cur - prev) * 0.5 in NDC with the current jitter
   // baked in; +0.5*jitter removes it. Only trusted where it actually disagrees.
-  vec4 gb = texture(tGbuf1, vUv);
-  if (gb.a > 0.5) {
-    vec2 mvG = gb.rg + 0.5 * uJitter;
+  vec4 gb1 = texture(tGbuf1, vUv);
+  if (gb1.a > 0.5) {
+    vec2 mvG = gb1.rg + 0.5 * uJitter;
     if (length((mvG - mv) * uRes) > 1.5) mv = mvG;
   }
 
   vec2 prevUV = vUv - mv;
+  float vel = length(mv * uRes);                       // pixels of travel this frame
 
   float inside = (prevUV.x >= 0.0 && prevUV.x <= 1.0 && prevUV.y >= 0.0 && prevUV.y <= 1.0) ? 1.0 : 0.0;
   if (!projOk) inside = 0.0;
@@ -202,20 +231,33 @@ void main(){
   float d3 = texture(tHist, hb + uTexel).a;
   float best = min(min(abs(d0 - prevLinZ), abs(d1 - prevLinZ)),
                    min(abs(d2 - prevLinZ), abs(d3 - prevLinZ)));
-  float relErr = best / max(prevLinZ, 1.0);
-  float accept = 1.0 - smoothstep(uDepthTol * 0.45, uDepthTol, relErr);
+
+  // How much depth this *surface* may legitimately change over the reprojection
+  // footprint. From the plane through the pixel: z = c / (n . d), so
+  // dz/du = -z * n.x * tanX / (n . d), and one pixel is 2/W of NDC.
+  vec3 nv = gb1.a > 0.5 ? normalize(texture(tGbuf0, vUv).xyz * 2.0 - 1.0) : vec3(0.0, 0.0, 1.0);
+  float slope = 2.0 * prevLinZ
+              * (abs(nv.x) * uTanHalf.x * uTexel.x + abs(nv.y) * uTanHalf.y * uTexel.y)
+              / max(abs(nv.z), 0.06);
+  float tol = uDepthTol * prevLinZ + uSlopeScale * slope + 0.01;
+  float accept = 1.0 - smoothstep(tol * 0.5, tol, best);
   accept *= inside * uValid;
 
-  // Accumulating 16 sub-pixel phases convolves the image with a 1-px box; that box
-  // has a real MTF roll-off. Deconvolve it with an unsharp against the 3x3 mean,
-  // scaled by how much history is actually in play (none when we just rejected it),
-  // and clamped to the true neighbourhood so it cannot ring past a real extreme.
-  // Calibrated against 3x supersampled ground truth: this lands the resolved power
-  // spectrum on the SSAA slope instead of ~0.06 below it.
-  vec3 cur = n[4] + (n[4] - mu) * (uSharp * accept);
-  cur = clamp(cur, boxMin, boxMax);
-  mn = min(mn, cur);
-  mx = max(mx, cur);
+  // ---------------------------------------------------------------- clip box
+  // Motion tightens the variance box instead of raising alpha: that is what rejects
+  // stale history, and it costs no accumulation.
+  float gam = mix(uGamma, uGammaMoving, clamp(vel * uVelGamma, 0.0, 1.0));
+  vec3 mn = max(mu - gam * sigma, rMin);
+  vec3 mx = min(mu + gam * sigma, rMax);
+  // ...but a genuine point highlight is not variance to be clipped away.
+  mn = mix(mn, min(mn, boxMin), spike);
+  mx = mix(mx, max(mx, boxMax), spike);
+
+  // 16 sub-pixel phases convolve the image with a box that has a real MTF roll-off;
+  // deconvolve a little against the 3x3 mean. Fixed strength, clamped to the true
+  // neighbourhood so it cannot ring past a real extreme — and deliberately NOT folded
+  // back into mn/mx, which would widen the ghost clamp at every edge.
+  vec3 cur = clamp(n[4] + (n[4] - mu) * uSharp, boxMin, boxMax);
 
   // ------------------------------------------------------------------- resolve
   vec4 hRaw = catmullRom(tHist, clamp(prevUV, uTexel * 0.5, 1.0 - uTexel * 0.5), uRes, uTexel);
@@ -226,7 +268,8 @@ void main(){
 
   float a = mix(1.0, uAlpha, accept);
   a = max(a, clipAmt * uClipBoost * accept);
-  a = clamp(a + length(mv * uRes) * uVelBoost, 0.0, 1.0);
+  a = max(a, spike * uSpike * accept);
+  a = clamp(a + min(vel * uVelBoost, uVelAlphaMax), 0.0, 1.0);
 
   vec3 res = mix(histC, cur, a);
   oCol = vec4(san(untone(ycocg2rgb(res))), linZ);
@@ -237,47 +280,74 @@ export function create(opts = {}) {
   const p = new Pass('taa');
 
   let histA = null, histB = null;
-  let quad = null, mat = null, copyMat = null, copyQuad = null;
-  let W = 0, H = 0, frames = 0, lastPipeFrame = -99;
+  let quad = null, mat = null;
+  let W = 0, H = 0, frames = 0, lastPipeFrame = -99, hoisted = false;
 
   const prevView = new THREE.Matrix4();
   const invVPJit = new THREE.Matrix4();
 
   const cfg = Object.assign({
     alpha: 0.09,
-    gamma: 1.5,
-    sharpen: 0.35,
+    gamma: 1.6,
+    gammaMoving: 0.85,
+    sharpen: 0.15,
     clipBoost: 0.25,
-    depthTol: 0.055,
-    velBoost: 0.006,
+    spike: 0.35,
+    depthTol: 0.01,
+    slopeScale: 2.5,
+    velGamma: 0.02,
+    velBoost: 0.0008,
+    velAlphaMax: 0.10,
   }, opts.taa || {});
+
+  /**
+   * Assert (and if necessary restore) "taa before bloom/dof/motionBlur" in the live
+   * pass list. A no-op against the current manifest — it exists because that ordering
+   * is invisible in a still frame and expensive in motion, so a regression should
+   * announce itself rather than quietly cost sparkle crawl. Done on the first render,
+   * not in init/setSize: the pipeline iterates `passes` in both of those and splicing
+   * an array mid-iteration skips entries, whereas `render()` iterates a filtered copy.
+   */
+  const _hoist = (pipe) => {
+    const arr = pipe.passes;
+    const me = arr.indexOf(p);
+    let target = -1;
+    for (const name of ['bloom', 'motionBlur', 'dof']) {
+      const i = arr.findIndex((q) => q.name === name);
+      if (i >= 0 && (target < 0 || i < target)) target = i;
+    }
+    if (me < 0 || target < 0 || me <= target) return;
+    arr.splice(me, 1);
+    arr.splice(target, 0, p);
+    frames = 0;
+    console.warn('[taa] hoisted ahead of bloom/motionBlur/dof at runtime; '
+      + 'PASS_MANIFEST in pipeline.js still lists it last.');
+  };
 
   p.init = (ctx, pipe) => {
     mat = fsMaterial(FRAG, {
       tCur: { value: null }, tHist: { value: null },
-      tDepth: { value: null }, tGbuf1: { value: null },
+      tDepth: { value: null }, tGbuf0: { value: null }, tGbuf1: { value: null },
       uTexel: { value: new THREE.Vector2() },
       uRes: { value: new THREE.Vector2() },
       uJitter: { value: new THREE.Vector2() },
+      uTanHalf: { value: new THREE.Vector2(1, 1) },
       uInvVPJit: { value: new THREE.Matrix4() },
       uCurrVP: { value: new THREE.Matrix4() },
       uPrevVP: { value: new THREE.Matrix4() },
       uPrevView: { value: new THREE.Matrix4() },
       uNear: { value: 0.06 }, uFar: { value: 12000 },
       uAlpha: { value: cfg.alpha }, uGamma: { value: cfg.gamma },
+      uGammaMoving: { value: cfg.gammaMoving },
       uValid: { value: 0 }, uSharp: { value: cfg.sharpen },
-      uClipBoost: { value: cfg.clipBoost }, uDepthTol: { value: cfg.depthTol },
-      uVelBoost: { value: cfg.velBoost },
+      uClipBoost: { value: cfg.clipBoost }, uSpike: { value: cfg.spike },
+      uDepthTol: { value: cfg.depthTol }, uSlopeScale: { value: cfg.slopeScale },
+      uVelGamma: { value: cfg.velGamma }, uVelBoost: { value: cfg.velBoost },
+      uVelAlphaMax: { value: cfg.velAlphaMax },
     });
     mat.blending = THREE.NoBlending;
 
-    copyMat = fsMaterial(/* glsl */`
-      in vec2 vUv; uniform sampler2D tSrc; out vec4 oCol;
-      void main(){ oCol = vec4(texture(tSrc, vUv).rgb, 1.0); }`, { tSrc: { value: null } });
-    copyMat.blending = THREE.NoBlending;
-
     quad = new FullScreenQuad(mat);
-    copyQuad = new FullScreenQuad(copyMat);
 
     // A teleport invalidates every temporal buffer in the engine; say so out loud
     // rather than letting the depth test discover it over the next dozen frames.
@@ -299,6 +369,7 @@ export function create(opts = {}) {
     const r = ctx.renderer;
     const cam = ctx.camera;
     const c = ctx.config || {};
+    if (!hoisted) { hoisted = true; _hoist(pipe); }
     if (!histA) p.setSize(pipe.w, pipe.h, ctx);
     // Skipped frames (pass toggled off for an A/B, or a stalled tab) leave a history
     // that no longer matches the previous-frame matrices. Start clean instead.
@@ -309,6 +380,7 @@ export function create(opts = {}) {
     u.tCur.value = pipe.read.texture;
     u.tHist.value = histA.texture;
     u.tDepth.value = pipe.depthTex;
+    u.tGbuf0.value = pipe.gbuffer.textures[0];
     u.tGbuf1.value = pipe.gbuffer.textures[1];
     u.uTexel.value.set(1 / pipe.w, 1 / pipe.h);
     u.uRes.value.set(pipe.w, pipe.h);
@@ -323,21 +395,32 @@ export function create(opts = {}) {
     u.uPrevView.value.copy(prevView);
     u.uNear.value = cam.near;
     u.uFar.value = cam.far;
+    // tan(fov/2) per axis, from the un-jittered projection: P[0][0] = 1/tanX,
+    // P[1][1] = 1/tanY. Feeds the plane-slope disocclusion tolerance.
+    const pe = pipe.unjitteredProj.elements;
+    u.uTanHalf.value.set(1 / Math.max(Math.abs(pe[0]), 1e-6), 1 / Math.max(Math.abs(pe[5]), 1e-6));
 
     u.uAlpha.value = THREE.MathUtils.clamp(c.taaAlpha ?? cfg.alpha, 0.02, 1.0);
     u.uGamma.value = c.taaGamma ?? cfg.gamma;
+    u.uGammaMoving.value = c.taaGammaMoving ?? cfg.gammaMoving;
     u.uSharp.value = c.taaSharpen ?? cfg.sharpen;
     u.uClipBoost.value = c.taaClipBoost ?? cfg.clipBoost;
+    u.uSpike.value = c.taaSpike ?? cfg.spike;
     u.uDepthTol.value = c.taaDepthTol ?? cfg.depthTol;
+    u.uSlopeScale.value = c.taaSlopeScale ?? cfg.slopeScale;
+    u.uVelGamma.value = c.taaVelGamma ?? cfg.velGamma;
     u.uVelBoost.value = c.taaVelBoost ?? cfg.velBoost;
+    u.uVelAlphaMax.value = c.taaVelAlphaMax ?? cfg.velAlphaMax;
     u.uValid.value = frames > 0 ? 1 : 0;
 
     r.setRenderTarget(histB);
     quad.render(r);
 
-    copyMat.uniforms.tSrc.value = histB.texture;
-    r.setRenderTarget(out);
-    copyQuad.render(r);
+    // The history has to carry linear view depth in alpha and the chain output must
+    // not, so the resolve cannot simply *be* the chain buffer — one copy is structural.
+    // Use the pipeline's own blit (it writes vec4(rgb, 1.0)) rather than a second copy
+    // material and quad of our own.
+    pipe.blit(histB.texture, out);
 
     const t = histA; histA = histB; histB = t;
     prevView.copy(cam.matrixWorldInverse);
@@ -346,7 +429,7 @@ export function create(opts = {}) {
 
   p.dispose = () => {
     histA?.dispose(); histB?.dispose();
-    quad?.dispose(); copyQuad?.dispose();
+    quad?.dispose();
   };
 
   return p;

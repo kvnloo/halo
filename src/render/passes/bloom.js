@@ -32,10 +32,14 @@ import { Pass, fsMaterial, makeRT, FullScreenQuad } from '../RenderPipeline.js';
  *
  * There is exactly ONE threshold path. The old build had a second, differently
  * calibrated self-exposure branch selected by `(uExposure > 0) ? … : …`, and which one
- * ran depended on whether `tonemap` had seeded `ctx.config.exposure` yet — a race that
- * produced three different images from nine identical captures. `tonemap.init` runs
- * before *any* pass renders, so reading it at render time is always well-defined; if
- * it is missing this pass fails loudly instead of quietly becoming a different effect.
+ * ran depended on whether `tonemap` had resolved `ctx.config.exposure` yet — a race
+ * that produced three different images from nine identical captures of the same
+ * command. `tonemap` resolves the key from the live lighting rig inside its own render,
+ * downstream of here, so what this pass reads is `null` on frame 0 and exactly one
+ * frame old after that. One frame of lag on a knee is invisible and deterministic;
+ * frame 0 simply renders without glare, and if the value is still missing several
+ * frames in, tonemap is absent and the pass says so instead of silently becoming a
+ * different effect.
  *
  * ## 2. The pyramid has to be able to reach
  *
@@ -244,7 +248,7 @@ void main(){
   float sq   = clamp(br - thr + knee, 0.0, 2.0 * knee);
   sq = sq * sq / (4.0 * knee);
   col *= max(sq, br - thr) / max(br, 1e-5);
-  col  = min(col, vec3(uClamp * thr));
+  col  = min(col, vec3(uClamp));
 
   oCol = vec4(col, 1.0);
 }
@@ -325,7 +329,7 @@ export function create(opts = {}) {
     falloff: 0.85,
     anamorphic: 1.25,
     chroma: 1.0,
-    clamp: 60.0,
+    clamp: 500.0,
   }, opts.bloom || {});
 
   const tint = new THREE.Vector3(1, 1, 1);
@@ -337,7 +341,7 @@ export function create(opts = {}) {
   let weightKey = '';
   let kStep = [];
   let ramp = tintRamp(LEVELS, 1.0);
-  let contractChecked = false;
+  let unresolved = 0;
 
   p.init = () => {
     mPre = fsMaterial(PREFILTER_FRAG, {
@@ -389,6 +393,12 @@ export function create(opts = {}) {
     quad.render(r);
   };
 
+  /** The exact factor `tonemap` multiplies scene radiance by: exposed = gain · linear. */
+  const exposureGain = (c) => {
+    const mode = (c.tonemapper in MODE_GAIN) ? c.tonemapper : 'agx';
+    return c.exposure * MODE_GAIN[mode] * Math.pow(2, c.exposureEV || 0);
+  };
+
   /**
    * Scene-linear knee. `tonemap` renders `exposure · MODE_GAIN[mode] · 2^EV · L`, so a
    * knee that means "just under display white" is `displayWhite(target) / that factor`.
@@ -401,26 +411,31 @@ export function create(opts = {}) {
     if (key !== curveKey) { curveKey = key; whitePoint = displayWhite(target, mode, white); }
     const explicit = c.bloomThresholdDisplay ?? cfg.thresholdDisplay;
     const exposedThr = (typeof explicit === 'number' && explicit > 0) ? explicit : whitePoint;
-    const gain = c.exposure * MODE_GAIN[mode] * Math.pow(2, c.exposureEV || 0);
-    return exposedThr / Math.max(gain, 1e-6);
+    return exposedThr / Math.max(exposureGain(c), 1e-6);
   };
 
   p.render = (ctx, pipe, out) => {
     const r = ctx.renderer;
     const c = ctx.config || {};
 
-    // Hard contract: the knee is display-referred, so the display transform's exposure
-    // has to exist. `tonemap.init` publishes it and every pass init completes before
-    // the first render, so this can only fire if tonemap is missing entirely. Fail
-    // loudly and once — the alternative is a second, differently calibrated bloom.
-    if (!contractChecked) {
-      contractChecked = true;
-      if (typeof c.exposure !== 'number' || !(c.exposure > 0)) {
+    // Hard contract: the knee is display-referred, so it needs the number the display
+    // transform is actually going to multiply by. `tonemap` resolves that from the live
+    // lighting rig in its own render, which is downstream of here — so on frame 0 it is
+    // still null and from frame 1 on it is exactly one frame old. One frame of exposure
+    // lag on a knee is nothing (and is deterministic); *no* number at all is not
+    // something to paper over with a second, differently calibrated threshold, which is
+    // what the previous `(uExposure > 0) ? … : …` branch did. Frame 0 renders without
+    // glare; if it is still unresolved a few frames in, tonemap is missing — say so.
+    if (typeof c.exposure !== 'number' || !(c.exposure > 0)) {
+      if (++unresolved > 4) {
         p.enabled = false;
-        throw new Error('[bloom] ctx.config.exposure is not a positive number — the '
-          + '`tonemap` pass must publish it before any pass renders. bloom disabled.');
+        throw new Error('[bloom] ctx.config.exposure is still not a positive number after '
+          + unresolved + ' frames — the `tonemap` pass must publish it. bloom disabled.');
       }
+      pipe.blit(pipe.read.texture, out);
+      return;
     }
+    unresolved = 0;
 
     if (!mips.length) p.setSize(pipe.w, pipe.h);
 
@@ -449,7 +464,13 @@ export function create(opts = {}) {
     // ---------------------------------------------------------- 1. prefilter
     mPre.uniforms.uThresh.value = sceneThreshold(c);
     mPre.uniforms.uKnee.value = c.bloomKnee ?? cfg.knee;
-    mPre.uniforms.uClamp.value = c.bloomClamp ?? cfg.clamp;
+    // Ceiling on the glare *source*, in exposed-linear units so it does not move when
+    // the knee does. It used to be a multiple of the threshold, which inverted the
+    // knob: this scene's sun disc peaks at 6900 scene-linear, the clamp was the thing
+    // actually setting the halo strength, and *lowering* the threshold therefore made
+    // the glare weaker. Independent now — the knee decides what glares, this decides
+    // how far a single firefly is allowed to push it.
+    mPre.uniforms.uClamp.value = (c.bloomClamp ?? cfg.clamp) / Math.max(exposureGain(c), 1e-6);
     mPre.uniforms.tSrc.value = pipe.read.texture;
     mPre.uniforms.uT.value.set(1 / pipe.w, 1 / pipe.h);
     _draw(r, mPre, mips[0]);

@@ -113,3 +113,43 @@ integration pass re-checks determinism at every scored pose.
 
 Anyone tuning bloom, DoF or motion blur against measurements taken **before** this
 change should re-take them; their input image was different.
+
+---
+
+## 6. The grade cannot be finally calibrated until the scene is complete
+
+Phase 1's grade refine improved the whole-frame statistics while making the sky region
+measurably worse:
+
+```
+sky ROI      before     after    target
+sat_mean      94.40    117.91     87.05     +31 over, was +7
+lab_b        -18.05    -29.54    -15.07     -14 off, was -3
+lum_std       21.10     16.82     44.92
+```
+
+The cause is structural, not a mistake by that agent. At Phase 1 the frame is roughly
+60% sky and 40% flat placeholder clear-colour where the ground will be. Optimising the
+**whole-frame** average against a reference whose lower half is warm sunlit sand forces
+the grade to push the only content that exists — the sky — away from its own target, to
+compensate for a warm region that is not there yet.
+
+This is the circular-calibration trap in a second costume: fitting against a frame that
+is not the product. Last time the input distribution was reference footage; this time it
+is a render that is 40% placeholder.
+
+**Therefore:**
+
+1. Treat the current grade defaults as provisional. They are approximately right in
+   hue and roughly right in exposure, and that is all they need to be for other
+   subsystems to be built and judged against them.
+2. Any agent tuning the grade before terrain, ocean and clouds exist must measure the
+   **`sky` ROI**, not the whole frame, and say which it used.
+3. The grade gets a final calibration pass after Phase 3, against complete frames at all
+   eight scored poses, using `tools/capture.mjs` output as the input distribution.
+   Schedule it; do not let it be done early and quietly.
+
+The same caution applies to exposure, bloom threshold and anything else keyed off
+whole-frame luminance statistics. `p01 75 / p99 162 / shadow_frac 0 / highlight_frac 0`
+in the current build are not grade failures — there is genuinely nothing dark or
+specular in the scene yet.

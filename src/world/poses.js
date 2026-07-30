@@ -22,6 +22,10 @@ export const POSES = {
   // Look up: Halo ring band and Threshold across the sky, cliff edge lower-left.
   ref_00600: { pos: [-6.0, 1.74, 2.0], rot: [26.0, 330.0, 0], fov: 78 },
 
+  // The sky frame: Threshold fills the upper right, two Halo ring bands rise from
+  // the horizon, stars in the zenith, cliff left, hero sea stack centre.
+  ref_00720: { pos: [-14.0, 1.74, 8.0], rot: [8.0, 320.0, 0], fov: 78 },
+
   // Down among the tide-pool shelf, big stacks close and towering.
   ref_00840: { pos: [-24.0, 1.74, -3.0], rot: [2.0, 342.0, 0], fov: 78 },
 

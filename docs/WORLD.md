@@ -71,13 +71,18 @@ material:  weathered forerunner alloy — desaturated warm grey, roughness 0.35�
 
 ## Sky
 
+**Study `ref/keyframes/kf_00720.png` before building any of this** — it is the one
+frame that shows every sky element at once.
+
 | feature      | placement |
 |--------------|-----------|
 | sun          | azimuth 118° (from +X, slightly seaward), elevation 41°, angular diameter 0.54° |
-| Halo ring    | band crossing the sky; near edge rises from the horizon at azimuth ≈ 300°, apparent width 3.4°, sweeping overhead. Inner surface faintly shows landmass banding. Translucent, additive over sky |
-| Threshold    | gas giant, azimuth 342°, elevation 22°, angular diameter 26°. Banded ochre/mauve, terminator toward the sun, very soft limb |
-| clouds       | cumulus congestus, base 900 m, top 2600 m, coverage 0.52, strongly lit tops, flat shadowed bases |
-| horizon haze | dense — the reference dissolves distant stacks into a pale warm band. Aerial perspective must be aggressive |
+| Halo ring    | **Near-vertical narrow bands rising out of the horizon, not a wide arc overhead.** Seen from the ring's inner surface the far side climbs almost straight up: each visible segment is a slender bright band ~0.6–1.2° wide, pale cyan-white, semi-transparent, softening into haze at its base. Two are visible in kf_00720 (azimuth ≈ 356° and ≈ 300°). Faint blue-green landmass/ocean banding along their length. They must read as *enormous and impossibly far away* — no hard edges, no visible geometry |
+| Threshold    | Gas giant, azimuth 342°, elevation 30°, **angular diameter ≈ 62°** — it dominates the upper-right of frame. Mauve / dusty rose / tan latitudinal bands with turbulent domain-warped filaments. Terminator across the lower-left of the disc, very soft. Sits *behind* the clouds and is washed out by atmosphere near its lower edge |
+| stars        | Visible in the deep-blue zenith even in daylight. Sparse, faint, slightly warm-white |
+| clouds       | Cumulus congestus, base 900 m, top 2600 m, coverage 0.52. Brilliant sunlit tops, flat blue-grey shadowed bases, bright silver rims where backlit |
+| aircraft     | A Pelican dropship occasionally crosses at distance — `props` may add one |
+| horizon haze | Dense. The reference dissolves distant stacks into a pale warm band. Aerial perspective must be aggressive |
 
 ## Lighting reference (measured from the clip)
 

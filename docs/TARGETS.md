@@ -92,6 +92,40 @@ viewmodel is roughly 26% darker than the scene, with the highest local contrast 
 frame (0.178). It is a dark matte object with sharp specular breakup — not a grey prop
 lit to match the background.
 
+## Means are not an image
+
+The single most common way to fail this measurement while appearing to pass it is to
+tune the *means* — `lum_mean`, `rgb_mean`, `sat_mean` — until they match, and declare
+victory. They will match. The image will still lose, instantly, to anyone looking at it.
+
+A real example from this project. A sky implementation matched the reference's regional
+`rgb_mean` to within one code value, and reported that as the headline result. Measured
+on structure instead, the same frame had:
+
+```
+Halo band       lap_var 168 vs 568       one third the fine detail
+                min 77 vs 65             no dark seas
+                max 205 vs 252           no blown-out cloud tops
+gas giant       chroma 19.4 vs 30.8      a 40% chroma deficit — bleached
+                disc lap_var 0.78 vs 2.36
+sun             peaks at 243, never clips, drives no bloom
+```
+
+Every one of those errors is invisible to a mean. A flat pastel band and a richly
+structured one with dark seas and blown highlights can have identical averages.
+
+So: **the mean tells you the exposure and the grade are in the right place. It tells you
+nothing about whether the thing is any good.** The axes that carry structure are
+`lap_var`, `edge_density`, `local_contrast`, `lum_std`, the min/max tails, and
+`spectral_slope`. Quote those. If you report a mean, report the standard deviation and
+the tails beside it, or you have not said anything.
+
+The same trap in another costume: **fitting a metric instead of fixing the image.** An
+unsharp mask will raise `lap_var` to any value you like without recovering a single bit
+of real detail — and it drags `spectral_slope` away from −2.60 while doing it, which is
+precisely why that axis is in the suite. If a number moved because you added broadband
+high frequency rather than because you added information, say so.
+
 ## Calibration: what "AAA" scores
 
 `ref/baseline.json` records what the reference game scores **against itself** across 91

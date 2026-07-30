@@ -1,6 +1,7 @@
 node_modules/
 .venv/
 dist/
-shots/
+shots/*
+!shots/preview/
 ref/frames_full/
 *.log

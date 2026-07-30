@@ -389,6 +389,9 @@ uniform vec3  uPlanetColD;
 uniform float uPlanetSeed;
 
 uniform float uDebugTonemap;
+uniform float uDebugMode;
+uniform float uMsScale;
+uniform float uMieScale;
 
 ${ATMO_GLSL}
 ${NOISE_GLSL}
@@ -558,9 +561,15 @@ void main(){
   vec4 rm = texture(tSkyRayMie, svUv);
   vec3 ms = texture(tSkyMulti, svUv).rgb;
   float cosT = dot(dir, uSunDir);
-  vec3 inscatter = (rm.rgb * phaseRayleigh(cosT)
-                  + vec3(rm.a) * phaseMie(cosT, uMieG)
-                  + ms) * uSolarIrradiance * uSunTint;
+  vec3 termR = rm.rgb * phaseRayleigh(cosT);
+  vec3 termM = vec3(rm.a) * phaseMie(cosT, uMieG) * uMieScale;
+  vec3 termS = ms * uMsScale;
+  if (uDebugMode > 0.5){
+    if (uDebugMode < 1.5) { termM = vec3(0.0); termS = vec3(0.0); }
+    else if (uDebugMode < 2.5) { termR = vec3(0.0); termS = vec3(0.0); }
+    else if (uDebugMode < 3.5) { termR = vec3(0.0); termM = vec3(0.0); }
+  }
+  vec3 inscatter = (termR + termM + termS) * uSolarIrradiance * uSunTint;
   inscatter *= uAtmTint;
 
   vec3 Tview = atmSampleTr(tTransmittance, r, clamp(dir.y, -1.0, 1.0));
@@ -734,6 +743,9 @@ export function create(opts = {}) {
     uPlanetSeed: { value: 0 },
 
     uDebugTonemap: { value: 0 },
+    uDebugMode: { value: 0 },
+    uMsScale: { value: S.msScale ?? 1.0 },
+    uMieScale: { value: S.mieScale ?? 1.0 },
   };
 
   let domeMesh = null, domeMat = null;
@@ -958,6 +970,9 @@ export function create(opts = {}) {
 
       ctx.on('config', ({ k, v }) => {
         if (k === 'skyDebugTonemap') uniforms.uDebugTonemap.value = v ? 1 : 0;
+        if (k === 'skyDebugMode') uniforms.uDebugMode.value = v;
+        if (k === 'skyMsScale') uniforms.uMsScale.value = v;
+        if (k === 'skyMieScale') uniforms.uMieScale.value = v;
         if (k === 'skyExposureHint') uniforms.uExposureHint.value = v;
         if (k === 'skyIrradiance') uniforms.uSolarIrradiance.value = v;
         if (k === 'ringBrightness') uniforms.uRingBrightness.value = v;

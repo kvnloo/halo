@@ -129,35 +129,68 @@ import { Pass, fsMaterial, FullScreenQuad } from '../RenderPipeline.js';
  *     been moved to 0.4626, the sRGB code of scene-linear 0.18, so that when the knob
  *     is finally dialled it rotates about middle grey instead of about 0.52.)
  *
- * What CAN be fitted like-for-like is the open blue sky, which exists in both images.
- * Masking both sides with the identical rule (OpenCV hue 95..125, s >= 55, v >= 40) and
- * averaging over the nine scored poses:
+ *   - Whole-frame sat_mean of the render is 91.1 against a target of 83.9, which reads
+ *     like "desaturate by 8%". On the masked clear sky — the only like-for-like
+ *     comparison available — the render measures 92.6 against the reference's 103.1,
+ *     i.e. the render's blue sky is *under*-saturated. The whole-frame excess is the
+ *     absence of clouds and neutral ground, both of which pull the reference's number
+ *     down. Hence gradeSaturation 1.000. (The previous default of 1.10 was chosen for
+ *     the opposite reason, from the mirror-image mistake.)
+ *
+ * The one colour statistic that every available measurement agrees on
+ * ------------------------------------------------------------------
+ * Masking both sides with the identical rule (OpenCV HSV hue 95..125, s >= 55, v >= 40)
+ * and averaging over the nine scored poses:
  *
  *      masked clear sky      render (ungraded)    reference
  *      mean RGB              ( 83.5, 95.0,134.5)  ( 92.3,114.6,152.5)
  *      lab_a                       +6.40                +2.39
  *      lab_b                      -23.04               -23.04
- *      hsv sat                      92.1                103.1
+ *      hsv sat                      92.6                103.1
+ *      lum                          96.4                112.2
  *
- * lab_b already matches to two decimal places; lab_a is 4.0 units off, and the RGB
- * ratios say why — G/R is 1.138 against the reference's 1.241, i.e. the render is ~8%
- * short of green. That is a real, global, content-independent cast (the whole-frame
- * numbers show the same 3.4-unit magenta excess), and removing a global cast is exactly
- * what a CDL is for. Everything below is that correction plus the roll-off repair.
+ * lab_b matches to two decimal places. lab_a is 4.0 units off, and the RGB ratios say
+ * why — G/R is 1.138 against the reference's 1.241, i.e. the render is ~8% short of
+ * green. The whole-frame numbers show the same excess (+6.36 vs +2.98), the reference
+ * holds lab_a in a tight +1.9..+3.6 band across every one of its nine ROI signatures,
+ * and two alternative explanations were tested and ruled out:
  *
- * `tools/fit` equivalent lives in the calibration harness; the resulting numbers and
- * the gate that protects them are in `CALIBRATION` / `verifyCalibration()`.
+ *   - not exposure: re-exposing the render's sky in scene-linear over 1.0x..1.6x drives
+ *     lab_a the wrong way (+6.40 -> +7.88);
+ *   - not AgX: pushing a neutral through `tonemapJS` returns lab_a +0.01, and on every
+ *     test colour AgX *reduces* |a| rather than adding magenta.
+ *
+ * So it is a real chroma error and the grade corrects it, using per-channel GAMMA rather
+ * than a CDL slope. That choice is deliberate: a slope of 0.954 on red (which is what an
+ * unconstrained fit asks for) drags display white down to code 243, i.e. it tints every
+ * cloud top and specular cyan. Gamma fixes both endpoints — 0^g = 0 and 1^g = 1 — and
+ * moves only the midtones, which is where the cast is. Measured consequences:
+ *
+ *      whole frame, 9 poses      before    after    target
+ *      lab_a                      +6.36    +2.61     +2.98
+ *      lab_b                     -22.71   -21.72       n/a (content-bound, see above)
+ *      lum_mean                   97.65    97.84    105.40
+ *      dry sand (220,190,150)             -> (218,192,150)     cloud (240,244,250) -> (239,244,250)
+ *
+ * **Falsification condition.** The evidence for this correction is entirely chromatic,
+ * because the sky is the only chromatic content in the frame today. The side effect is a
+ * -4 lab_a tint on the neutral axis at midtones, decaying to 0 at white. If, once
+ * terrain and structures land, the render's *neutral* surfaces read green against the
+ * reference's slightly-warm neutrals (`weapon` ROI: lab_a +1.89), then the cast is not
+ * global and this correction belongs in `src/world/sky.js`'s scattering coefficients
+ * instead — the sky-side fix is the same numbers applied to the sky's own radiance.
+ * Re-run the capture in `CALIBRATION.captureCmd` and re-check before believing either.
  */
 const DEFAULTS = {
   gradeEnabled: true,
 
-  // Fitted against shots/ungraded/*.png (see CALIBRATION). A green lift / magenta trim.
-  gradeCdlSlope: [0.9740, 1.0260, 0.9930],
-  gradeCdlOffset: [0.0000, 0.0000, 0.0000],
-  gradeCdlPower: [1.0000, 1.0000, 1.0000],
+  gradeCdlSlope: [1.000, 1.000, 1.000],
+  gradeCdlOffset: [0.000, 0.000, 0.000],
+  gradeCdlPower: [1.000, 1.000, 1.000],
 
   gradeLift: [0.000, 0.000, 0.000],
-  gradeGamma: [1.000, 1.000, 1.000],
+  // The magenta trim. Endpoint-preserving by construction; see the note above.
+  gradeGamma: [0.9413, 1.0391, 1.0026],
   gradeGain: [1.000, 1.000, 1.000],
 
   // 1.000 is a measurement, not a default-by-neglect. See the note above.

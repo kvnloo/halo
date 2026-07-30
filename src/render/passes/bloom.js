@@ -78,15 +78,15 @@ import { Pass, fsMaterial, makeRT, FullScreenQuad } from '../RenderPipeline.js';
  * energy, where it was invisible.
  *
  * ctx.config knobs (all live):
- *   bloomIntensity 0.42      fraction of above-knee energy redistributed
+ *   bloomIntensity 0.50      fraction of above-knee energy redistributed
  *   bloomThresholdSrgb 0.97  display code value the knee closes at
  *   bloomThresholdDisplay    optional explicit exposed-linear knee (overrides the solve)
  *   bloomKnee 0.55           soft-knee width, as a fraction of the threshold
  *   bloomRadius 2.0          tent radius in source texels
- *   bloomFalloff 0.85        octave weight exponent; 0 = flat = 1/r²
+ *   bloomFalloff 0.20        octave weight exponent; 0 = flat = exactly 1/r²
  *   bloomAnamorphic 1.25     horizontal stretch on the widest steps
  *   bloomChroma 1.0          strength of the core→tail tint ramp
- *   bloomClamp 60            firefly ceiling, in multiples of the threshold
+ *   bloomClamp 500           firefly ceiling on the glare source, exposed-linear
  *   bloomTint [1,1,1]        global tint on top of everything
  *
  * Cost at 1920×1080 on a 3080 Ti: 1 prefilter + 7 downsamples + 7 upsamples +
@@ -321,12 +321,12 @@ export function create(opts = {}) {
   let W = 0, H = 0;
 
   const cfg = Object.assign({
-    intensity: 0.42,
+    intensity: 0.50,
     thresholdSrgb: 0.97,
     thresholdDisplay: null,   // explicit exposed-linear override; null = solve it
     knee: 0.55,
     radius: 2.0,
-    falloff: 0.85,
+    falloff: 0.20,
     anamorphic: 1.25,
     chroma: 1.0,
     clamp: 500.0,

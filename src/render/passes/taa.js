@@ -74,7 +74,7 @@ import { Pass, fsMaterial, makeRT, FullScreenQuad } from '../RenderPipeline.js';
  *
  * ctx.config knobs:
  *   taaAlpha 0.09        taaGamma 1.6        taaGammaMoving 0.85
- *   taaSharpen 0.15      taaClipBoost 0.25   taaSpike 0.35
+ *   taaSharpen 0.22      taaClipBoost 0.25   taaSpike 0.50
  *   taaDepthTol 0.01     taaSlopeScale 2.5   taaVelGamma 0.02
  *   taaVelBoost 0.0008   taaVelAlphaMax 0.10
  */
@@ -290,9 +290,9 @@ export function create(opts = {}) {
     alpha: 0.09,
     gamma: 1.6,
     gammaMoving: 0.85,
-    sharpen: 0.15,
+    sharpen: 0.22,
     clipBoost: 0.25,
-    spike: 0.35,
+    spike: 0.50,
     depthTol: 0.01,
     slopeScale: 2.5,
     velGamma: 0.02,

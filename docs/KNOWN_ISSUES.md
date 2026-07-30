@@ -153,3 +153,45 @@ The same caution applies to exposure, bloom threshold and anything else keyed of
 whole-frame luminance statistics. `p01 75 / p99 162 / shadow_frac 0 / highlight_frac 0`
 in the current build are not grade failures — there is genuinely nothing dark or
 specular in the scene yet.
+
+---
+
+## 7. Sky: critic fixes applied by hand (Phase 1 refine agents were cut off)
+
+The Phase 1 refine agents failed on a session usage limit, so the sky critic's fixes
+were applied directly. Measured on the ring band (box x695-748, y120-430 at ref_00720):
+
+```
+                    before    after    target
+ring band lap_var   2481.5    844.3    568.0
+ring band std         26.0     35.0     42.9
+ring band max          228      231      252
+gas giant chroma      19.4     32.6     30.8   <- on target
+sun peak               243      255      255   <- clips, drives bloom
+frame frac>224     0.00013  0.00064  0.00457
+```
+
+**Done:** gas-giant limb haze confined to the outer disc (was bleaching 76% of the
+mid-disc into sky), narrow terminator, separate limb thread, +80% chroma at constant
+luma, two extra detail octaves; aurora moved after the haze mix and narrowed; cirrus
+rotated per-region with a sheet mask and strength cut 0.175 -> 0.060; ring continental
+scale fixed (one noise period spanned 1100 km against a 520 km band), sea colour
+darkened, cloud tops allowed to clip, haze thinned so seas are not lifted.
+
+**Still short:**
+- Ring `lap_var` is 844 against 568 — still ~1.5x too much high-frequency energy, and
+  `std` 35.0 against 42.9 means it is still short on large-scale structure. The band is
+  ~55 px wide on screen for 520 km (~9.5 km/px), so anything finer than ~30 km aliases;
+  the remaining excess is probably that, not real detail.
+- `frac>224` 0.00064 against 0.00457 — the frame still has 7x too little clipped energy.
+  Expected to close on its own once water glints, wet sand and cloud tops exist; do not
+  chase it by raising exposure while the scene is empty.
+- The ring reads as "camouflage" more than orbital terrain at this distance. Wants
+  coherent coastlines rather than isotropic blobs — a river/erosion pass, or advecting
+  the continental field along the band, would help more than another octave.
+
+A methodological note on my own error here: the first three measurements used a box
+that clipped sky at the corners, so `min` read 91-99 and looked stuck no matter how far
+the sea colour was darkened. That is exactly the failure documented at the top of
+`docs/TARGETS.md` — regions are screen rectangles, look at the crop before believing
+the number.

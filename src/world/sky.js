@@ -462,11 +462,34 @@ vec3 stars(vec3 dir, float px){
 float cirrusVeil(vec3 dir){
   if (dir.y < 0.015) return 0.0;
   vec2 p = dir.xz / max(dir.y, 0.015) * 1.25 + uCirrusOffset;
-  float w = fbm2(p*0.42 + 3.3, 3);
-  float v = fbm2(vec2(p.x*0.62, p.y*1.55) + w*1.10 + 9.1, 5);
-  float f = fbm2(vec2(p.x*1.60, p.y*4.40) + w*0.7 + 21.0, 4);
+
+  // A fixed 2.5:1 anisotropy with no rotation and no scale variation produced a field
+  // of visually identical almond filaments, all at the same angle and the same length,
+  // tiled uniformly across the hemisphere - they read as dirt on the lens rather than
+  // as weather. Three fixes: rotate the noise frame by a low-frequency field so the
+  // streaks follow a flow, jitter the anisotropy per region so they are not all the
+  // same lozenge, and gate the whole thing behind a sparse sheet mask so filaments
+  // cluster into two or three sheets instead of covering the sky.
+  float rot = fbm2(p*0.08 + 57.0, 3) * 2.4;
+  float cs = cos(rot), sn = sin(rot);
+  mat2 R = mat2(cs, -sn, sn, cs);
+  vec2 pr = R * p;
+
+  // per-region anisotropy: blend a stretched frame against a squatter one
+  float aniso = fbm2(p*0.13 + 71.0, 2) * 0.5 + 0.5;
+  vec2 sA = vec2(0.62, 1.55), sB = vec2(1.40, 3.20);
+  vec2 sc = mix(sA, sB, aniso);
+
+  float w = fbm2(pr*0.42 + 3.3, 3);
+  float v = fbm2(pr*sc + w*1.10 + 9.1, 5);
+  float f = fbm2(vec2(pr.x*1.60, pr.y*4.40) + w*0.7 + 21.0, 4);
   float m = smoothstep(0.26, 0.58, v*0.74 + f*0.44);
-  return m * smoothstep(0.03, 0.34, dir.y) * smoothstep(7.0, 2.4, length(p - uCirrusOffset));
+
+  // sheet mask: only a couple of broad regions carry cirrus at all
+  float sheet = smoothstep(0.10, 0.46, fbm2(p*0.055 + 137.0, 3)*0.5 + 0.5);
+
+  return m * sheet * smoothstep(0.03, 0.34, dir.y)
+           * smoothstep(7.0, 2.4, length(p - uCirrusOffset));
 }
 
 /* -------------------------------------------------------------- Halo ring */
@@ -498,45 +521,56 @@ vec3 ringSurface(float s, float v, out float lum){
   // s: arc length along the circumference (km), v: across the band, -1..1.
   // One unit = 300 km, so continents land at the right scale and the finest octave
   // resolves individual weather systems rather than noise.
-  vec2 q = vec2(s, v*uRingHalfWidthKm) / 300.0 + vec2(uRingSeed, uRingSeed*0.37);
+  // s: arc length along the circumference (km), v: across the band, -1..1.
+  // The divisor was 300 km, so with the 0.27 multiplier below one noise period spanned
+  // ~1100 km while the band is only 520 km wide - the entire band width fell inside a
+  // quarter of one period, which is exactly why it read as a uniform pastel wash with
+  // no continents. 80 km per unit puts ~1.7 continent/ocean cycles across the band.
+  vec2 q = vec2(s, v*uRingHalfWidthKm) / 115.0 + vec2(uRingSeed, uRingSeed*0.37);
 
-  float cont = warpedFbm2(q*0.27, 6, 1.45);
+  float cont = warpedFbm2(q*0.24, 4, 1.55);
   float shelf = smoothstep(-0.035, 0.045, cont);
   float land  = smoothstep(0.080, 0.155, cont);
   float alt   = smoothstep(0.150, 0.310, cont);
 
-  // Seen through the ring's own air the ocean reads as a pale cyan, not deep blue.
-  vec3 deep    = vec3(0.045, 0.175, 0.390);
-  vec3 shallow = vec3(0.240, 0.545, 0.645);
-  vec3 grass   = vec3(0.160, 0.230, 0.185);
-  vec3 dry     = vec3(0.300, 0.285, 0.225);
-  vec3 rock    = vec3(0.330, 0.335, 0.330);
+  // Seen through the ring's own air the ocean reads as a muted cyan-navy. It must go
+  // DARKER than the surrounding sky - previously the band's darkest pixel was brighter
+  // than the sky behind it, so the whole strip floated instead of reading as terrain.
+  vec3 deep    = vec3(0.011, 0.044, 0.104);
+  vec3 shallow = vec3(0.150, 0.360, 0.455);
+  vec3 grass   = vec3(0.205, 0.300, 0.225);
+  vec3 dry     = vec3(0.430, 0.395, 0.290);
+  vec3 rock    = vec3(0.480, 0.470, 0.445);
 
   vec3 c = mix(deep, shallow, shelf);
-  vec3 ground = mix(grass, dry, fbm2(q*1.05 + 11.0, 3)*0.5 + 0.5);
+  vec3 ground = mix(grass, dry, fbm2(q*0.62 + 11.0, 3)*0.5 + 0.5);
   ground = mix(ground, rock, alt*0.7);
   c = mix(c, ground, land);
 
   // inland seas and river systems scratched into the land
-  float riv = 1.0 - smoothstep(0.0, 0.050, abs(ridged2(q*0.85 + 4.3, 4) - 0.58));
+  float riv = 1.0 - smoothstep(0.0, 0.075, abs(ridged2(q*0.38 + 4.3, 2) - 0.58));
   c = mix(c, shallow*0.9, riv*land*0.7);
 
   // Cloud deck: compact bright clumps sheared along the circumference. In the
   // reference these are the only genuinely white thing on the band; everything else
   // is translucent pale cyan.
-  vec2 cq = vec2(q.x*0.55, q.y*1.75);
+  vec2 cq = vec2(q.x*0.55, q.y*0.95);
   float cw = fbm2(cq*0.70 + 21.0, 3);
-  float cb = fbm2(cq*1.05 + vec2(cw*1.6, cw*0.4) + 51.0, 5);
-  float cd = fbm2(cq*3.60 + vec2(cw*0.8, 0.0) + 77.0, 5);
+  float cb = fbm2(cq*0.62 + vec2(cw*1.6, cw*0.4) + 51.0, 4);
+  float cd = fbm2(cq*0.90 + vec2(cw*0.8, 0.0) + 77.0, 3);   // popcorn cumulus
   float cm = smoothstep(0.110, 0.295, cb*0.78 + cd*0.55);
-  vec3 cloud = vec3(1.02, 1.22, 1.52);
+  // Cloud tops are the only thing on the band that should reach white and clip.
+  vec3 cloud = vec3(2.55, 3.05, 3.80);
 
-  c = mix(c, cloud*0.72, smoothstep(-0.09, 0.30, cb) * 0.22);   // thin overcast veil
+  // The global overcast veil lifted the whole band's floor, flattening the sea/land
+  // contrast that carries most of its structure. Keep a trace of it, no more.
+  c = mix(c, cloud*0.30, smoothstep(-0.09, 0.30, cb) * 0.09);
   c = mix(c, cloud, cm);
   c = mix(c, cloud*1.12, cm * smoothstep(0.20, 0.52, cd) * 0.55);
 
-  // large-scale weather / illumination banding so the strip is not uniformly busy
-  c *= 0.74 + 0.52*(fbm2(q*0.21 + 91.0, 3)*0.5 + 0.5);
+  // Large-scale weather / illumination banding. Widened: the old 0.74+0.52 range both
+  // lifted the floor and capped the ceiling, so nothing was ever dark or ever clipped.
+  c *= 0.50 + 1.02*(fbm2(q*0.14 + 91.0, 3)*0.5 + 0.5);
 
   lum = dot(c, vec3(0.30, 0.59, 0.11));
   return c;
@@ -551,9 +585,12 @@ vec3 planetSurface(vec3 n, out float detail){
   float lon = atan(dot(n, bz), dot(n, bx));
 
   vec2 q = vec2(lon*1.05, lat*2.2) + uPlanetSeed;
-  // two-level domain warp: turbulent belts instead of stripes
-  vec2 w1 = vec2(fbm2(q*0.85 + 3.7, 4), fbm2(q*0.85 + 9.1, 4));
-  vec2 w2 = vec2(fbm2(q*2.30 + w1*1.1 + 17.3, 3), fbm2(q*2.30 + w1*1.1 + 27.9, 3));
+  // Two-level domain warp: turbulent belts instead of stripes.
+  // The finest warp term used to run at 2.30 with 3 octaves, which at ~900 px of
+  // on-screen disc diameter resolves nothing below ~40 px - the disc measured 3x short
+  // on fine structure. Push the second warp up in frequency and depth.
+  vec2 w1 = vec2(fbm2(q*0.85 + 3.7, 5), fbm2(q*0.85 + 9.1, 5));
+  vec2 w2 = vec2(fbm2(q*5.40 + w1*1.1 + 17.3, 6), fbm2(q*5.40 + w1*1.1 + 27.9, 6));
   float y = lat*7.0 + 1.30*w1.y + 0.40*w2.y;
 
   float b1 = 0.5 + 0.5*sin(y*1.30);
@@ -567,6 +604,9 @@ vec3 planetSurface(vec3 n, out float detail){
   c *= 0.93 + 0.12*b3;
   c *= 0.975 + 0.055*b4;
   c *= 0.92 + 0.16*(fbm2(q*0.42 + 61.0, 4)*0.5 + 0.5);
+  // Fine filamentary shear - the octaves that carry the disc's high-frequency detail.
+  c *= 0.955 + 0.090*(fbm2(q*3.10 + w2*0.9 + 131.0, 5)*0.5 + 0.5);
+  c *= 0.978 + 0.044*(ridged2(q*7.40 + w2*1.4 + 203.0, 4));
 
   // storm ovals and shear wisps
   float storm = ridged2(q*1.1 + w2*0.5 + 40.0, 3);
@@ -624,21 +664,39 @@ void main(){
       vec3 base = planetSurface(n, detail);
 
       float ndl = dot(n, uSunDir);
-      float lam = smoothstep(-0.55, 0.85, ndl);
+      // A 100-degree-wide terminator ramp lit the whole disc uniformly and read as a
+      // flat sticker. The real terminator on a body this size is a narrow band.
+      float lam = smoothstep(-0.08, 0.55, ndl);
       float shade = mix(1.0, lam, uPlanetTerminator);
       float ndv = max(dot(n, -dir), 0.0);
       float limb = mix(0.66, 1.0, pow(ndv, 0.30));
 
       vec3 col = base * shade * limb * uPlanetBrightness;
-      // Threshold's own atmosphere: at grazing angles the line of sight runs through
-      // hundreds of km of its air, which is why the reference's limb dissolves into
-      // the sky rather than ending on a hard edge.
-      float limbHaze = uPlanetAtmo + pow(1.0 - ndv, 1.60) * uPlanetLimbHaze;
-      col = mix(col, inscatter * 1.12 + vec3(0.008, 0.016, 0.026), clamp(limbHaze, 0.0, 1.0));
-      // aurora / airglow streaks along the sunward limb, the reference's green fringe
-      float aur = smoothstep(0.62, 0.16, ndv) * smoothstep(-0.10, 0.55, ndl);
+
+      // Threshold's own atmosphere. This used to mix 76% of the MID-DISC toward the
+      // blue sky in-scatter, which is what bleached the body into a lavender bubble
+      // (measured 40% short of the reference's chroma). Confine the wash to the outer
+      // ~15% of the disc radius, and mix toward a planet-local scattering colour so
+      // the body keeps its own hue instead of turning into sky.
+      float limbHaze = uPlanetAtmo + pow(1.0 - ndv, 4.0) * uPlanetLimbHaze;
+      vec3 planetScatter = mix(vec3(0.115, 0.086, 0.078),          // shadowed: dusty rose
+                               vec3(0.290, 0.215, 0.180),          // sunward: warm haze
+                               smoothstep(-0.20, 0.70, ndl));
+      col = mix(col, planetScatter, clamp(limbHaze, 0.0, 1.0));
+      // ...and only cross-fade to true sky inside the 2-3px antialiased edge.
+      col = mix(col, inscatter * 1.12 + vec3(0.008, 0.016, 0.026),
+                clamp(pow(1.0 - ndv, 26.0), 0.0, 1.0) * 0.85);
+
+      // Thin bright limb thread, as its own additive term rather than a by-product of
+      // the haze mix - that is what makes the edge read as an atmosphere seen edge-on.
+      col += vec3(0.085, 0.098, 0.132) * exp(-(1.0 - ndv) * 38.0)
+             * (0.35 + 1.05 * smoothstep(-0.30, 0.60, ndl));
+
+      // Aurora: applied AFTER the haze mix (it was being washed out by it), confined to
+      // a narrow angular band near the terminator rather than smeared over the limb.
+      float aurBand = smoothstep(0.36, 0.06, ndv) * smoothstep(0.60, 0.06, abs(ndl - 0.06));
       float streak = fbm2(vec2(atan(dot(n, uPlanetAxis), ndv)*7.0, ndv*22.0) + uPlanetSeed, 4)*0.5 + 0.5;
-      col += vec3(0.010, 0.048, 0.026) * aur * smoothstep(0.42, 0.92, streak) * uPlanetAuroraq;
+      col += vec3(0.050, 0.240, 0.130) * aurBand * smoothstep(0.42, 0.92, streak) * uPlanetAuroraq;
       // a thin scattering rim, brightest on the sunward side
       float rim = pow(1.0 - ndv, 5.0);
       float sunSide = smoothstep(-0.25, 0.65, ndl);
@@ -674,12 +732,12 @@ void main(){
       // the way the reference does, and stays crisp overhead.
       float am = 1.0 / max(dir.y, 0.010);
       float hz = 1.0 - exp(-uRingHazeK * pow(max(am - 1.0, 0.0), 1.4));
-      vec3 hazeCol = mix(uRingHazeColor * (0.55 + 0.60*lit), inscatter * 1.05, min(1.0, 0.28 + 0.85*hz));
+      vec3 hazeCol = mix(uRingHazeColor * (0.34 + 0.52*lit), inscatter * 1.05, min(1.0, 0.10 + 0.85*hz));
       surf = mix(surf, hazeCol, hz);
 
       // bright scattering fringe where the air is seen along the band wall
       float fringe = smoothstep(0.78, 1.0, av);
-      surf += uRingHazeColor * fringe * 0.22 * (1.0 - hz*0.6);
+      surf += uRingHazeColor * fringe * 0.13 * (1.0 - hz*0.6);
 
       float alpha = band * uRingOpacity;
       space = mix(space, surf, alpha);
@@ -735,7 +793,7 @@ export function create(opts = {}) {
     ringWidthRatio: 0.104,     // W / R  -> 520 km band
     ringWidthOffset: 0.0,
     ringBrightness: 2.10,
-    ringHazeZenithOD: 0.36,   // optical depth of the ring's own air, straight down
+    ringHazeZenithOD: 0.22,   // optical depth of the ring's own air, straight down
     ringOpacity: 0.915,
 
     planetAzimuthDeg: 210.4,
@@ -743,8 +801,8 @@ export function create(opts = {}) {
     planetAngularRadiusDeg: 25.5,
     planetBrightness: 0.285,
     planetAurora: 1.0,
-    planetTerminator: 0.50,
-    planetLimbHaze: 2.30,
+    planetTerminator: 1.00,   // was 0.50: a 100-deg ramp lit the whole disc flat
+    planetLimbHaze: 0.55,    // was 2.30: bleached 76% of the mid-disc into sky
     planetAtmo: 0.05,
     planetPoleAzDeg: 95.0,
     planetPoleElDeg: 43.0,
@@ -756,7 +814,7 @@ export function create(opts = {}) {
     starStrength: 0.55,
     starDensity: 56.0,
     cirrusDrift: 0.00045,
-    cirrusStrength: 0.175,
+    cirrusStrength: 0.060,   // was 0.175: the streaks read as lint on the lens
     atmTint: [0.605, 0.578, 1.105],
     cubeSize: 128,
   };
@@ -801,10 +859,10 @@ export function create(opts = {}) {
     uPlanetLimbHaze: { value: S.planetLimbHaze },
     uPlanetAtmo: { value: S.planetAtmo },
     uPlanetAuroraq: { value: S.planetAurora },
-    uPlanetColA: { value: new THREE.Vector3(0.520, 0.300, 0.300) },
-    uPlanetColB: { value: new THREE.Vector3(1.150, 0.780, 0.720) },
-    uPlanetColC: { value: new THREE.Vector3(0.780, 0.450, 0.560) },
-    uPlanetColD: { value: new THREE.Vector3(0.540, 0.480, 0.640) },
+    uPlanetColA: { value: new THREE.Vector3(0.643, 0.247, 0.247) },
+    uPlanetColB: { value: new THREE.Vector3(1.362, 0.696, 0.588) },
+    uPlanetColC: { value: new THREE.Vector3(0.955, 0.361, 0.559) },
+    uPlanetColD: { value: new THREE.Vector3(0.560, 0.452, 0.740) },
     uPlanetSeed: { value: 0 },
 
     uDebugMode: { value: 0 },

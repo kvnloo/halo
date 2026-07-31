@@ -1639,27 +1639,115 @@ export function create(opts = {}) {
 
   /* ============================================================ pebble scatter */
 
-  function makePebbleGeometry(rand, kind) {
-    const detail = kind === 0 ? 0 : 1;
+  /**
+   * Averaged vertex normals across WELDED positions.
+   *
+   * `IcosahedronGeometry` is non-indexed (`PolyhedronGeometry` emits one triangle
+   * soup), so `computeVertexNormals()` gives every triangle its own normal and the
+   * body renders as flat facets — which is exactly the blind test's *"the larger
+   * foreground stones are visibly low-poly faceted, flat shading facets readable on
+   * the silhouette and across the surface"*. Welding on a quantised position key and
+   * area-weighting the face normals turns the same triangle count into a smooth
+   * convex body; a worn beach clast is convex and smooth (research/sediment.md c.4,
+   * Domokos phase-I abrasion), and at these screen sizes it is the SHADING facets,
+   * not the silhouette, that give the low-poly read away.
+   */
+  function smoothNormals(g) {
+    const pos = g.getAttribute('position');
+    const n = pos.count;
+    const keys = new Array(n);
+    const acc = new Map();
+    for (let i = 0; i < n; i++) {
+      const k = `${Math.round(pos.getX(i) * 8192)},${Math.round(pos.getY(i) * 8192)},${Math.round(pos.getZ(i) * 8192)}`;
+      keys[i] = k;
+      if (!acc.has(k)) acc.set(k, [0, 0, 0]);
+    }
+    const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
+    const ab = new THREE.Vector3(), cb = new THREE.Vector3();
+    for (let f = 0; f + 2 < n; f += 3) {
+      a.fromBufferAttribute(pos, f); b.fromBufferAttribute(pos, f + 1); c.fromBufferAttribute(pos, f + 2);
+      cb.subVectors(c, b); ab.subVectors(a, b); cb.cross(ab);   // face normal x 2*area
+      for (let t = 0; t < 3; t++) {
+        const e = acc.get(keys[f + t]);
+        e[0] += cb.x; e[1] += cb.y; e[2] += cb.z;
+      }
+    }
+    const out = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) {
+      const e = acc.get(keys[i]);
+      const l = Math.hypot(e[0], e[1], e[2]) || 1;
+      out[i * 3] = e[0] / l; out[i * 3 + 1] = e[1] / l; out[i * 3 + 2] = e[2] / l;
+    }
+    g.setAttribute('normal', new THREE.BufferAttribute(out, 3));
+    return g;
+  }
+
+  /**
+   * One clast body, unit diameter, axis-NEUTRAL: local +x is the a (long) axis, +z
+   * the b (intermediate) axis, +y the c (short) axis. The per-instance triaxial scale
+   * in `buildPebbles` supplies the Zingg ratios, so the mesh itself must stay roughly
+   * equant or the two compound. (The old body baked `v.y *= 0.52 + 0.22*noise` into
+   * the mesh AND then scaled y by another 0.45-0.85 per instance.)
+   *
+   * Shape family, research/sediment.md c.4: a worn beach clast is a *convex, smooth,
+   * gently lumpy plate on which the broad flats of the original block are still
+   * faintly readable*. Domokos et al. find the fitted superellipsoid exponent
+   * converges to n = 2 (a true ellipsoid) only in the fully-worn limit, so real
+   * shingle sits slightly above 2. `sharp` is that exponent: 2.0 is a sphere, 2.5 a
+   * rounded box. The old body was radial noise on an ellipsoid — n = 2 with bumps,
+   * i.e. exactly the fully-worn limit, which is why the field read as eggs.
+   */
+  function makePebbleGeometry(rand, detail, sharp) {
     const g = new THREE.IcosahedronGeometry(0.5, detail);
     const pos = g.getAttribute('position');
     const v = new THREE.Vector3();
-    const seed = rand.next() * 100;
+    const s0 = rand.next() * 100, s1 = rand.next() * 100, s2 = rand.next() * 100;
+    const inv = -1 / sharp;
     for (let i = 0; i < pos.count; i++) {
       v.fromBufferAttribute(pos, i);
-      const n = 0.72
-        + 0.30 * gnoise2(v.x * 3.1 + seed, v.z * 3.1 + seed)
-        + 0.16 * gnoise2(v.x * 7.4 + seed * 2, v.y * 7.4 + seed * 2);
-      v.multiplyScalar(n);
-      v.y *= 0.52 + 0.22 * gnoise2(v.x * 2.0 + seed, v.z * 2.0 + seed);
+      v.normalize();
+      // superellipsoid radius along this direction: broad flats, rounded corners
+      const k = Math.pow(
+        Math.pow(Math.abs(v.x), sharp) + Math.pow(Math.abs(v.y), sharp) + Math.pow(Math.abs(v.z), sharp),
+        inv);
+      // three octaves of lumping, amplitudes small enough that the body stays
+      // star-shaped — research c.4 requires a strictly convex silhouette
+      const lump = 1.0
+        + 0.135 * gnoise2(v.x * 1.6 + s0, v.z * 1.6 + s0)
+        + 0.080 * gnoise2(v.y * 2.7 + s1, v.x * 2.7 + s1)
+        + 0.042 * gnoise2(v.z * 4.9 + s2, v.y * 4.9 + s2);
+      v.multiplyScalar(0.5 * k * lump);
       pos.setXYZ(i, v.x, v.y, v.z);
     }
-    g.computeVertexNormals();
-    return g;
+    return smoothNormals(g);
   }
 
   const CHUNK = 48;
   const BAND_X0 = -336, BAND_X1 = 192, BAND_Z0 = -48, BAND_Z1 = 60;
+
+  /* Lithology table. research/sediment.md c.3: *"on a real beach the shape
+   * distribution is CORRELATED with colour — the dark flat ones and the pale round
+   * ones are different rocks. Give each lithology its own (colour, axis-ratio,
+   * roundness, gloss) tuple and sample lithology first. This alone breaks the
+   * 'identical' read harder than anything else, because it makes shape and albedo
+   * covary the way a viewer's eye expects."*
+   *
+   * `ba`/`cb` are (mean, sd) for the Zingg ratios b/a and c/b. Foliated/bedded rocks
+   * split into discs; massive isotropic ones into equant blocks; coral rubble into
+   * rods (f.3). `v` is the LINEAR reflectance range — the sand around them is 0.217,
+   * so this table straddles it. Weights sum to 1. */
+  const LITHO = [
+    // dark basalt / dolerite: flat discs, near-black, the high-contrast element
+    { w: 0.32, ba: [0.81, 0.085], cb: [0.46, 0.100], v: [0.026, 0.070], t: [1.06, 0.94, 0.80], rg: 0.70 },
+    // bedded limestone: the modal beach clast, disc-shaped, mid-pale and warm
+    { w: 0.30, ba: [0.78, 0.100], cb: [0.54, 0.120], v: [0.115, 0.285], t: [1.14, 0.93, 0.66], rg: 0.74 },
+    // iron-stained sandstone: blades, warm brown
+    { w: 0.20, ba: [0.72, 0.115], cb: [0.57, 0.130], v: [0.060, 0.165], t: [1.22, 0.90, 0.58], rg: 0.80 },
+    // vein quartz / massive chert: equant, pale, polished — Bluck's infill-zone spheres
+    { w: 0.12, ba: [0.66, 0.140], cb: [0.80, 0.130], v: [0.175, 0.330], t: [1.05, 0.99, 0.90], rg: 0.52 },
+    // shell hash and coral rubble: rods and plates, chalk white, subangular (f.3)
+    { w: 0.06, ba: [0.46, 0.120], cb: [0.79, 0.120], v: [0.290, 0.480], t: [1.02, 1.00, 0.94], rg: 0.62 },
+  ];
 
   function buildPebbles(ctx) {
     const rand = ctx.rand.fork(0x7e44a1);

@@ -7,9 +7,11 @@
  *   node tools/nulltest.mjs --knob exposure --off 0.5 --on 6.5 --pose ref_01500
  *   node tools/nulltest.mjs --module ocean --pose ref_01800 --settle 48
  *
- * Two captures, one difference. Exit 0 = the frames differ, the thing is alive and worth
- * tuning. Exit 1 = **byte-identical frames**, the thing is dead and every constant fitted
- * to it is fiction.
+ * Two captures, one difference, plus a control. Exit 0 = the frames differ AND two captures
+ * of the same build do not, so the thing is alive and worth tuning. Exit 1 = **byte-identical
+ * frames**, the thing is dead and every constant fitted to it is fiction. Exit 4 =
+ * UNDETERMINED: the control also differed, so "the frames differ" is this pose's noise floor
+ * and says nothing about the subject (see "the control leg" below).
  *
  * WHY THIS EXISTS
  * ---------------
@@ -89,21 +91,23 @@ function capture(label, extra) {
   return { bytes, args: args.slice(1).join(' ') };
 }
 
-let legA, legB, subject, offDesc, onDesc;
+let legA, legB, subject, offDesc, onDesc, onExtra;
 if (MODULE) {
   subject = `module ${MODULE}`;
   offDesc = `--skip ${MODULE}`;
   onDesc = '(full scene)';
-  console.log(`nulltest — ${subject} at ${POSE}, settle ${SETTLE}. Two captures, please wait.`);
+  console.log(`nulltest — ${subject} at ${POSE}, settle ${SETTLE}. Up to three captures (two arms + a control), please wait.`);
+  onExtra = [];
   legA = capture('off', ['--skip', MODULE]);
-  legB = capture('on', []);
+  legB = capture('on', onExtra);
 } else {
   subject = `knob ${KNOB}`;
   offDesc = `--config ${KNOB}=${OFF}`;
   onDesc = `--config ${KNOB}=${ON}`;
-  console.log(`nulltest — ${subject} (${OFF} vs ${ON}) at ${POSE}, settle ${SETTLE}. Two captures, please wait.`);
+  console.log(`nulltest — ${subject} (${OFF} vs ${ON}) at ${POSE}, settle ${SETTLE}. Up to three captures (two arms + a control), please wait.`);
+  onExtra = ['--config', `${KNOB}=${ON}`];
   legA = capture('off', ['--config', `${KNOB}=${OFF}`]);
-  legB = capture('on', ['--config', `${KNOB}=${ON}`]);
+  legB = capture('on', onExtra);
 }
 
 const identical = legA.bytes.length === legB.bytes.length && legA.bytes.equals(legB.bytes);
@@ -137,6 +141,52 @@ if (identical) {
   process.exit(1);
 }
 
+/* ------------------------------------------------------------------- the control leg ---
+ * "The frames differ" only means the subject is alive if two captures of the SAME build
+ * would NOT have differed. That premise is false at some poses and nobody was checking it.
+ *
+ *   reports/vegetation.md §"FIRST: the renderer is non-deterministic again": two
+ *   back-to-back captures of the identical build at `ref_00720` differ in **50.0% of
+ *   pixels**, whole frame; with `--skip vegetation` still 38.5%. "This is blocking for
+ *   everyone: it puts a noise floor under every A/B in the project."
+ *   reports/taa.md §4: a ~0.63 mean / 55%-of-pixels +/-1 floor exists between ANY two
+ *   frames, and adjacent TAA phases differ by up to 53 code values.
+ *   KNOWN_ISSUES §16: a determinism check returned BROKEN purely because `structures.js`
+ *   was saved between the two captures.
+ *
+ * Every "determinism re-verified bit-exact" note in KNOWN_ISSUES (§10, and the Wave G and
+ * Wave H status blocks) was measured at `ref_00000` — this tool's default pose — and read
+ * as a whole-project property. Where it does not hold, two captures ALWAYS differ, so the
+ * DEAD branch above is unreachable and ALIVE is printed no matter what the subject does.
+ * An A/B whose PASS cannot fail is exactly the class KNOWN_ISSUES §4 / §9 / §28 keeps
+ * producing, and `tools/knobcheck.mjs:246` already runs this control for `--ab`.
+ *
+ * Cost: one extra capture, and only on the ALIVE path, where the verdict is at stake. */
+const ctl = capture('control', onExtra);
+const stable = ctl.bytes.length === legB.bytes.length && ctl.bytes.equals(legB.bytes);
+if (!stable) {
+  console.error(`??? UNDETERMINED — ${subject} may or may not be alive at ${POSE}. ???`);
+  console.error('');
+  console.error(`    The control failed: two captures of the SAME build (${onDesc || '(full scene)'})`);
+  console.error(`    are not byte-identical either (${legB.bytes.length} vs ${ctl.bytes.length} bytes).`);
+  console.error('    So "the off and on frames differ" is what this pose produces anyway, and it');
+  console.error('    is not evidence about the subject. Do not fit constants to a difference');
+  console.error('    measured here.');
+  console.error('');
+  console.error('    Two known causes, in order of likelihood:');
+  console.error('      1. `src/` was written between the two captures (KNOWN_ISSUES §16).');
+  console.error('         Check: node tools/preflight.mjs   — its src-quiescent check says so.');
+  console.error(`      2. The renderer is genuinely non-deterministic at ${POSE}`);
+  console.error('         (reports/vegetation.md: 50.0% of pixels at ref_00720, identical build).');
+  console.error('         Determinism has only ever been verified at ref_00000.');
+  console.error('');
+  console.error('    Next: re-run at --pose ref_00000, or measure a magnitude against the mean');
+  console.error('    of three control captures instead of a byte compare (the method');
+  console.error('    reports/vegetation.md had to invent), or use tools/ablate.mjs, which');
+  console.error('    toggles inside ONE page load and has no between-capture window.');
+  process.exit(4);
+}
+
 // Alive. Give a magnitude too, so "alive but invisible" is distinguishable from "alive".
 let diffLine = '';
 const py = join(ROOT, '.venv/bin/python');
@@ -148,6 +198,8 @@ try {
 } catch { }
 
 console.log(`  ALIVE — ${subject} changes the frame. Tuning it is meaningful.`);
+console.log(`  control: a second capture of the same build at ${POSE} is byte-identical, so`);
+console.log('           the difference above is the subject, not this pose\'s noise floor.');
 console.log('');
 console.log('  Note: "alive" is a floor, not a verdict. It proves the term reaches the');
 console.log('  framebuffer, not that it is correct or the right strength. Measure structure');

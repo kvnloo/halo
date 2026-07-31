@@ -1,8 +1,17 @@
 # Scoreboard audit — all six axes
 
 **Owner:** metrics agent (`tools/metrics.py`, `tools/score.mjs`)
-**Date:** 2026-07-31
-**Status:** IN PROGRESS — findings below are measured and final; banding/reweighting lands later in this file.
+**Date:** 2026-07-31 (second pass)
+**Status:** LANDED.
+
+> **Sections 1–8 are the first pass and two of their numbers are now retracted.** Read
+> **§9–§14** first. In short: the first pass re-banded `1 − MS-SSIM` and made it the
+> highest-weighted axis, and §9 shows that axis is won by rendering *nothing* — a flat grey
+> rectangle beats every render this project has ever produced, and blurring our own frame
+> is worth +14 composite points. `structure` is now measured with GMSM instead. §10 retracts
+> the first pass's `good` anchors: they were not reproducible by the command this report
+> told you to run. §11 retracts §6.1 — run-to-run noise is not "unmeasured", it is exactly
+> zero, and that is now proven from the archive.
 
 ---
 
@@ -574,3 +583,402 @@ node tools/score.mjs --history                                # both scales, sid
 Calibration harness (pair classes, degradation ladder, acceptance test):
 `scratchpad/mx/{collect,analyse,gradetest,calib,design,accept}.py`.
 
+
+---
+---
+
+# SECOND PASS — 2026-07-31
+
+The brief for this pass was "land the re-banding". I landed it, then tried to break it, and
+it broke. Sections 9–11 are corrections to my own previous wave. Section 12 onward is the
+delivery.
+
+## 9. The re-banded `structure` axis is won by rendering nothing
+
+`structure` was `1 − MS-SSIM`, and the first pass gave it the largest weight in the
+composite (0.25) on the grounds that it is one of the three axes that can tell whether we
+rendered *Halo*. Before trusting that, I fed it two inputs whose correct answer is not in
+doubt: our own render progressively Gaussian-blurred, and a **flat grey rectangle** of the
+reference's mean luminance. Means over the nine scored poses:
+
+```
+                            1-MS_SSIM   structure   progress      GMSM   lap_ratio
+FLAT grey rectangle            0.4950       95.21     +114.9    0.2935      0.000
+ungraded (earliest build)      0.5099       92.92     +107.2    0.2845      0.036
+waveH blurred, kernel 61       0.5667       75.02      +77.9    0.2208      0.005
+waveH blurred, kernel 31       0.5999       57.58      +60.8    0.2119      0.005
+waveH blurred, kernel 15       0.6314       39.91      +44.5    0.2169      0.008
+waveH blurred, kernel  7       0.6546       28.61      +32.5    0.2301      0.029
+waveH blurred, kernel  3       0.6764       22.12      +24.1    0.2419      0.156
+waveH  (our current head)      0.6855       17.40      +16.6    0.2476      1.360
+the game vs its own next kf    0.4455       98.85     +140.4    0.1649      0.994
+```
+
+Read the first column downward. **A flat grey rectangle scores `1 − MS-SSIM = 0.495`, which
+is better than the 0.524 `good` anchor the first pass took from the real game compared with
+its own next frame.** The axis was calibrated over a range whose "as good as the source
+footage" end is reachable by drawing a single colour.
+
+And it is not a corner case you have to construct. Blurring our actual render raises the
+banded axis **monotonically, 17.4 → 75.0**, which at weight 0.25 is about **+14 composite
+points for destroying the image** — more than the entire recorded improvement of the project.
+The earliest build in `shots/` (`ungraded`, an untextured grey blob, `lap_ratio` 0.036)
+scores `structure` 92.9 against the current head's 17.4.
+
+This is exactly the failure the brief asked me to eliminate — "a run must not be able to gain
+points while looking no more like Halo" — and my own first pass made it *worse*, because it
+raised this axis's weight from 0.22 to 0.25 and made its band responsive precisely in the
+region blurring moves through. The legacy band had the same defect (`ungraded` legacy
+`structure` 28 vs waveH 3.4); it was only masked because legacy weighted texture heavily
+enough that the blob lost on `detail`/`geometry` instead.
+
+**Cause.** SSIM's structure term is `s = (σxy + C3) / (σx·σy + C3)`. As the test frame's
+local variance `σy → 0`, both numerator and denominator go to `C3` and `s → 1`: a frame with
+no structure scores full marks for structure it does not have. I tried the obvious repair
+first — pooling the SSIM map weighted by the *reference's* local variance, so a region can
+only earn credit in proportion to how much structure was there to match. **It does not
+work**: variance-weighted MS-SSIM still rises under blur (0.1779 → 0.2404) and still puts the
+flat frame top (0.2661). The fault is in the term's value, not in the pooling.
+
+**Fix.** `structure` is now banded against **GMSM** = `1 − mean(GMS)`, the Gradient Magnitude
+Similarity of Xue et al. (2014), 12 lines of numpy in `gms_distance()`. It has no degenerate
+term: where the reference has gradient and the test has none, `(2·m·0 + T)/(m² + 0 + T) → 0`.
+The `GMSM` column above is the same ladder re-measured, and it puts the flat rectangle and
+the untextured build **last**, which is where they belong:
+
+```
+best -> worst   near15 0.165 < shift64 0.195 < blur31 0.212 < blur15 0.217 < blur61 0.221
+              < blur7 0.230 < waveI 0.238 < waveH 0.248 < ungraded 0.285 < FLAT 0.294
+```
+
+GMSM still improves slightly under a moderate blur (waveH 0.248 → 0.212 at kernel 31), and
+that is **not** a residual exploit — it is the correct reading. Our render is genuinely
+over-textured (`lap_ratio` 1.36, `edge_ratio` 1.41), so removing some high-frequency energy
+really does move its gradient statistics toward Halo's. The tell is that the curve turns
+around again at kernel 61, and never approaches `near15`. MS-SSIM's curve never turned
+around: it improved all the way to a blank frame.
+
+`ms_ssim` is still computed, still in `raw`, still what `score_legacy` bands, so no history
+is lost — the same treatment `hist` got in §4a.
+
+## 10. The first pass's `good` anchors were not reproducible — retraction
+
+§8 of the first pass says the whole `CALIB` table regenerates from
+
+```bash
+.venv/bin/python tools/metrics.py --calibrate ref/keyframes
+```
+
+It does not. Running that command reproduces every `null` anchor to five decimals and **no
+`good` anchor at all**. Two causes, both real:
+
+1. **`ref/keyframes/` is a shared directory and the glob was `kf_*.png`.** On 2026-07-30
+   another agent saved two 357x1018 crops there, `kf_00450_sand.png` and
+   `kf_01500_sand.png`. They sort in between real keyframes, so four of the "adjacent
+   keyframe" pairs that *define what good means for every axis* were a full frame compared
+   against a crop of a different aspect ratio. `calibrate()` now accepts only
+   `kf_<digits>.png` at the modal resolution, prints what it ignored, and prints how many
+   keyframes at what size it actually used.
+2. The remaining gap is larger than the crops can explain, and an independent measurement
+   settles which side is right. Measured directly at the nine scored poses, the real game
+   against its own next keyframe gives `perceptual` 0.392, `detail` 0.075, `geometry` 0.043.
+   The re-run `--calibrate` gives 0.391 / 0.075 / 0.049. The first pass shipped
+   0.481 / 0.054 / 0.021. **The shipped anchors were wrong and the command was right.**
+
+Whatever produced the first pass's `good` column, it was not the documented command, and the
+harness that might have said what it was (`scratchpad/mx/`) no longer exists. That is the
+lesson worth keeping: *a calibration constant that cannot be regenerated by a command in the
+repo is a hand-picked constant with a citation, which is the exact thing §3 was written to
+condemn.* The block in `metrics.py` is now the verbatim stdout of the documented command.
+
+Final anchors — 157 keyframes, 156 adjacent pairs, 91 cross pairs:
+
+| axis | raw distance | `good` (→90) | `null` (→10) | `u50` | `p` |
+|---|---|---:|---:|---:|---:|
+| structure  | `1 − mean GMS`      | 0.18411 | 0.26578 | 0.22121 | 11.97 |
+| grade      | `hist_smooth`       | 0.08404 | 0.44554 | 0.19351 | 2.63 |
+| perceptual | `LPIPS`             | 0.39080 | 0.69240 | 0.52018 | 7.68 |
+| detail     | `\|ln lap_ratio\|`  | 0.07518 | 0.42218 | 0.17815 | 2.55 |
+| geometry   | `\|ln edge_ratio\|` | 0.04907 | 0.25820 | 0.11256 | 2.65 |
+| spectrum   | `\|Δslope\|`        | 0.01607 | 0.08823 | 0.03765 | 2.58 |
+
+## 11. Run-to-run noise is not unmeasured. It is zero. — retraction of §6.1
+
+§6.1 said "nobody has ever run the same build twice and recorded the run-to-run spread of
+any axis… no single-wave composite delta under about 2 points should be believed — mine
+included." That was wrong, and the measurement was already sitting in `shots/`.
+
+`waveH` and `waveI-prefit` are **two independent captures two hours apart** — different
+tags, different history rows, and different measured performance (187 fps / 5.36 ms versus
+109 fps / 9.15 ms), so they are genuinely separate GPU runs and not a copied directory.
+Their frames are **byte-identical on all 9 of 9 poses**. `waveE` / `waveE-fix` are a second
+such pair: 9 of 9 byte-identical.
+
+```
+waveH  vs waveI-prefit    9/9 byte-identical   (fps 187 vs 109 -> separate captures)
+waveE  vs waveE-fix       9/9 byte-identical
+waveG  vs waveG-mvfix     0/9 byte-identical   composite delta 0.00, lum_mean delta 0.0001
+waveG  vs waveG-settle96  0/9 byte-identical   composite delta 0.52, lum_mean delta 2.89
+```
+
+**The capture path is bit-deterministic, so the measurement noise floor of every axis is
+exactly 0.000.** A composite delta of any size is signal. The `waveG`/`waveG-mvfix` row is
+the useful upper bound on *near*-repeats: a change that altered every pixel in the frame
+moved the composite by less than 0.01.
+
+The real uncertainty is not run-to-run, it is **pose sampling** — the composite is a mean
+over nine poses that differ from each other far more than any wave has moved the score.
+That is quantified per run in §13, and it is large: roughly ±4 points at 95%. Two runs
+measured on the *same* nine poses are still exactly comparable (this is a paired
+comparison), but a run measured on a different pose set is not comparable at all, which is
+what §12 now enforces.
+
+One thing falls out of the table that is not about metrics: **`waveG-settle96` is not noise.**
+Doubling the settle count moved `lum_mean` by 2.89 levels and the composite by 0.52. The
+scene is still converging at the default `--settle 48`. Whoever owns capture should know
+that runs taken at different settle counts are not comparable, and that the default is not
+converged.
+
+## 12. The remaining fail-open, closed
+
+`tools/preflight.mjs:68` documents this one and could not fix it, because that agent does not
+own `score.mjs`:
+
+> `score.mjs` prints "missing reference" and *continues*, then averages over whatever
+> survived and writes the row to history.jsonl with a smaller `n`, and nothing downstream
+> notices.
+
+It now does notice. `score.mjs` tracks every pose that failed to measure, and any axis that
+came back `null` on any pose, and on either condition it
+
+* adds an explicit warning naming the poses and saying in words that the composite is a mean
+  over the survivors and **is not comparable to a full run**,
+* writes `incomplete: true` and `n_expected` into both `scores/<tag>.json` and the
+  `history.jsonl` row,
+* marks the row `!` in `--history` and **excludes it from the trend, the delta and the
+  best-run line**,
+* and **exits non-zero**. The JSON still goes to stdout, so nothing that wants the partial
+  result loses it; it just has to acknowledge the status.
+
+Also fixed: `--rescore` used to write its `sbs_*.png` side-by-sides into the directory it was
+reading, i.e. into another agent's shot directory while they were working in it (§6.6). It
+now writes them to `shots/_rescore_<tag>/`. A re-measurement no longer modifies what it
+measures.
+
+### 12a. A cross-run race that silently swapped one pose's measurement
+
+This one bit me live while I was writing §13, which is the only reason I found it.
+
+`shots/waveF` scored **19.91** once and **20.08** on every re-run afterwards, from pixels
+whose mtimes were two days old and a metric I then proved is bit-exact across repeats
+(`lpips`, `gmsm` and `hist_smooth` all had zero spread over five consecutive calls). Eight of
+the nine poses agreed exactly between the two runs. Only `ref_00000` differed — 14.22 versus
+15.69.
+
+The cause is one line. `score.mjs` handed each per-pose measurement to `metrics.py --json`
+at a **fixed path with no tag and no pid in it**:
+
+```js
+'--json', `scores/_tmp_${pose}.json`      // every run, every tag, the same file
+```
+
+Several agents run this repo's tooling concurrently. Two runs measuring the same pose name —
+and every run measures `ref_00000` — write and read the same file, so one process can read
+back the *other* process's frame and average it into its own composite. It does not error, it
+does not warn, and the number it produces is entirely plausible. That is precisely the class
+of fault this whole report is about, sitting in the tool that produces the report's numbers.
+
+Fixed: per-pose measurements now go to `scores/.tmp-<pid>/`, which is removed at the end of
+the run, and every file is checked on read — if the `tag` or `test` field inside it is not
+the pose that was requested, the pose is marked failed rather than averaged in. Verified by
+running two `--rescore` jobs concurrently against different shot directories: both returned
+their own correct composite (20.08 and 17.56) and left no temp directory behind.
+
+**How much of the history this corrupted is unknowable** — it depends on who happened to be
+running what, and nothing recorded it. Every number in §13 was re-measured after this fix and
+each of the five rescore artifacts on disk now reproduces on repeat runs.
+
+### 12b. Scores from different bandings can no longer be plotted as one series
+
+`metrics.py` now stamps `band_version` on every comparison and `score.mjs` carries it into
+`scores/<tag>.json` and `history.jsonl`. `--history` shows a composite **only** for rows at
+the current version and prints the rest as legacy-only, with a line saying so. `score.mjs`
+also asserts its own expected version against what `metrics.py` reports and exits 5 if they
+differ, so the two cannot drift apart silently.
+
+This was not theoretical either: `waveI-fitstand` and `waveI-handstand` were scored under the
+first pass and sat in `--history` showing **16.85**, while the same pixels measure **18.85**
+and **18.60** under the shipped bands. Two runs of the same build under two bandings are two
+different quantities sharing a name and a 0–100 range, and the trend line was happily
+connecting them.
+
+Bump `BAND_VERSION` in `metrics.py` (and the matching constant in `score.mjs`) on any change
+to `CALIB`, `WEIGHTS`, or an axis's underlying raw metric.
+
+## 13. The corrected history — we have been flat, and now I can prove it
+
+Every surviving shot directory re-measured from its own pixels under the final bands. `NEW`
+is the composite, `cmp` the comparative-only composite, `geom` the geometric guard, `legacy`
+the pre-2026-07-31 scale. The `95% CI` is a bootstrap over the nine poses.
+
+```
+tag                 NEW        95% CI    cmp   geom  legacy    struct  grade percep detail geomet spectr
+ungraded           6.67    [1.7,15.5]   9.50   1.52   12.02      15.1    2.5   10.0    0.1    0.0    0.2
+base_full          6.48    [1.7,14.8]   9.21   1.65   11.72      15.2    2.6    9.0    0.1    0.0    0.2
+latest            16.82   [11.9,22.0]  15.80   6.92   23.38      32.6    2.4   10.3   29.7   13.8   10.1
+waveE             19.32   [14.4,24.3]  17.31  10.79   28.62      34.5    3.6   11.7   24.8   28.1   17.8
+waveF             20.08   [14.8,25.4]  18.73  11.02   30.09      35.7    3.6   14.8   29.9   31.7    2.6
+waveG             19.94   [14.8,25.2]  16.89  10.75   30.30      30.8    3.7   14.4   40.8   30.8    1.8
+waveG-settle96    19.84   [14.4,25.3]  16.68  10.41   29.78      30.6    3.6   14.1   42.3   29.9    1.2
+waveH             17.56   [13.9,21.0]  14.21   9.95   29.44      24.0    4.3   13.0   37.0   23.7   10.0
+waveI-posefit     18.50   [15.3,21.8]  16.13  10.53   29.70      28.7    4.3   13.8   34.1   20.4   13.4
+waveI-fitstand    18.85   [14.6,23.3]  16.90  10.90   30.15      31.1    4.2   13.6   40.1   19.2    3.5
+waveI-handstand   18.60   [14.2,22.6]  15.90  10.64   29.89      28.2    4.3   13.6   39.9   23.0    4.8
+```
+
+`ungraded` and `base_full` are the two earliest builds in `shots/` — an untextured grey
+world, `lap_ratio` 0.036. **Under the first pass's MS-SSIM banding they scored 24.06 and
+23.52, above the current head's 16.39.** They now score 6.67 and 6.48. That single row is
+the clearest evidence the §9 fix was necessary and that it works.
+
+**Backward-compatibility.** `score_legacy` reproduces the recorded score exactly for **10 of
+12** runs (waveE 28.62, waveE-fix 28.62, waveF 30.09, waveG 30.30, waveG-mvfix 30.30,
+waveG-settle96 29.78, waveH 29.44, waveI-prefit 29.44, waveI-fitstand 30.15,
+waveI-handstand 29.89). The two that do not are `latest` (23.38 vs 22.24) and
+`waveI-posefit` (29.70 vs 24.29), and in both cases the shot directory was **written to
+after the run was scored** — 17:02 and 01:57 respectively, both later than their history
+rows. Those are no longer the pixels that produced the recorded numbers. `shotcheck.mjs`
+already warns against reusing a tag directory; this is what it looks like when you do.
+Everything else is a pure re-read of the same measurements.
+
+### 13a. Not one wave in the project's history is distinguishable from zero
+
+Paired per-pose deltas — consecutive runs are measured on the *same* nine poses, so this is
+the correct statistic, and it is far tighter than differencing the level CIs above:
+
+```
+transition                           d SCORE            95% CI    d cmp  d legacy
+latest -> waveE                        +2.51     [-2.37,+6.93]    +1.51     +5.25
+waveE -> waveF                         +0.76     [-5.51,+6.86]    +1.41     +1.47
+waveF -> waveG                         -0.14     [-0.46,+0.15]    -1.83     +0.21
+waveG -> waveH                         -2.37     [-7.96,+3.14]    -2.68     -0.86
+waveH -> waveI-posefit                 +0.93     [-2.42,+4.19]    +1.92     +0.26
+waveI-posefit -> waveI-fitstand        +0.35     [-1.89,+2.36]    +0.76     +0.45
+
+latest -> waveI-fitstand               +2.03     [-3.02,+7.83]  cmp +1.10   legacy +6.77
+waveF   -> waveI-fitstand              -1.23     [-5.86,+2.99]  cmp -1.83   legacy +0.06
+```
+
+**Every interval contains zero.** The brief asked me to say it plainly if we have been flat,
+so: **we have been flat.** Across the entire recorded history the composite has moved
++2.03 points with a 95% interval of [−3.02, +7.83], and on the comparative composite — the
+three axes that can tell whether we rendered *Halo* — **+1.10**. The legacy scoreboard
+reported +6.77 over the same pixels. Since waveF, four waves ago, the comparative composite
+is **down 1.83**.
+
+The one interval that excludes nothing by a wide margin, `waveF -> waveG` at
+[−0.46, +0.15], is not a precise measurement of a real improvement — it is two runs that
+barely differ (per-pose sd 0.49 against 7–10 elsewhere), i.e. waveG changed almost nothing.
+
+### 13b. The binding constraint is nine poses, not the banding
+
+The per-pose standard deviation of a wave-to-wave delta is **6.54** points (median over the
+six transitions). That fixes the instrument's resolution, and §11 already established that
+the other candidate noise source — re-capture — is exactly zero, so this is the whole of it:
+
+```
+smallest composite delta 9 poses can resolve at 95%:   4.27 points
+poses needed to resolve a 5-point wave:   7
+poses needed to resolve a 3-point wave:  18
+poses needed to resolve a 2-point wave:  41
+poses needed to resolve a 1-point wave: 164        we score 9
+```
+
+**No wave in this project's history has ever been large enough for nine poses to detect.**
+This is now the single biggest limitation of the scoreboard, and it is not a banding problem
+— re-banding cannot buy resolution. It is a sampling problem with a cheap fix: `ref/keyframes`
+holds **157** usable keyframes and we score against 9 of them. Scoring 30 would take the
+detectable wave from 4.3 points to 2.3 for about 3.3x the capture time. That is the highest-
+value change available to this harness and it belongs to whoever owns `src/world/poses.js`
+and `tools/capture.mjs`, not to me.
+
+Until then the honest reading of any single wave is: **if it moved the composite by less
+than ~4 points, the scoreboard did not measure anything.** Use `progress` per axis and the
+blind A/B gate, which decided 9 of 9 within seconds and is a far more powerful instrument
+than this one.
+
+## 14. Acceptance — does the suite order known answers correctly?
+
+The brief's sanity check, plus the adversarial cases. Means over the nine scored poses
+(`cross` over 40 unrelated keyframe pairs):
+
+```
+case          NEW    cmp   geom  legacy    struct  grade percep detail geomet spectr
+identity   100.00 100.00 100.00  100.00     100.0  100.0  100.0  100.0  100.0  100.0
+shift64     85.04  79.60  83.21   69.63      72.4  100.0   67.9   99.7   99.9   92.0
+hue30       78.46  70.25  51.82   80.03     100.0    5.3  100.0   99.7   99.3   92.5
+near15      73.71  71.38  69.59   75.12      75.8   68.9   68.9   85.7   86.5   60.1
+near300     18.82  17.98  15.57   37.00      20.2   18.4   15.1   25.1   25.2    8.9
+ours (waveI-fitstand)  18.85  16.90  10.90  30.15
+cross       15.18  11.36  10.43   34.84      11.4   12.6   10.1   24.8   27.6   18.6
+```
+
+The ordering the brief asked for holds: **identity 100 > a different reference frame 73.7 >
+ours 18.9**, and the legacy scale got the last comparison backwards — it put an *unrelated
+shot of Halo* at 34.84, above every run this project has ever recorded.
+
+Read the two numbers that matter together: **our best run scores 18.85 where an unrelated
+shot of the real game scores 15.18 and the game against its own next frame scores 73.71.**
+On that scale we are about **6% of the way** from "no relationship" to "the source footage".
+That is a scoreboard consistent with losing the blind gate 9–0. A composite of 30 on a scale
+where an unrelated frame scored 35 never was.
+
+**One case the composite still gets wrong, and it cannot be fixed by weighting.** `hue30` —
+the reference with its colour destroyed by a 30° hue rotation — scores 78.46, above `near15`
+at 73.71. Five of the six axes are genuinely indifferent to colour, so no assignment of
+weights across them can fix it. `score_geometric` does: **51.82 vs 69.59**, correctly
+ordered, because it collapses when any single axis does. That is what it is for. It is still
+not the headline number, for the reason in §4d.
+
+### 14a. Rails
+
+```
+                     readings at exactly 0 or 100 (per pose, per axis)
+legacy bands              431 / 918   (47%)
+new bands                   4 / 918   (0.4%)
+```
+
+The four are `geometry` at three poses and `detail` at one, all reading `100.0`, and **none
+of them is clipped**: `soft_band` is asymptotic and reaches 100 only at a raw distance of
+exactly 0. Those poses have `edge_ratio` within a whisker of 1.000, so the true value is
+99.99+ and it rounds to 100.0 at the two decimal places the JSON stores. The derivative is
+non-zero everywhere. It is a display artefact, not a rail — but it is worth knowing that
+"100.0" in the output does not mean the axis has stopped responding, which is exactly what
+it used to mean.
+
+## 15. What is still weak
+
+1. **Nine poses cannot resolve any wave this project has ever produced (§13b).** This is now
+   the limiting fault of the scoreboard and I cannot fix it from `metrics.py`.
+2. **`spectrum` is still the noisiest axis** and still spends most of its time past the null
+   (`progress` −129 at waveH). It carries 0.08. I have again left the weight alone rather
+   than tune it without evidence.
+3. **`hue30` still scores 78.5 on the headline composite (§14).** Only `score_geometric`
+   catches it.
+4. **The anchors describe one reference clip**, 157 keyframes of it. `--calibrate`
+   regenerates them and now reports exactly which files it used and at what resolution.
+5. **`grad_hist` is still computed and still unused** (`d'` = 0.05, the weakest discriminator
+   measured). Left in `raw` only because `tools/_posefit_metrics.py` copied it.
+6. **`--calibrate` takes ~8 minutes** (249 pairs x LPIPS). It is not in any gate.
+7. **`structure` still improves slightly under a moderate blur** (§9). I argued that reading
+   is correct because our render is over-textured, but it is an assumption, not a proof, and
+   it is the obvious place to attack this axis next.
+
+## 16. Reproducing the second pass
+
+```bash
+node tools/preflight.mjs && node tools/parsecheck.mjs
+.venv/bin/python tools/metrics.py --calibrate ref/keyframes   # prints the shipped CALIB
+node tools/score.mjs --rescore shots/waveH --tag rescore_waveH
+node tools/score.mjs --history
+```

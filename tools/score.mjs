@@ -30,9 +30,18 @@
  *   raw.*        the underlying distances. If an axis ever looks stuck, read these.
  *                They are also written into history.jsonl so any future re-banding
  *                can be applied to old runs instead of discarding them.
+ *   band_version which banding produced `score`. Only rows at the current version are one
+ *                series; --history shows the rest as legacy-only. Bump it in metrics.py
+ *                whenever CALIB, WEIGHTS or an axis's underlying metric changes.
+ *   incomplete   set when a pose failed to measure or an axis came back null. Such a run
+ *                is a mean over a different set, is excluded from the trend, and makes
+ *                this tool exit non-zero.
+ *
+ * The composite cannot resolve a wave smaller than ~4 points on nine poses
+ * (reports/metrics.md 13b). Steer by `progress` per axis and by the blind A/B gate.
  */
 import { spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync, readdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync, readdirSync, rmSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 
 const ROOT = resolve(new URL('..', import.meta.url).pathname);
@@ -46,6 +55,10 @@ const SETTLE = arg('settle', '48');
 const RESCORE = arg('rescore', null);   // measure an existing shots dir, do not capture
 const PY = join(ROOT, '.venv/bin/python');
 const AXES = ['structure', 'grade', 'perceptual', 'detail', 'geometry', 'spectrum'];
+// Must match metrics.py's BAND_VERSION. A run scored under a different band version is a
+// different quantity wearing the same name, so it is not on this trend. Asserted below
+// against what metrics.py actually reports, so the two cannot drift silently.
+const BAND_VERSION = 2;
 
 function sh(cmd, args, opts = {}) {
   const r = spawnSync(cmd, args, { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, ...opts });
@@ -64,24 +77,46 @@ function printHistory() {
   console.log(['#'.padStart(4), 'tag'.padEnd(22), 'SCORE'.padStart(7), 'legacy'.padStart(7),
     ...w.map((k) => k.slice(0, 6).padStart(7))].join(' '));
   rows.forEach((r, i) => {
-    const post = r.score_legacy != null;         // post-re-band row
+    // Only rows scored under the CURRENT band version carry a comparable `score`. Rows from
+    // band version 1 (2026-07-31 first pass) measured `structure` as 1-MS_SSIM, which §9 of
+    // reports/metrics.md shows is won by rendering a flat grey rectangle; their composites
+    // are not on this scale and must not be plotted as if they were.
+    const post = r.score_legacy != null && (r.band_version ?? 1) === BAND_VERSION;
     const sc = post ? r.score : null;
-    const lg = post ? r.score_legacy : r.score;  // pre-re-band rows recorded legacy as `score`
+    // Rows from before 2026-07-31 have no `score_legacy` because their `score` *was* the
+    // legacy composite. Rows from band v1 have a real one. Never fall back to `score` when
+    // `score_legacy` exists, or a v1 composite gets printed in the legacy column.
+    const lg = r.score_legacy ?? r.score;
     const ax = post ? r.axes : r.axes_legacy ?? r.axes;
-    console.log([String(i + 1).padStart(4), String(r.tag).slice(0, 22).padEnd(22),
+    // `!` = incomplete: fewer poses measured than captured, or an axis came back null.
+    // Such a row is a mean over a different set than its neighbours and is not on the trend.
+    const mark = r.incomplete ? '!' : ' ';
+    console.log([String(i + 1).padStart(4), (mark + String(r.tag).slice(0, 21)).padEnd(22),
       num(sc, 2).padStart(7), num(lg, 2).padStart(7),
       ...w.map((k) => num(ax?.[k]).padStart(7))].join(' '));
   });
-  const scored = rows.filter((r) => r.score_legacy != null);
+  const scored = rows.filter((r) => r.score_legacy != null && !r.incomplete
+    && (r.band_version ?? 1) === BAND_VERSION);
+  const superseded = rows.filter((r) => r.score_legacy != null && (r.band_version ?? 1) !== BAND_VERSION);
+  if (superseded.length) {
+    console.log(`\n${superseded.length} run(s) were scored under an older band version and show `
+      + 'legacy only; their composites are a different quantity. Re-measure with --rescore.');
+  }
+  if (rows.some((r) => r.incomplete)) {
+    console.log('\n! = incomplete measurement (see that run\'s warnings); excluded from the trend below.');
+  }
   if (scored.length > 1) {
     const a = scored[0], b = scored[scored.length - 1];
     console.log(`\ndelta since first re-banded run: ${(b.score - a.score >= 0 ? '+' : '')}${(b.score - a.score).toFixed(2)}`);
     const best = scored.reduce((x, y) => (y.score > x.score ? y : x));
     console.log(`best: ${best.tag} @ ${best.score.toFixed(2)}`);
   }
-  if (scored.length < rows.length) {
-    console.log(`\n${rows.length - scored.length} run(s) predate the 2026-07-31 re-band and carry only a legacy score.`);
+  const preband = rows.filter((r) => r.score_legacy == null);
+  if (preband.length) {
+    console.log(`\n${preband.length} run(s) predate the 2026-07-31 re-band and carry only a legacy score.`);
     console.log('They cannot be re-scored from history.jsonl (no raw values were stored).');
+  }
+  if (preband.length || superseded.length) {
     console.log('Where the PNGs survive:  node tools/score.mjs --rescore shots/<tag> --tag <tag>');
   }
 }
@@ -110,20 +145,43 @@ if (RESCORE) {
 const shots = readdirSync(join(ROOT, outdir)).filter((f) => /^ref_\d+\.png$/.test(f));
 if (!shots.length) { console.error('no ref_* shots produced'); process.exit(3); }
 
+// --rescore reads someone else's shot dir; write the side-by-sides somewhere else so a
+// re-measurement never modifies the directory it is measuring.
+const sbsdir = RESCORE ? `shots/_rescore_${TAG}` : outdir;
+if (RESCORE) mkdirSync(join(ROOT, sbsdir), { recursive: true });
+
+// Per-pose measurements used to land in `scores/_tmp_<pose>.json` - a fixed path with no
+// tag and no pid in it. Several agents run this tool at once, so two runs measuring the
+// same pose raced on that file and each could read back the OTHER run's frame. It happened
+// during the 2026-07-31 second pass: shots/waveF scored 19.91 once and 20.08 on every
+// re-run, differing only at ref_00000, from identical pixels and a metric that is exactly
+// deterministic. A wrong number that looks plausible is the whole subject of this report.
+const tmpdir = `scores/.tmp-${process.pid}`;
+mkdirSync(join(ROOT, tmpdir), { recursive: true });
+
 const rows = [];
+const failed = [];
 for (const s of shots) {
   const pose = s.replace('.png', '');
   const idx = pose.split('_')[1];
   const ref = `ref/keyframes/kf_${idx}.png`;
-  if (!existsSync(join(ROOT, ref))) { console.error(`missing reference ${ref}`); continue; }
+  if (!existsSync(join(ROOT, ref))) { console.error(`missing reference ${ref}`); failed.push(`${pose} (no reference ${ref})`); continue; }
   const r = sh(PY, ['tools/metrics.py', ref, `${outdir}/${s}`, '--tag', pose, '--quiet',
-    '--json', `scores/_tmp_${pose}.json`]);
-  if (r.status !== 0) { console.error(r.stderr.slice(0, 800)); continue; }
-  rows.push(JSON.parse(readFileSync(join(ROOT, `scores/_tmp_${pose}.json`), 'utf8')));
+    '--json', `${tmpdir}/${pose}.json`]);
+  if (r.status !== 0) { console.error(r.stderr.slice(0, 800)); failed.push(`${pose} (metrics.py exit ${r.status})`); continue; }
+  const got = JSON.parse(readFileSync(join(ROOT, `${tmpdir}/${pose}.json`), 'utf8'));
+  // belt and braces: prove the file we read is the measurement we asked for
+  if (got.tag !== pose || got.test !== s) {
+    console.error(`temp file mismatch: asked for ${pose}/${s}, got ${got.tag}/${got.test}`);
+    failed.push(`${pose} (temp file mismatch)`); continue;
+  }
+  rows.push(got);
 
   // side-by-side for the critic
-  sh(PY, ['tools/sbs.py', ref, `${outdir}/${s}`, `${outdir}/sbs_${pose}.png`]);
+  sh(PY, ['tools/sbs.py', ref, `${outdir}/${s}`, `${sbsdir}/sbs_${pose}.png`]);
 }
+
+try { rmSync(join(ROOT, tmpdir), { recursive: true, force: true }); } catch { }
 
 const mean = (f) => rows.reduce((a, r) => a + f(r), 0) / Math.max(rows.length, 1);
 // Mean over the poses where the value exists. An axis that could not be computed must
@@ -135,9 +193,39 @@ const meanOf = (f) => {
 const perAxis = (field) => Object.fromEntries(AXES.map((k) => [k, meanOf((r) => r[field]?.[k])]));
 
 const warnings = [...new Set(rows.flatMap((r) => r.warnings || []))];
+
+// A run that measured fewer poses than it captured, or that lost an axis, is NOT
+// comparable to one that measured everything: the composite is a mean over poses, and the
+// nine poses differ from each other by far more than any wave has ever moved the score
+// (per-pose spread on waveH is 6..33 against a 2.5-point wave delta). Both cases used to
+// arrive downstream as an ordinary number with a smaller `n` that nothing read.
+// preflight.mjs:68 documents the pose half of this and could not fix it from there.
+if (failed.length) {
+  warnings.push(`${failed.length} of ${shots.length} pose(s) failed to measure: ${failed.join(', ')}. ` +
+    'The composite is a mean over the survivors and is NOT comparable to a full run.');
+}
+const nullAxes = AXES.filter((k) => rows.some((r) => r.axes?.[k] == null));
+if (nullAxes.length) {
+  warnings.push(`axis unmeasured on some poses: ${nullAxes.join(', ')}. The composite is ` +
+    'renormalised over the remaining axes and is NOT comparable to a full run.');
+}
+const incomplete = failed.length > 0 || nullAxes.length > 0;
+
+// Fail loudly if metrics.py's banding moved without this file being updated: every recorded
+// score would silently become a different quantity under the same name.
+const seenBand = [...new Set(rows.map((r) => r.band_version ?? 1))];
+if (seenBand.length && !(seenBand.length === 1 && seenBand[0] === BAND_VERSION)) {
+  console.error(`metrics.py reports band_version ${seenBand.join('/')} but score.mjs expects `
+    + `${BAND_VERSION}. Update BAND_VERSION in tools/score.mjs and re-measure the history.`);
+  process.exit(5);
+}
+
 const summary = {
   tag: TAG,
   n: rows.length,
+  n_expected: shots.length,
+  band_version: BAND_VERSION,
+  incomplete: incomplete || undefined,
   rescored_from: RESCORE || undefined,
   score: +mean((r) => r.score).toFixed(2),
   score_comparative: +mean((r) => r.score_comparative).toFixed(2),
@@ -171,7 +259,9 @@ if (RESCORE) {
 } else {
   appendFileSync(join(ROOT, 'scores/history.jsonl'),
     JSON.stringify({
-      tag: TAG, n: summary.n, score: summary.score, score_comparative: summary.score_comparative,
+      tag: TAG, n: summary.n, n_expected: shots.length, band_version: BAND_VERSION,
+      incomplete: incomplete || undefined,
+      score: summary.score, score_comparative: summary.score_comparative,
       score_geometric: summary.score_geometric,
       score_legacy: summary.score_legacy, axes: summary.axes, progress: summary.progress,
       axes_legacy: summary.axes_legacy, raw: summary.raw, perf: summary.perf,
@@ -186,3 +276,8 @@ if (warnings.length) {
 console.log(JSON.stringify(summary, null, 2));
 console.error('\n--- history ---');
 printHistory();
+// Exit non-zero on an incomplete measurement. A metric that fails open is worse than one
+// that fails: the whole point of the 2026-07-31 audit was that unmeasured things were
+// arriving as scores. The JSON is still on stdout, so nothing that wants the partial
+// result loses it - it just has to acknowledge the status.
+if (incomplete) process.exit(4);

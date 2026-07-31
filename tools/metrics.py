@@ -138,6 +138,50 @@ def ms_ssim(a, b, levels=4):
     return float(np.mean(vals))
 
 
+def gms_map(a, b, T=170.0):
+    """Gradient Magnitude Similarity map (Xue et al. 2014), 0..1 per pixel, 1 = identical
+    local gradient. Prewitt gradients after the paper's 2x average-pool prefilter."""
+    ga = cv2.cvtColor(a, cv2.COLOR_BGR2GRAY).astype(np.float64)
+    gb = cv2.cvtColor(b, cv2.COLOR_BGR2GRAY).astype(np.float64)
+    ga = cv2.resize(ga, (ga.shape[1] // 2, ga.shape[0] // 2), interpolation=cv2.INTER_AREA)
+    gb = cv2.resize(gb, (gb.shape[1] // 2, gb.shape[0] // 2), interpolation=cv2.INTER_AREA)
+    hx = np.array([[1, 0, -1], [1, 0, -1], [1, 0, -1]], np.float64) / 3.0
+    def mag(g):
+        return np.sqrt(cv2.filter2D(g, -1, hx) ** 2 + cv2.filter2D(g, -1, hx.T) ** 2)
+    ma, mb = mag(ga), mag(gb)
+    return (2 * ma * mb + T) / (ma ** 2 + mb ** 2 + T)
+
+
+def gms_distance(a, b):
+    """1 - mean(GMS). 0 = identical. **This is what `structure` is banded against.**
+
+    MS-SSIM is not usable as a structure measure at this project's operating point, and
+    the proof is short (reports/metrics.md 9). Scored against the 9 reference keyframes:
+
+        FLAT grey rectangle, ref mean luminance   1-MS_SSIM = 0.495   GMSM = 0.294
+        the earliest untextured build             1-MS_SSIM = 0.510   GMSM = 0.285
+        the real game vs its own next keyframe    1-MS_SSIM = 0.446   GMSM = 0.165
+        our current head                          1-MS_SSIM = 0.686   GMSM = 0.248
+
+    A flat grey rectangle beats every render this project has ever produced on MS-SSIM,
+    and beats the `good` anchor (0.524) taken from the real game's own adjacent frames.
+    The cause is SSIM's structure term s = (sxy + C3) / (sx*sy + C3): as the test frame's
+    local variance goes to zero it tends to C3/C3 = 1, so a frame with no structure scores
+    full marks for structure it does not have. Gaussian-blurring our own render raised the
+    banded `structure` axis monotonically 17.4 -> 22.1 -> 28.6 -> 39.9 -> 57.6 -> 75.0 at
+    kernel 0/3/7/15/31/61 - about +14 composite points for destroying the image.
+
+    GMS has no such term: where the reference has gradient and the test has none,
+    (2*ma*0 + T)/(ma^2 + 0 + T) -> T/(ma^2+T) -> 0. It ranks the flat frame and the
+    untextured build LAST, which is where they belong. Variance-weighted SSIM pooling was
+    tried first and does not fix it - the fault is in the term's value, not the pooling.
+
+    `ms_ssim` is still computed and still in `raw`, unbanded, so every run recorded before
+    2026-07-31 stays readable and `score_legacy` still reproduces its original number.
+    """
+    return float(1.0 - gms_map(a, b).mean())
+
+
 def lpips_score(a, b):
     try:
         m, dev, torch = _lpips_model()
@@ -198,24 +242,24 @@ def spectral_slope(bgr):
 # had never been checked against anything. They were wrong, in both directions
 # at once (reports/metrics.md 3):
 #
-#   axis        old band      measured near15 / cross      what that did
-#   structure   0.15  0.65      0.524 / 0.718     demanded a match tighter than the
+#   axis        old band      measured good / null       what that did
+#   structure   0.15  0.65      (metric replaced) demanded a match tighter than the
 #                                                 reference achieves against its OWN
 #                                                 next frame -> pinned at 0
-#   perceptual  0.25  0.70      0.481 / 0.697     same fault -> pinned near 0
-#   grade       0.25  0.75      0.131 / 0.442     `bad` landed exactly on this
-#                                                 project's operating point -> 0.00
-#                                                 in every run ever recorded
-#   detail      0.15  1.2       0.054 / 0.412     both anchors ~3x too loose
-#   geometry    0.15  1.2       0.021 / 0.242     both anchors ~5x too loose
-#   spectrum    0.15  1.0       0.027 / 0.090     both anchors ~5x too loose
+#   perceptual  0.25  0.70      0.391 / 0.692     same fault -> pinned near 0
+#   grade       0.25  0.75      0.084 / 0.446     `bad` landed on this project's own
+#                                                 operating point -> 0.00 in every run
+#                                                 ever recorded
+#   detail      0.15  1.2       0.075 / 0.422     both anchors ~2x too loose
+#   geometry    0.15  1.2       0.049 / 0.258     both anchors ~5x too loose
+#   spectrum    0.15  1.0       0.016 / 0.088     both anchors ~9x too loose
 #                                                 -> the last three pinned near 100
 #
 # CALIB below replaces them with measured ground truth. Two anchors per axis,
 # both taken from the reference clip compared against ITSELF, so neither is a
 # property of anything this engine renders (KNOWN_ISSUES 4):
 #
-#   good  = median over 9 pairs of adjacent keyframes (kf_X vs kf_X+15).
+#   good  = median over the 156 pairs of adjacent keyframes (kf_X vs kf_X+15).
 #           "as close as the real game gets to its own next frame."  -> scores 90
 #   null  = median over 91 pairs of keyframes at least 20 apart.
 #           "no more related than two unrelated shots of Halo."      -> scores 10
@@ -231,13 +275,34 @@ def spectral_slope(bgr):
 # 54 axis readings on the current build sat at exactly 0 or exactly 100 with
 # zero derivative — improvements at those poses were arithmetically incapable of
 # moving the score. Regenerate with:  tools/metrics.py --calibrate ref/keyframes
+#
+# REGENERATED 2026-07-31 (second pass). The first pass's anchors were NOT reproducible
+# by the command this file documented, and three of them disagreed with a direct
+# measurement at the nine scored poses (perceptual `good` was shipped as 0.481 where the
+# measurement is 0.392; geometry 0.021 vs 0.049). Two causes, both now fixed:
+#   - `--calibrate` globbed `kf_*.png`, which swept up two 357x1018 `kf_*_sand.png` crops
+#     another agent had saved into ref/keyframes. It now takes only `kf_<digits>.png` at
+#     the modal resolution and says so.
+#   - `structure` is now banded against `gmsm`, not `1 - ms_ssim`. See gms_distance():
+#     a flat grey rectangle beat the `good` anchor on MS-SSIM, so the old structure band
+#     was calibrated over a range whose "excellent" end is reached by rendering nothing.
+# Everything below is the verbatim output of the documented command, on 157 keyframes /
+# 156 adjacent pairs / 91 cross pairs. If it does not reproduce, trust the command.
+#
+# Bump BAND_VERSION whenever CALIB, WEIGHTS, or any axis's underlying raw metric changes.
+# Scores from different band versions are different quantities that happen to share a name
+# and a 0..100 range; `score.mjs --history` uses this to refuse to plot them as one series.
+#   1 = 2026-07-31 first pass  (structure = 1 - MS_SSIM; good anchors not reproducible)
+#   2 = 2026-07-31 second pass (structure = GMSM; anchors regenerated by --calibrate)
+BAND_VERSION = 2
+
 CALIB = {
-    'structure':  dict(good=0.52386, null=0.71764, u50=0.61314, p=13.9615),
-    'grade':      dict(good=0.13133, null=0.44230, u50=0.24101, p=3.6190),
-    'perceptual': dict(good=0.48136, null=0.69674, u50=0.57912, p=11.8834),
-    'detail':     dict(good=0.05413, null=0.41217, u50=0.14937, p=2.1647),
-    'geometry':   dict(good=0.02077, null=0.24224, u50=0.07092, p=1.7888),
-    'spectrum':   dict(good=0.02726, null=0.09003, u50=0.04954, p=3.6779),
+    'structure':  dict(good=0.18411, null=0.26578, u50=0.22121, p=11.9690),
+    'grade':      dict(good=0.08404, null=0.44554, u50=0.19351, p=2.6346),
+    'perceptual': dict(good=0.39080, null=0.69240, u50=0.52018, p=7.6830),
+    'detail':     dict(good=0.07518, null=0.42218, u50=0.17815, p=2.5467),
+    'geometry':   dict(good=0.04907, null=0.25820, u50=0.11256, p=2.6465),
+    'spectrum':   dict(good=0.01607, null=0.08823, u50=0.03765, p=2.5803),
 }
 
 # Comparative axes carry 0.70. structure/grade/perceptual are the only three that
@@ -256,6 +321,11 @@ LEGACY_BANDS = dict(structure=(0.15, 0.65), grade=(0.25, 0.75), perceptual=(0.25
                     detail=(0.15, 1.2), geometry=(0.15, 1.2), spectrum=(0.15, 1.0))
 LEGACY_WEIGHTS = dict(structure=0.22, grade=0.20, perceptual=0.26,
                       detail=0.12, geometry=0.12, spectrum=0.08)
+# Where a legacy axis was banded against a *different* raw number than the current axis is.
+LEGACY_DIST = {
+    'grade':     lambda res, v: res['hist'],           # unsmoothed, near-binary
+    'structure': lambda res, v: 1.0 - res['ms_ssim'],  # winnable by rendering nothing
+}
 
 
 def soft_band(v, cal):
@@ -284,7 +354,7 @@ def legacy_band(v, good, bad):
 def axis_distances(res):
     """The six raw distances the axes are computed from. 0 = identical."""
     return {
-        'structure':  1.0 - res['ms_ssim'],
+        'structure':  res['gmsm'],
         'grade':      res['hist_smooth'],
         'perceptual': res['lpips'],
         'detail':     abs(np.log(max(res['lap_ratio'], 1e-3))),
@@ -312,7 +382,8 @@ def compare(ref_path, test_path, tag=None):
         tag=tag or os.path.basename(test_path),
         ref=os.path.basename(ref_path), test=os.path.basename(test_path),
         ssim=ssim_score(ref, test),
-        ms_ssim=ms_ssim(ref, test),
+        ms_ssim=ms_ssim(ref, test),             # legacy, unbanded - see gms_distance()
+        gmsm=gms_distance(ref, test),           # what `structure` is banded against
         hist=hist_distance(ref, test),          # legacy, unbanded - see hist_distance()
         hist_smooth=hist_smooth(ref, test),     # what `grade` is banded against
         grad_hist=gradient_hist_distance(ref, test),
@@ -327,6 +398,7 @@ def compare(ref_path, test_path, tag=None):
     dist = axis_distances(res)
     res['raw'] = {k: (None if v is None else round(float(v), 6)) for k, v in dist.items()}
     res['raw'].update(ms_ssim=round(res['ms_ssim'], 6), ssim=round(res['ssim'], 6),
+                      gmsm=round(res['gmsm'], 6),
                       hist=round(res['hist'], 6), hist_smooth=round(res['hist_smooth'], 6),
                       grad_hist=round(res['grad_hist'], 6),
                       lpips=None if lp is None else round(lp, 6),
@@ -343,7 +415,11 @@ def compare(ref_path, test_path, tag=None):
         axes[k] = round(soft_band(v, cal), 2)
         prog[k] = round(progress(v, cal), 2)
         g, b = LEGACY_BANDS[k]
-        lv = res['hist'] if k == 'grade' else v      # legacy grade read the unsmoothed hist
+        # The legacy axes read different underlying numbers: `grade` the unsmoothed hist,
+        # `structure` 1-MS_SSIM. Both were replaced (hist_smooth, gmsm) because the old
+        # ones were measured to be unfit, but score_legacy must keep reproducing the
+        # numbers in scores/history.jsonl exactly, so it still reads the originals.
+        lv = LEGACY_DIST.get(k, lambda r, v: v)(res, v)
         legacy[k] = round(legacy_band(lv, g, b) * 100, 2)
 
     res['axes'] = axes
@@ -367,6 +443,7 @@ def compare(ref_path, test_path, tag=None):
         sum(WEIGHTS[k] * np.log(max(axes[k], 1e-2)) for k in live) / wsum)), 2)
     lsum = sum(LEGACY_WEIGHTS[k] for k in live) or 1.0
     res['score_legacy'] = round(sum(legacy[k] * LEGACY_WEIGHTS[k] for k in live) / lsum, 2)
+    res['band_version'] = BAND_VERSION
     res['warnings'] = warnings
     return res
 
@@ -380,7 +457,26 @@ def calibrate(kfdir, near=15, min_gap=20, n_cross=91, seed=20260731):
     Prints a CALIB block that can be pasted straight back into this file.
     """
     import random, re
-    kfs = sorted(glob.glob(os.path.join(kfdir, 'kf_*.png')))
+    # Only `kf_<digits>.png`, and only at the modal resolution. `ref/keyframes/` is a
+    # shared directory: agents drop crops and working images into it (on 2026-07-30 two
+    # 357x1018 `kf_*_sand.png` crops appeared there), and a plain `kf_*.png` glob silently
+    # folds them into the "adjacent keyframe" set, which is the thing that defines what
+    # "good" means for every axis. Anchors must not move because someone saved a crop.
+    allf = sorted(glob.glob(os.path.join(kfdir, 'kf_*.png')))
+    kfs = [k for k in allf if re.fullmatch(r'kf_\d+\.png', os.path.basename(k))]
+    shapes = {}
+    for k in kfs:
+        im = cv2.imread(k, cv2.IMREAD_COLOR)
+        shapes.setdefault(im.shape[:2], []).append(k)
+    modal = max(shapes, key=lambda s: len(shapes[s]))
+    kept = set(shapes[modal])
+    dropped = [k for k in allf if k not in kept]
+    if dropped:
+        sys.stderr.write(f'[calibrate] ignoring {len(dropped)} non-keyframe file(s) in {kfdir}: '
+                         + ', '.join(os.path.basename(d) for d in dropped[:6])
+                         + (' ...' if len(dropped) > 6 else '') + '\n')
+    kfs = [k for k in kfs if k in kept]
+    sys.stderr.write(f'[calibrate] {len(kfs)} keyframes at {modal[1]}x{modal[0]}\n')
     if len(kfs) < min_gap + 2:
         raise SystemExit(f'need more keyframes in {kfdir}')
     idx = {os.path.basename(k): i for i, k in enumerate(kfs)}

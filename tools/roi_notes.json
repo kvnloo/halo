@@ -1,0 +1,56 @@
+{
+  "_readme": "Hand-maintained caveats about the named ROI crops in tools/roi.py. Regions are FIXED SCREEN RECTANGLES, not semantic masks (docs/TARGETS.md:47, docs/LOOP.md:171, docs/KNOWN_ISSUES.md:110), so a crop named `sky` is only sky at the poses where it happens to be. Four separate agents rediscovered that independently and each wrote it into their own report, where the next agent could not see it. Every entry below quotes the report that measured it. Add an entry the moment you find a crop that is not what it is named; that is a one-line edit, and it is the whole point of the file. See tools/roicheck.mjs.",
+  "regions": {
+    "sky": {
+      "notes": [
+        {
+          "poses": ["ref_00000"],
+          "says": "The crop contains sea stacks and cliff, not open sky.",
+          "source": "reports/clouds.md:310"
+        },
+        {
+          "poses": ["ref_00720"],
+          "says": "In kf_00720 the crop contains the cliff. docs/TARGETS.md says so in prose and it is the reason the averaged `sky` target is not a fair aim at this pose.",
+          "source": "docs/TARGETS.md:47"
+        },
+        {
+          "poses": ["ref_01500"],
+          "says": "In kf_01500 the crop contains a sea stack.",
+          "source": "docs/TARGETS.md:47"
+        }
+      ]
+    },
+    "sky_sun": {
+      "notes": [
+        {
+          "poses": ["ref_00720"],
+          "says": "`sky_sun` at ref_00720 is not sky. In kf_00720 the crop (x 1056-1882) is terrain, not the near-sun Mie/bloom region the name promises.",
+          "source": "reports/sky.md:17"
+        },
+        {
+          "poses": ["ref_00000"],
+          "says": "The clouds agent measured the same class here: the crop is not sky at this pose either.",
+          "source": "reports/clouds.md:310"
+        }
+      ]
+    },
+    "weapon": {
+      "notes": [
+        {
+          "poses": ["*"],
+          "says": "Do NOT tune to ref/roi_signatures.json's `weapon` row. It is a clip mean over a screen rectangle that is ~65% sand.",
+          "source": "reports/weapons.md:279"
+        }
+      ]
+    },
+    "water": {
+      "notes": [
+        {
+          "poses": ["*"],
+          "says": "Three separate numbers in this file's history were measured against something that was not water: a mip-chain NaN artefact worth +10 lum_std and +0.04 local_contrast, black back-facing triangles counted as dark water, and a sky/aerial deficit read as a water deficit.",
+          "source": "reports/ocean.md:115, reports/ocean_waveH.md:746, reports/ocean_waveH.md:860"
+        }
+      ]
+    }
+  }
+}

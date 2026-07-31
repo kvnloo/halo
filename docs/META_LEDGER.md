@@ -8,6 +8,253 @@ and every gate has a one-flag escape hatch.
 
 ---
 
+# INDEX — read this before proposing anything
+
+*Written 2026-07-31 by the meta-audit review pass, over rounds 1–12. The round sections below
+are the full evidence and stay verbatim; this index is the actionable summary.*
+
+**Round numbers below repeat** (there are four "round 10"s, two each of 2, 5, 7, 11, 12)
+because rounds ran concurrently under different lenses and each numbered itself. Round
+numbers are **not** a chronology and **not** unique keys — cite the entry id (`G14`, `T4`,
+`E2`, `V3`, `A12` …) or the file, never "round 10".
+
+## A. GATED NOW
+
+Verified end-to-end on the clean tree, 2026-07-31. "Blocks" means a non-zero exit stops a
+commit, a push, or a measurement. Everything else prints and gets out of the way — by
+design: on a fresh clone *not running* is the normal state for several of these, and a gate
+that reddens a healthy tree gets deleted by the next person in a hurry.
+
+| Instrument | Catches | Runs from | Blocks? | Clean-tree state today |
+|---|---|---|---|---|
+| `tools/parsecheck.mjs` | a `src/**.js` that does not parse; backticks inside `/* glsl */` templates (§20) | CI push, `preflight` #1 | **yes** (CI) | ok, 42 files |
+| `tools/_posecheck.mjs` | a camera pose sunk under the terrain (§17.1) | CI push, `preflight` #2 | **yes** (CI) | ok, 28 poses |
+| `tools/parsecheck-staged.mjs` | the same, on the **staged blob** — the working copy is routinely mid-write (§16) | `.githooks/pre-commit`, CI | **yes** (commit) | ok |
+| `tools/stagedcheck.mjs` | staged `tools/*.mjs`, `tools/*.py`, `*.json`, `*.jsonl` — the instruments and the record, not just `src/` (G16) | `.githooks/pre-commit`, CI | **yes** (commit) | ok |
+| `capture.mjs` integrity gate (G1) | scene missing a module / a failed `init()` / a pass that never loaded — three channels, exit 3 | every capture; `npm run selftest` in CI | **yes** | selftest ok, detects 3/3 |
+| `capture.mjs` argv-whitespace fatal (E3) | `"--skip ocean"` as one token — a quoting bug that silently captures the default build | every capture, exit 2 | **yes** | n/a |
+| `capture.mjs` stale-frame fatal (G14) | one `ref_NNNNN` written beside older `ref_` frames that `score.mjs` would average in at full `n` | every single-pose capture, exit 6 | **yes** | **fires correctly** (verified) |
+| `capture.mjs` foreign-daemon fatal (G12/G13) | the machine-wide daemon serving a *different* checkout — a confident null result | every daemon capture, exit 5 | **yes** | roots match, silent |
+| `capture.mjs` `--settle % 16` warning (E2) | an off-phase settle: TAA's converged still is periodic with period 16, worth up to 53 code values | every capture | no | silent at 48 |
+| `capture.mjs` preflight-stamp NOTE (A12) | a capture taken against a tree preflight never gated | every capture | no | prints when stale |
+| `capture.mjs` `daemonFallback` reason (G13) | the daemon path failing silently and falling back to ~1 GB standalone | every capture; written to `scores/provenance.jsonl` | no | daemon healthy |
+| `tools/score.mjs` incomplete-run gate | a pose that failed to measure, or a null axis — a mean over a different set, exit 4 | every score | **yes** | n/a |
+| `tools/score.mjs` `BAND_VERSION` assert | `metrics.py` re-bands without `score.mjs` following — every recorded score silently becomes a different quantity, exit 5 | every score | **yes** | in sync at v2 |
+| `tools/historycheck.mjs` | malformed / duplicate-tag / dead-axis rows in `scores/history.jsonl` | CI | exit 1 only on a malformed row | ok |
+| `tools/preflight.mjs` | 13 checks; `SKIP … THIS CHECK DID NOT RUN` + an `N/13 checks ran` coverage count (T4) | `precapture`/`prescore`, CI, by hand | hard checks only | **ok, 13/13 ran, 5 advisory** |
+| `tools/advisory.mjs` (G15) | a guardrail that **crashed** looking like one that passed. `0 = ok · 1 = findings · ≥2 / signal / stack trace = BROKE` | CI | on BROKE only | ok; 2 checks report findings |
+| `tools/reportgate.mjs` | report-side rules R7/R9 at the only machine gate every report passes | `.githooks/pre-commit` | no (`\|\| true`) | ok |
+
+Reporting instruments, run by hand or via `advisory` — none of them block, all of them are
+wired into `preflight` or `advisory` so nobody has to remember them:
+
+`citecheck` (dangling SHAs/paths) · `claimcheck` + `tools/refuted.json` (a disproved claim
+still standing) · `registrycheck` (the disproof registry against itself) · `provcheck`
+(adjacent history rows share a pose set and an instrument) · `shotcheck` (a scored dir holds
+one capture) · `gatecheck` (does `blind.mjs`'s refusal read a field `capture.mjs` emits) ·
+`apicheck` (docs/API.md's "frozen" signatures exist in `src/`) · `refcheck` + `refstamp`
+(ref/ shape, fingerprint, and whether the rebuild recipe works) · `roicheck` +
+`tools/roi_notes.json` (that crop is not what it is named) · `contracts` +
+`tools/contracts.json` (the sibling implementers of a contract you are about to fix one of) ·
+`knobcheck` (`--config` keys that reach nothing; pass gates that cannot be turned off) ·
+`ablate` (switch one pass off through `togglePass()`, not through a knob) · `nulltest`
+(ALIVE verdicts with a control leg) · `axischeck` / `scalecheck` / `dupcheck` (the score
+series) · `blindcheck` / `blindledger` / `tells` (the acceptance gate) · `shadercheck` (a
+material that linked) · `pixelcheck` (exact-black / NaN) · `reportlint` · `postflight`.
+
+**Non-zero on a clean tree today, all advisory, none of them new or broken:** `citecheck`
+(10 dangling SHAs lost in the `a9c1e8a` history rewrite), `shotcheck` (`shots/latest` is a
+mixture — see B4), `apicheck` (B3), `gatecheck` (B2), `axischeck`/`scalecheck` (the band
+re-baseline, B6). `knobcheck`, `pixelcheck` and `blindledger` exit 2 with **no arguments** —
+that is their usage line, not a failure; `npm run knobcheck` / `npm run pixelcheck` bare will
+look red and is not.
+
+## B. RECOMMENDED, NOT DONE — with enough detail to act
+
+Ordered by how likely the gap is to produce a wrong number. Each is either a `src/` change
+(owned by the rendering waves) or a file owned by a concurrent wave; none is a drive-by.
+
+**B1. `--rescore` bypasses every capture-time gate.** `tools/score.mjs`'s `--rescore` path
+prints `[score] rescoring existing PNGs in <dir> (no capture)` and goes straight to the
+`readdirSync(/^ref_\d+\.png$/)` filter with nothing in between: no G14 stale-frame refusal
+(it takes no capture), no preflight, no provenance row. `scores/rescore_latest.json` on disk
+right now was written this way from a `shots/latest` holding frames 15 h apart, with `"n": 9`.
+**NEEDS `tools/score.mjs`:** before that `readdirSync`, spawn `node tools/shotcheck.mjs
+<outdir>` and refuse a `--rescore` over a directory holding more than one capture unless
+`--allow-stale`; and write a provenance row for rescore runs so they can be tied to a pose
+set at all.
+
+**B2. `tools/blind.mjs`, two lines.** `gatecheck` reports both every run: (a) the refusal
+gate reads `info.failedModules`, but `capture.mjs` only ever puts it at
+`info.integrity.failedModules` — so "a blind test with a missing subsystem is not a fair
+fight" has never once fired; (b) the `--score` tally loop never compares its count `n`
+against `Object.keys(key.pairs).length`, so a judge who submits fewer picks than pairs gets a
+clean row with nothing marking it partial. `gatecheck` goes silent the moment they land.
+
+**B3. `sky.envTexture` / `sky.horizonColor` / `sky.needsEnvUpdate` do not exist.**
+`docs/API.md:36` declares them frozen; the name appears nowhere in `src/world/sky.js`.
+`src/render/env.js:724` *reads* `sky?.needsEnvUpdate` every frame — an optional-chained read
+of a member that does not exist is permanently false and never throws, so the env-update
+handshake has never run and nothing said so. **Either implement the member or correct
+`docs/API.md`.** `apicheck` reports it every preflight until one of those happens.
+
+**B4. `shots/latest` is a mixture and its number is quoted.** 9 frames spanning 57,184 s.
+G14 stops the *next* one; it deletes nothing, because a stale frame is evidence. Whoever owns
+that number: re-capture the set into a fresh tag, or annotate `rescore_latest` as
+uncomparable. Any report quoting it is quoting an average across two builds.
+
+**B5. Nobody has ever run the same build twice and recorded the run-to-run spread of any
+axis.** `reports/metrics.md` §6.1's own words: until someone does, *no single-wave composite
+delta under about 2 points should be believed — mine included*. Cost: two full scored runs of
+one unchanged tree. This is the single cheapest thing that would make every wave's headline
+number interpretable and it is still not on disk.
+
+**B6. No row in `scores/history.jsonl` is at the current banding.** All 15 rows predate
+`band_version`; the two that carry a `score_legacy` (`waveI-fitstand`, `waveI-handstand`) are
+band **v1**, whose `structure` axis was `1 − MS_SSIM` — an axis won by rendering a flat grey
+rectangle (`reports/metrics.md` §9). `score.mjs --history` now correctly shows an empty
+`SCORE` column for every row. `ref/baseline.json` cannot be re-banded either, only
+re-generated: it stores banded axes with no raw statistics. **This needs a metrics owner and
+one clean re-baselining run.** Until then every "30.30" in `reports/` is on a scale nothing
+currently produces (v2 measures the same pixels at ~17–18).
+
+**B7. `score.mjs` runs no preflight on the path that writes `history.jsonl`.** Two lines —
+spawn `preflight --quiet`, abort on exit 1. A12's NOTE reaches `score.mjs` only indirectly,
+because it spawns `capture.mjs`.
+
+**B8. `src/` changes, all with evidence, none with an owner.**
+* `api.setConfig` validates nothing — a malformed call is swallowed and the A/B measures the
+  shipped default. `if (typeof k !== 'string' || v === undefined) console.error('[config]
+  ignored malformed setConfig(', k, ',', v, ') — did you pass an object instead of (k, v)?')`
+  before the assignment. `capture.mjs`'s warning filter already surfaces it.
+* Three pass gates cannot be turned off (`knobcheck --gates` reports them every run):
+  `grain.js:358`, `motionBlur.js:575`, `sharpen.js:291` all write `(c.k ?? cfg.k) !== false`,
+  and the harness cannot express boolean `false` — `--config grainEnabled=0` leaves the pass
+  running and the A/B compared a frame with itself. Fix: `const on = !!(c.k ?? cfg.k)`.
+* `src/core/Engine.js` after line 46: `renderer.debug.onShaderError = (gl, program, vs, fs)
+  => { (globalThis.__HALO_SHADER_ERRORS__ ||= []).push({ program: gl.getProgramInfoLog(program),
+  vs: gl.getShaderInfoLog(vs), fs: gl.getShaderInfoLog(fs) }); };` — `capture.mjs`'s
+  `integrityReport()` then reads it as a fourth channel and a shader that fails to link
+  becomes a hard exit instead of a string somebody greps for. Keep `tools/shadercheck.mjs`
+  afterwards as the fallback for errors three.js reports outside that hook.
+* `src/modules.js` `buildModules()` validates `--only`/`--skip` names against nothing, and
+  drops a module whose `create()` returns falsy via `if (inst)` with no `else` recording it —
+  a hole in integrity channel one.
+* `applyWorldMaterial` is stomped by ten callers, four of which carry a local re-install and
+  a comment explaining it (`props.js:618`, `vegetation.js:414-426`, `terrain.js:1481-1504`,
+  `rocks.js:1735`). Chain it once in `lighting.js:83`'s `registerMaterial` or
+  `materialCommon.js:126-127`; every local workaround can then be deleted. Registered as the
+  `world-material-hook` contract in `tools/contracts.json`.
+
+**B9. Report-side edits, one line each, owned by their authors.**
+* `reports/characters.md`, `reports/depthfx.md`, `reports/postfx.md`: *"the `weapon` region is
+  a screen rectangle that is ~65% sand (`reports/weapons.md:279`); this number is not a
+  viewmodel measurement."*
+* `reports/blind.md` §0: *"CORRECTED: the split was 3/6, not 4/5 — measured from the key in
+  `scores/blind_ledger.jsonl`. The conclusion is unaffected: an always-A judge scores 6/9."*
+* `docs/KNOWN_ISSUES.md` §28 and `reports/integrationH.md` §7 still assert a refuted claim
+  inline; `claimcheck` flags both. The exact replacement text is in R5-B.
+* `tools/refuted.json`'s `fog-owns-desaturation.refutedBy` cites the `--skip volumetricFog`
+  experiment that the sibling entry `skip-flag-can-disable-a-pass` refutes. `claimcheck`
+  prints that prose to agents as authority. Cite §18's depth-clear evidence instead.
+
+**B10. The acceptance gate is 4 scored runs behind.** One human blind judgement in fourteen
+scored runs; `waveI-prefit/posefit/fitstand/handstand` are all unjudged.
+`node tools/blind.mjs --capture --contact`, then `--score`. `docs/LOOP.md` §5.7: *the blind
+test is the score; everything in `history.jsonl` is a proxy picked for being cheap.*
+
+**B11. Eight guardrails exist only in this working tree.** `preflight`'s
+`guardrails-committed` warns every run. `.githooks/pre-commit` and
+`.github/workflows/preflight.yml` are **tracked and modified** and both invoke
+`tools/stagedcheck.mjs` and `tools/advisory.mjs`, which are **untracked** — commit the hook
+and the workflow without the tools and every commit is refused with `MODULE_NOT_FOUND` and
+CI is red on step 3 for everyone. `git add -- tools/stagedcheck.mjs tools/advisory.mjs
+tools/gatecheck.mjs tools/apicheck.mjs tools/refcheck.mjs tools/registrycheck.mjs
+tools/roicheck.mjs tools/roi_notes.json tools/contracts.mjs tools/contracts.json
+tools/blindcheck.mjs tools/reportgate.mjs` in the same commit.
+
+## C. REJECTED / DELIBERATELY NOT GATED — do not re-propose
+
+**Already shipped; a proposal to build it is a proposal to build it twice.** The capture
+integrity gate (G1) · the provenance stamp (G2) · `preflight` as one command (G3) · the
+staged-blob pre-commit gate (G4/G16) · the CI workflow (G5) · dead-axis detection, both
+flavours — `historycheck` (exact-constancy over the last 5 rows of `history.jsonl`) and
+`axischeck` (span over all runs from `scores/<tag>.json`); they fail on different things,
+**keep both** · `citecheck` and its dangling-provenance remediation · the refuted-claim
+registry and its propagation annotations (T2/T2b) · `registrycheck` (the registry against
+itself) · `shadercheck` · `ablate` (the inert-pass A/B) · `pixelcheck` (the exact-black /
+NaN scan) · `nulltest`'s control leg (E1) · the `--settle % 16` warning (E2) · the argv
+whitespace fatal (E3) · `roicheck` (E4) · the `world-material-hook` sibling list (E5) · the
+preflight-bypass NOTE (A12) · `docs/AGENT_BRIEF.md`'s instruction set · the
+`docs/RESEARCH.md:7` correction · `capture.mjs` arg hygiene · `reportlint` provenance.
+
+**Evidence did not survive checking.** `geometry-owner-misattributed` — the per-module
+triangle breakdown at `ref_02220` that carried the argument does not reproduce and is
+structurally impossible to produce the way it was described. `warning-filter-drops-info` —
+accurate but already logged verbatim as round-3 S2, same two files, near-identical regex.
+
+**Deliberately not gated, and the reason is not laziness:**
+* **`--settle` welded to the world clock (§26)** and **re-banding the `grade` axis (§15)**:
+  both change the meaning of every number already recorded. They need an owner and one clean
+  re-baselining run. `historycheck`/`axischeck` make the deadness visible instead. (See B6 —
+  this debt has now come due.)
+* **`claimcheck`/`citecheck` do not read `research/`.** Measured: widening the glob surfaces
+  one genuine dangling commit and **10 false positives**, all upstream paths (three.js,
+  FSR2) that `TRACKED_ROOTS`'s `^src/` cannot tell from a real citation. Needs an
+  upstream-path guard first.
+* **`preflight` is not a hard refusal at capture time.** It costs ~1.7 s and `capture.mjs` is
+  spawned in loops by `knobcheck`, `nulltest`, `ablate` and `previewsheet`. It needs a
+  per-tree cache keyed on the `src/` content hash before it can be a gate.
+* **`warnings[]` stays non-fatal.** Benign (a 404, "Multiple instances of Three.js") and real
+  are genuinely mixed in there; someone must separate them before any of it can exit non-zero.
+* **Contracts are hand-written, never inferred.** Automatic inference would silently mis-scope
+  a pattern with nobody around to notice; a hand-written entry's mistake is visible the first
+  time a human reads its output.
+* **`postflight --strict` is wired but off.** Turn it on one wave from now — when a wave's
+  reports were all written under a brief that actually contained R2b — not retroactively.
+* **Scratch-copy work:** `shots/` is 8.5 GB and `/tmp` is a 7.8 GB tmpfs. Copy
+  `src tools docs package.json vite.config.js index.html` only — 2.9 MB — and set
+  `HALO_NO_DAEMON=1`, or the daemon answers from the *other* tree.
+
+## D. Verification pass — 2026-07-31, after round 12
+
+Every gate above was run on the clean tree. All hard gates green: `parsecheck` (42 files),
+`_posecheck` (28 poses, 0 FAIL), `parsecheck-staged`, `stagedcheck`, `.githooks/pre-commit`
+end-to-end (exit 0), `npm run selftest` (detects 3/3 injected failures, exit 0),
+`preflight` (13/13 ran, 5 advisory, exit 0), `historycheck`, `advisory` (5/5 produced a
+result, exit 0). `node tools/capture.mjs --pose ref_00000 --settle 8` → `ok:true`,
+`via:"daemon"`, all three integrity channels empty, exit 0. G14 fire-tested in a throwaway
+`shots/_metaverify` (exit 6, correct message). T4 fire-tested in a scratch copy with
+`_posecheck.mjs`/`scalecheck.mjs` deleted and `provcheck.mjs` replaced by a `throw`: three
+`SKIP … THIS CHECK DID NOT RUN` lines, `[10/13 checks ran]`, and the crashed `provcheck` no
+longer manufactures the reassuring `ok provenance` line. **No gate was reverted — nothing
+regressed.**
+
+### One defect found and fixed in this pass — `tools/advisory.mjs`
+
+`advisory.mjs` was invoking two of its five jobs as `citecheck --warn` and `shotcheck
+--warn`. Those flags force the tool to exit 0, which collapses `advisory.mjs`'s own
+`findings (advisory)` state into `ok` — so a run printing ten `DANGLING` citations and
+`FAIL shots/latest — 9 frames span 57184s; this is not one capture` summarised them as
+`ok  node tools/citecheck.mjs --warn` / `ok  node tools/shotcheck.mjs --warn`, and the CI
+step was green with the word "ok" printed over two live findings. That is the exact
+green-line-over-a-hole this wrapper was built to remove from `|| true` (G15) and that T4
+removed from `preflight` — rebuilt one layer in, inside the tool that exists to prevent it.
+The `--warn` flags were redundant as well as lossy: `advisory.mjs` only ever reddens on
+**BROKE**, never on findings.
+
+Fixed: both jobs now run in their native exit mode, and the final line names the count.
+Summary now reads `findings  node tools/citecheck.mjs` / `findings  node
+tools/shotcheck.mjs` and `advisory ok — 5 check(s) produced a result; 2 reported FINDINGS`.
+Re-verified all three states: clean → `ok`, findings → `findings` (exit 0, CI stays green),
+injected `throw` → `BROKE — uncaught exception`, exit 1.
+
+**Generalisation for the next round:** `--warn`/`--quiet`/`|| true` on a check that is
+*already* inside an advisory wrapper does not make it safer, it makes it unreadable. A
+wrapper that classifies by exit code must be given the exit code.
+
+---
+
 ## Installed 2026-07-31 — round 1 (lens: gates)
 
 ### G1. `tools/capture.mjs` fails non-zero when the scene is incomplete
@@ -1297,3 +1544,1203 @@ them: 8 sites, 4 annotated here, **4 left**.
   exactly one in `src/` today (`src/render/passes/dof.js:239`, a one-line
   `` `const vec2 KERN[${TAPS}]…` ``), so the exposure is small; widening the opener regex is a
   one-line change if a second ever appears.
+
+## Verified 2026-07-31 — T3 fire-test (lens: has anyone seen this gate trip)
+
+T3 (`tools/refstamp.mjs`) was installed round 3 and, per its own note, had "would have caught:
+nothing yet" — an untripped gate is not a known-working one. This pass constructed the failure
+it targets and confirmed the gate behaves as documented, without touching the real `ref/` or
+`tools/ref_manifest.json`:
+
+* Copied `tools/refstamp.mjs` unmodified plus a 60-file subset of the real `ref/` tree (all of
+  `roi/`, `detail/`, the top-level `*.json`, and three `keyframes/*.png`) into a scratch dir
+  under `/tmp`, generated a manifest scoped to that subset, and confirmed `--verify` reports
+  `ok` (exit 0) on the untouched copy.
+* Simulated a silent re-extraction: appended a byte to one keyframe PNG (**changed**), deleted
+  one ROI crop (**removed**), and dropped in a copy of an unrelated file under a new name
+  (**added**). `--verify` caught all three in one run, named every path, and exited 1 with
+  *"Deltas against scores/history.jsonl and docs/TARGETS.md are no longer meaningful."*
+* Reverted the synthetic drift and reran `--verify`: back to `ok`, exit 0 — the gate is not
+  stuck failing once the drift is undone.
+* `node tools/refstamp.mjs --verify` against the **real** `ref/` (216 files) was run before and
+  after the scratch test: `ok` both times, confirming the scratch work never touched it.
+
+No harm: `node tools/parsecheck.mjs` → `ok — 42 files parse, no GLSL template hazards` (exit 0).
+`node tools/capture.mjs --pose ref_00000 --out /tmp/meta_smoke.png --settle 8` → `{"ok": true,
+"via": "daemon", ...}` (exit 0), PNG written. `git status` before and after this pass is
+identical except for pre-existing concurrent-wave edits to `scores/provenance.jsonl` and
+`tools/score.mjs` that this session did not make and did not touch.
+
+**Turn it off:** it already is — `refstamp` is not wired into `preflight` or CI, by the design
+note in its own T3 entry; it only runs when invoked (`npm run refstamp` or the pre-publish
+checklist step in `docs/AGENT_BRIEF.md` R9b). Nothing to disable.
+
+---
+
+## Installed 2026-07-31 — round 9 (lens: the sibling list nobody could see)
+
+### D1. `tools/contracts.mjs` + `tools/contracts.json` — a named registry of cross-file contracts and their implementers
+
+**Files:** `tools/contracts.mjs` (new), `tools/contracts.json` (new). Read-only grep over
+`src/`; no capture, no `src/` edit, never fails a build.
+
+**The recurrence this closes.** Every contract in this codebase has 3-5 implementers, a fix
+lands in one, and the siblings are rediscovered a wave later:
+
+* **Velocity producers (KNOWN_ISSUES #1).** `scene.js` + `taa.js` were fixed together, but
+  there are three velocity *producers*, not one — `terrain.js` and `vegetation.js` opt out
+  of `scene.overrideMaterial` and carry their own G-buffer material. `terrain.js` was
+  accidentally already correct; `vegetation.js` stayed on the old, jittered pairing for two
+  full waves until Wave G measured `meanY +1.570e-04` on matId 5 (foliage) in isolation.
+  `motionBlur.js` carried a matching `+0.5*uJitter` compensation that also had to flip in the
+  same change.
+* **Collider producers (KNOWN_ISSUES #12).** Four producers audited by hand: `rocks.js`
+  fixed in Wave E ("every collider `rocks.js` produced was silently discarded — all sea
+  stacks, cliffs and boulders were non-solid"), `structures.js` left open (oriented boxes
+  `physics.js` has no OBB case for) until a later wave.
+* **Shared depth (KNOWN_ISSUES #18).** `dof`, `motionBlur`, `taa`, `ssao`, `ssr` and water
+  refraction all sample `pipe.depthTex`; it was silently clobbered by the viewmodel's
+  `clearDepth()` and the consumers were discovered and re-tuned one at a time across three
+  waves before the source bug in `scene.js` was found and fixed once.
+* **`reports/clouds.md` #10.1** records the same class again, inside a file none of the
+  above five consumers touch: `cloudComposite.js` linearises `pipe.depthTex` with the MAIN
+  camera's `uNear`/`uFar` against depth written through the VIEWMODEL camera's own
+  projection — still open, needs an owner of `scene.js`.
+
+**What it is.** A hand-maintained JSON registry, `{contract-id: {pattern, scanDirs,
+knownIssue, status, ...}}`, printed by a small CLI — the same shape as `tools/tells.mjs`
+(name -> pattern, read-only, `--audit`, `--json`), per the reviewer's note that no simpler
+one-line-npm-script substitute exists here: the value is the named, versioned mapping
+surviving across agents, not the ripgrep incantation itself.
+
+```
+node tools/contracts.mjs                    # every contract, match counts, status
+node tools/contracts.mjs <id-or-substring>   # that contract's implementers, with line numbers
+node tools/contracts.mjs --audit             # contracts no report has ever named (mirrors tells.mjs)
+node tools/contracts.mjs --json
+```
+
+Seeded with the three contracts named above: `velocity-producer`
+(`uCurrViewProj|vVegCur|prevClip`), `collider-producer`, `depth-consumer`
+(`pipe\.depthTex|\btDepth\b`). Verified against the current tree: `velocity-producer` finds
+exactly the 4 files KNOWN_ISSUES #1 names (`GBufferMaterial.js`, `scene.js`, `terrain.js`,
+`vegetation.js`); `depth-consumer` finds exactly the 12 files that read `pipe.depthTex` or
+`tDepth` today, including `cloudComposite.js`.
+
+**The `collider-producer` pattern was corrected, not copied.** The reviewer's suggested
+pattern for this contract was `addStatic\(` alone. Run against this tree, that matches
+**one file — `src/game/physics.js`** — and none of the three producer files KNOWN_ISSUES #12
+actually audits (`props.js`, `structures.js`, `rocks.js`). A pattern that only ever points a
+fixer at the file that already validates colliders correctly, and never at the ones that
+produce the malformed ones, would have reproduced the exact failure this tool exists to
+prevent — silently, since a query that "succeeds" (prints one real file, no error) gives no
+signal that it missed the point. Broadened to `colliders\.push\(|addStatic\(`, which is the
+literal call every producer makes; re-verified to return all 4 files
+(`physics.js`, `props.js`, `rocks.js`, `structures.js`). Documented in the registry's own
+`note` field so the next person to touch this entry sees why it isn't the one-liner.
+
+### Proof it fires
+
+Constructed in a scratch tree under `/tmp` (never in this repo), mirroring the real
+`collider-producer` shape: `rocks.js` "fixed" (pushes a collider via `colliders.push`),
+`structures.js` still holding a plain-array box collider (the exact class of bug
+`rocks.js` had), `physics.js` as the registration site.
+
+```
+$ node tools/contracts.mjs collider-producer
+3 file(s) currently implement this contract:
+  src/game/physics.js       (lines 3)
+  src/world/rocks.js        (lines 4)
+  src/world/structures.js   (lines 4)
+```
+
+The still-broken sibling (`structures.js`) is in the printed list, one command, no grep
+incantation to re-derive. Also verified: a malformed `pattern` in the registry degrades to a
+printed `ERROR:` line and exit 0 rather than throwing (`(unterminated` tested directly); an
+empty `reports/` directory makes `--audit` report "0 file(s) in reports/" rather than
+crashing. Then re-ran the same three commands (`velocity-producer`, `collider-producer`,
+`depth-consumer`, plus `--audit` and `--json`) against the real, clean tree — see the file
+counts two paragraphs up, which match `KNOWN_ISSUES.md`'s own audited sibling lists exactly.
+
+### How to run it
+
+```bash
+node tools/contracts.mjs <contract-id>
+```
+
+One line added to `docs/AGENT_BRIEF.md`: before closing a defect that names a contract, run
+this and state in the report what was found in each sibling file.
+
+### How to turn it off if it becomes a nuisance
+
+It cannot block anything — it is not wired into `preflight`, `postflight`, npm scripts, or
+CI, and it exits 0 in every case tested above, including a broken registry entry. To remove
+it entirely: delete `tools/contracts.mjs`, `tools/contracts.json`, and the one line in
+`docs/AGENT_BRIEF.md`. To silence one noisy or stale entry: delete its key from
+`tools/contracts.json` — the tool re-derives everything else from what remains.
+
+### Noticed, not done (round 9)
+
+* `tools/contracts.mjs`'s `--audit` citation check is a literal substring match on the
+  contract id inside `reports/*.md` (same technique `tells.mjs` uses for tell ids). It is
+  brand new, so right now it reports all three contracts as "named by no report" — that is
+  the honest, expected state on the day the registry is created, not a defect in the check.
+* Not attempted: inferring contracts automatically from the call graph or from
+  `KNOWN_ISSUES.md`'s prose. That was the reviewer's exact caution against a registry that
+  goes stale — automatic inference here would silently mis-scope a pattern (as the literal
+  `addStatic\(` suggestion did) with nobody around to notice, whereas a hand-written entry's
+  mistake is visible the first time a human reads its output.
+* A fourth candidate contract was visible in the evidence but not registered: whatever
+  writes vs. reads `ctx.config.mvLegacyJitter`/`vmLegacyDepth`-style A/B flags — several
+  passes each read one of these independently and a new pass that forgets to consult its
+  flag would silently stop flipping with its siblings. Left out because, unlike the three
+  above, no known defect has actually been traced to it yet; adding a pattern for a contract
+  with no documented failure is exactly the speculative surface this tool is supposed to
+  avoid.
+
+---
+
+## Installed 2026-07-31 — round 10 (lens: gates — the refusal that was never wired to the fetch)
+
+Three gates already existed in this repository and were installed one step away from the
+moment they could fire. This round moved them to that moment. Nothing new was invented.
+
+### G13. `capture.mjs` refuses a daemon that serves a different tree
+**Files:** `tools/capture.mjs` (`refuseForeignDaemon()`, called from `daemonPort()`)
+
+Round 5's "Noticed, not done" asked for exactly this, in these words: *"a daemon `/health`
+field carrying its own repo root so `capture.mjs` can refuse a daemon whose root !=
+process.cwd()"*. G12 built the field and put the refusal in `preflight` — but `preflight`
+resolves `ROOT` from its own file, so it can only fire when it is run **inside** the second
+checkout, and the documented workflow (`docs/AGENT_BRIEF.md`, "Before you measure anything")
+is to run it in the main tree and then capture. For the failure it was written for — a
+scratch copy, a git worktree, a bisect — check 7 is structurally unreachable.
+
+`daemonPort()` fetched `/health` and read only `r.ok`, discarding the body. It now parses it
+and compares `realpathSync(health.root)` to its own `ROOT`.
+
+Would have caught: the round-5 reviewer's live hit — three deliberately broken files under
+`/tmp` captured `ok:true` with all three integrity channels empty, served from `/workspace`,
+and they "nearly recorded the gate as failing". Every two-tree operation (`ablate.mjs`,
+`nulltest.mjs`, bisecting a regression, verifying a fix) is exposed to the same confident
+null result.
+
+Cost: one string compare on a response the function already awaited. It cannot fire in the
+main tree (roots match) and cannot fire on a daemon built before G12 (no `root` field →
+returns without judging, same guard `preflight` uses). Exit 5. Escape hatch:
+`HALO_ALLOW_FOREIGN_DAEMON=1`; the message also names `HALO_NO_DAEMON=1`, which is the fix
+that gives you a correct measurement rather than merely an unblocked one.
+
+**Proof it fires:** a 2.9 MB copy of `src tools package.json vite.config.js index.html` under
+the scratchpad, `node_modules` symlinked, `node tools/capture.mjs --pose ref_00000 --out
+/tmp/foreign_smoke.png --settle 8` → the FATAL block, naming daemon root
+`/workspace/zer0/products/halo` (pid 2125532) against the scratch tree. The same command in
+`/workspace` → `ok:true`, 4.9 MB PNG, unaffected.
+
+### G14. `capture.mjs` refuses to add one pose to a directory that already holds others
+**Files:** `tools/capture.mjs` (block above the integrity gate; `--allow-stale` in `KNOWN_FLAGS`)
+
+`tools/shotcheck.mjs` diagnoses this and is wired into **nothing** — not `preflight`, not
+`postflight`, not CI, not a wave script. Its own docblock states the mechanism: this file
+never clears `--outdir`, and `score.mjs` measures *every* `ref_*.png` it finds there, so
+`node tools/score.mjs --pose ref_00450` — the second invocation in `score.mjs`'s own
+docblock — captures one pose into `shots/latest` and averages it with eight frames from
+whenever that directory was last full. Every existing gate passes: capture exits 0, all
+three integrity channels are clean (the stale frames came from a build that was also
+complete), `n` is still 9 so `historycheck`'s pose-count check is satisfied, and the row is
+indistinguishable from a real one.
+
+It is on disk right now. `shotcheck` reports `shots/latest` — 9 frames spanning **18,810 s**,
+eight at `2026-07-30 16:49:02` and one at `22:02:32` — and `scores/rescore_latest.json` was
+written from that mixture with `"n": 9`.
+
+The refusal is deliberately narrow, because `shots/latest` is also the machine's junk drawer
+(`ab_*.png`, `ch_*.png`, probe output): it fires only when a single `ref_NNNNN` pose is
+written into a directory that already holds a *different* `ref_NNNNN.png`. `--all` rewrites
+the whole set, `--out` writes one named file, `--video` writes a numbered sequence, and a
+non-`ref_` probe pose is never scored — none of those can produce the mixture and none of
+them trips it. `--selftest-integrity` is excluded so the CI verification step stays green.
+Exit 6. Escape hatch: `--allow-stale` / `HALO_ALLOW_STALE=1`.
+
+**Proof it fires:** `node tools/capture.mjs --pose ref_00450 --outdir shots/latest --settle 8`
+→ exit 6, naming the eight frames it would not have rewritten. With `--allow-stale` it
+proceeds past the gate. `--all` into the same directory is unaffected.
+
+### G15. `tools/advisory.mjs` — a crashed check is no longer the same colour as a passing one
+**Files:** `tools/advisory.mjs` (new), `.github/workflows/preflight.yml` (four `|| true`
+steps replaced by one), `package.json` (`advisory`)
+
+CI ran its four trust checks as `node tools/citecheck.mjs --warn || true`, etc. `|| true`
+discards the one bit that says whether the check ran at all: a tool that dies on startup —
+a hand-edited `tools/refuted.json` that no longer parses, a renamed input — is swallowed
+exactly like a clean pass and the job stays green.
+
+That is this project's signature failure, not a hypothesis. Round 5 of this ledger is titled
+"the check that cannot fail" and found that `citecheck` "had a **second** way of never
+measuring anything"; `KNOWN_ISSUES` §28's own reproduction runs `git show <bad> | grep -c`,
+which prints `0` for a dangling SHA — "indistinguishable from a true negative". Wrapping the
+guardrails in `|| true` rebuilds the same hole one level up.
+
+The wrapper keeps the exit code and uses the convention already documented in `provcheck`,
+`dupcheck`, `scalecheck`, `shotcheck`, `axischeck` and `contracts`: `0` ok, `1` findings,
+`>= 2` the tool broke. Findings stay advisory and never turn CI red. Exit `>= 2`, death by
+signal, or a Node stack trace on stderr (uncaught exceptions exit 1, colliding with
+"findings", so the trace is matched directly) is reported as **BROKE** and exits 1.
+`shotcheck --warn` is in the default set, which is how G14's evidence above was produced.
+
+**Proof it fires:** the four real checks → `advisory ok — 4 check(s) produced a result`,
+exit 0, with `shotcheck`'s `shots/latest` finding printed and advisory. A deliberately
+crashing command → `BROKE  — uncaught exception (exit 1)`, exit 1.
+
+### G16. The pre-commit gate covers the instruments and the record, not only `src/`
+**Files:** `tools/stagedcheck.mjs` (new), `.githooks/pre-commit` (second line)
+
+Round 7's "Noticed, not done" named this. `.githooks/pre-commit` inspected staged `src/**.js`
+only, so `tools/*.mjs`, `tools/*.py` and every `*.json` / `*.jsonl` committed unchecked —
+including the files the measurements are made *with* and the file they are recorded *in*.
+`scores/history.jsonl` is the only longitudinal record, **17** files under `tools/` and
+`docs/` read it, and it is hand-edited: its last row is a hand-typed `{"tag": "== POSE REFIT
+LINE ==", ...}` marker somebody added after the fact. `tools/refuted.json` and
+`tools/contracts.json` are hand-written registries whose only job is to make a gate fire; a
+malformed one does not make the gate loud, it makes the gate crash — which until G15 above
+CI printed and then discarded. `tools/checkpoint.md`'s own warning ("an agent killed
+mid-edit can leave a file that does not parse... it took the whole build down twice here")
+was never specific to `src/`.
+
+Same staged-blob technique and the same reason as `parsecheck-staged.mjs`: `git show :<path>`
+is the exact bytes about to become a commit, and with a dozen agents on one checkout the
+working copy of an unrelated file is routinely mid-write (§16). `node --check` for JS,
+`python -m py_compile` for Python (skipped, never failed, if no interpreter is present),
+`JSON.parse` per file and per JSONL line, plus a missing-trailing-newline check on JSONL
+because the next append would then land on the same line and corrupt both rows. Fail-open on
+its own errors. `git commit --no-verify` still bypasses everything, as `2651d8c` needed.
+
+**Proof it fires, and does not cry wolf:** in a scratch git repo, a truncated `.mjs`, a
+broken `.py`, a trailing-comma `.json` and a half-written `.jsonl` row are all four reported
+and exit 1. Staging **every** real `tools/*.mjs`, `tools/*.py`, `tools/*.json`,
+`scores/*.json`, `scores/*.jsonl` and `package.json` in a scratch repo → exit 0, no false
+positives.
+
+### Proof of no harm (round 10)
+`node tools/parsecheck.mjs` → 0, "42 files parse, no GLSL template hazards".
+`node tools/capture.mjs --pose ref_00000 --out /tmp/meta_smoke.png --settle 8` → 0, 4.9 MB
+PNG, all three integrity channels empty, 5.2 s via daemon.
+`npm run selftest` → `detected 3, expected 3`. `node tools/advisory.mjs` → 0.
+No `src/` file was read for anything but parsing, and none was written.
+
+### How to revert
+`git checkout -- tools/capture.mjs .githooks/pre-commit .github/workflows/preflight.yml
+package.json && rm tools/advisory.mjs tools/stagedcheck.mjs`. Nothing else reads any of it.
+
+### Noticed, not done (round 10)
+
+* **`shots/latest` is still a mixture** — 9 frames 5 h 13 m apart, and
+  `scores/rescore_latest.json` was written from it with `"n": 9`. G14 stops the *next* one;
+  it deletes nothing, because a stale frame is evidence. Whoever owns that number should
+  either re-capture the set into a fresh tag or annotate `rescore_latest` as uncomparable.
+  Any report quoting it is quoting an average across two builds.
+* **`--rescore` bypasses G14 entirely**, because it takes no capture at all — it measures
+  whatever PNGs are already in the directory. `score.mjs` is the only place that could gate
+  it (one `shotcheck` call before it measures), and it is owned elsewhere. **NEEDS:
+  `tools/score.mjs`** — before the `readdirSync(...ref_\d+\.png...)` line, run
+  `node tools/shotcheck.mjs <outdir>` and refuse a `--rescore` over a directory that holds
+  more than one capture, unless `--allow-stale`.
+* **The daemon-root refusal cannot help the standalone path**, which boots its own vite from
+  `ROOT` and is correct by construction — but `HALO_NO_DAEMON=1` is now load-bearing for
+  scratch-tree work and appears in exactly one place an agent will read it: G13's own error
+  message. That is the right place; noted so nobody deletes it from the string.
+* **`stagedcheck` does not validate JSONL *schema*, only syntax.** A row with the right
+  braces and the wrong keys (a `history.jsonl` row missing `axes`, say) commits clean.
+  `historycheck.mjs` is where that belongs and it already runs in CI; not duplicated here.
+* **Nothing still gates on `preflight` at capture time.** A concurrent wave added a loud
+  NOTE to `capture.mjs` when no preflight stamp exists for the tree, which is the right
+  first step. Turning the note into a refusal costs ~1.7 s per invocation and `capture.mjs`
+  is spawned in loops by `knobcheck`, `nulltest`, `ablate` and `previewsheet`; it needs a
+  per-tree cache keyed on the `src/` content hash before it can be a gate, not a drive-by.
+
+---
+
+## Installed 2026-07-31 — round 10 (lens: recurrence)
+
+Four failures that happened **more than once**, none of them gated. Round 7's C1–C3 covered
+the backtick trap, the voided frame-time numbers and the dead `--skip` flag; these are the
+next four, found by reading every `reports/*.md` for the words an agent writes when they
+have just rediscovered something.
+
+### E1. `tools/nulltest.mjs` — the ALIVE verdict now has a control leg
+**Files:** `tools/nulltest.mjs` (one block on the ALIVE path, new exit code 4)
+
+nulltest declares `ALIVE — tuning it is meaningful` on any byte difference between the two
+arms. That is only evidence if two captures of the *same* build would have been identical,
+and at some poses they are not:
+
+* `reports/vegetation.md` §"FIRST: the renderer is non-deterministic again" — two
+  back-to-back captures of the identical build at `ref_00720` differ in **50.0% of pixels**;
+  with `--skip vegetation` still **38.5%**. "This is blocking for everyone: it puts a noise
+  floor under every A/B in the project."
+* `reports/taa.md` §4 — a ~0.63 mean / **55%-of-pixels ±1** floor exists between *any* two
+  frames.
+* KNOWN_ISSUES §16 — a determinism check returned BROKEN purely because `structures.js` was
+  saved between the two captures.
+* Round 7's C3 is the same coin's other face: `reports/vegetation.md`'s `--skip bloom`
+  control read "differs at byte 44" as proof the mechanism worked, when byte 44 *is* that
+  nondeterminism — and the arm skipped nothing anyway, because `--skip` never reached a
+  pass (retracted in `tools/refuted.json`; `tools/capture.mjs` exits 2 on it today).
+
+Every "determinism re-verified bit-exact" note on record (§10, and the Wave G and Wave H
+status blocks) was measured at **`ref_00000`** — nulltest's default pose — and read as a
+whole-project property. Where it does not hold, the DEAD branch is unreachable and ALIVE
+prints no matter what the subject does: a PASS that cannot fail, the §4/§9/§28 shape.
+
+Now: on the ALIVE path only, the ON arm is captured a second time and byte-compared. If the
+control differs, the verdict is **UNDETERMINED (exit 4)**, naming both causes in order
+(`src/` churn per §16 first, genuine pose nondeterminism second) and pointing at
+`tools/ablate.mjs`, which toggles inside one page load and has no between-capture window.
+`tools/knobcheck.mjs:246` already ran this control for `--ab`; nulltest did not.
+Cost: one extra capture, and only where the verdict is at stake.
+
+### E2. `--settle` must be a multiple of 16 — `capture.mjs` says so before the capture
+**Files:** `tools/capture.mjs` (one warning, advisory)
+
+`reports/taa.md` §4 measured it: with a fixed `α = 0.09` the converged still is **periodic
+with period 16**, not a fixed point. Phase-matched frames (48/64/96/128) agree to 3 code
+values; **48 vs 49 differs by up to 53 code values** on exactly the high-contrast rock/sky
+silhouettes `detail` and `structure` look at. That report's own words: *"Anyone who just
+bumps the settle to 50 will move scores and blame their own subsystem."* KNOWN_ISSUES §26
+priced the class at **0.52 composite points** (`waveG` vs `waveG-settle96`, identical code)
+and **−3.55 on `ref_01500`** alone.
+
+It has already happened at least three times and every number is still quoted as a result:
+`reports/characters.md:73` and `:141` (the whole character A/B at `--settle 24`),
+`reports/sky.md:167` (`--settle 24`), `docs/KNOWN_ISSUES.md:308-309` (§9's `exposureEV` A/B
+at `--settle 40`). **24 and 40 are both phase 8** — half a period from the settle-48
+baseline every row in `history.jsonl` uses. G11's `provcheck` records the settle *after* the
+fact by joining provenance to the history row; this says it before the capture is spent.
+
+Advisory, one line, and **silent below 16** — a value that has not completed one TAA period
+is obviously a smoke capture (`--settle 8` is this repo's own smoke command), and a gate
+that fires on the project's canonical green command is the I1 cry-wolf failure.
+
+### E3. An argv token containing whitespace is fatal
+**Files:** `tools/capture.mjs` (one check inside the existing argument-hygiene block)
+
+`reports/ocean_waveH.md` §1: *"zsh does not word-split an unquoted `$args`, so a scripted
+sweep silently passes `"--skip ocean"` as one token and every variant comes back
+byte-identical."* Every arm of that battery was the shipped build. The existing unknown-flag
+*warning* fired and the capture still exited 0 with a perfectly normal frame; the
+`--only`/`--skip` name check could not see it, because `arg('skip')` never matched and
+`OPT.skip` stayed null. Byte-identical is also the signature of an inert pass
+(`skip-flag-can-disable-a-pass`), and this project has confused the two at least four times
+(C3). This is the second zsh-quoting hazard on record after R5-A's `:s` modifier.
+
+Fatal (exit 2), zero false positives by construction: no flag this file defines contains a
+space. Verified: `node tools/capture.mjs "--skip ocean"` → exit 2; every legitimate command
+in the repo unaffected.
+
+### E4. `tools/roicheck.mjs` + `tools/roi_notes.json` — what is actually in the crop
+**Files:** `tools/roicheck.mjs` (new), `tools/roi_notes.json` (new), `package.json`
+(`roicheck`, `contracts`)
+
+The ROI regions are **fixed screen rectangles, not semantic masks**. That caveat is written
+down three times — `docs/TARGETS.md:47`, `docs/LOOP.md:171`, `docs/KNOWN_ISSUES.md:110` —
+and attached to nothing, so **four agents rediscovered it independently**, each into their
+own report where the next agent could not see it:
+
+| report | what they found |
+|---|---|
+| `reports/sky.md:17` | "`sky_sun` at ref_00720 **is not sky**" — the crop is terrain |
+| `reports/clouds.md:310` | "That crop is not sky. At ref_00000 it contains sea stacks and cliff" |
+| `reports/weapons.md:279` | "Do NOT tune to `ref/roi_signatures.json`'s `weapon` row. It is a clip mean over a screen rectangle that is ~65% sand" |
+| `reports/ocean.md:115` | "This is the **third time in this file's history** that a number was measured against something that was not water" |
+
+**A statistical gate was tried first and rejected on measurement.** A robust-z outlier scan
+of `lap_var`/`lum_mean` per region over the nine scored keyframes does **not** reproduce any
+of the four findings — `sky`@`ref_00000` reads −0.5σ and `sky_sun`@`ref_00720` reads −2.2σ,
+while the loudest outliers (`rock`@`ref_01500`, +13σ) are crops doing exactly their job. A
+check that fires on the wrong regions and misses every documented one is the `addStatic\(`
+lesson from round 9. So the registry is hand-written and quotes its source, same shape as
+`tells.mjs` and `contracts.mjs`.
+
+`--drift` is the part that *is* mechanical and runs on every invocation: the REGIONS rect
+table is duplicated verbatim in **four** files (`tools/roi.py`, `_imdiff.py`, `_cloudstat.py`,
+`_vegmask.py`) and `ref/roi_signatures.json` + `docs/TARGETS.md`'s published targets were
+computed through `roi.py`'s copy. They agree today on every shared key; a copy that drifts
+silently stops being comparable to the published target. A region local to one tool
+(`_cloudstat.py`'s `zenith`) is reported as a note, not a failure — nothing published is
+measured through it.
+
+Live finding from `--audit`: **`characters.md`, `depthfx.md` and `postfx.md` all quote the
+`weapon` region** without citing the caveat that it is ~65% sand.
+
+### E5. `world-material-hook` registered in `tools/contracts.json`
+**Files:** `tools/contracts.json` (one entry)
+
+`applyWorldMaterial` ends by calling `lighting.registerMaterial()` → three's
+`CSM.setupMaterial()`, which does a bare `material.onBeforeCompile = …` with no chaining and
+**discards the hook `applyWorldMaterial` installed one line earlier**.
+
+`reports/weapons.md:267` found it from the viewmodel side in wave 1 and wrote *"This affects
+every world material in the project, not just the viewmodel — not my file to fix."*
+`reports/characters.md:35` found it **again** from the actor side a wave later: *"reports/
+weapons.md found the same bug from the viewmodel side in an earlier wave … It is still
+unfixed centrally."* Consequence measured there: `aFx` per-vertex roughness/metalness never
+reached the BRDF, so every actor surface shaded at the base `roughness 0.6 / metalness 0.1`
+— "one matte plastic for the whole cast" — and `characters.md:224`/`:270` record constants
+then tuned against that fallback shade. `props.js:618`, `vegetation.js:414`,
+`terrain.js:1481` and `rocks.js:1735` each carry their own local comment explaining the
+stomp: five files, five independent discoveries, no sibling list.
+
+`node tools/contracts.mjs world-material-hook` now prints all **10** implementers with line
+numbers. Verified the pattern is scoped to call sites: `env.js`, `ocean.js` and `ssao.js`
+mention `applyWorldMaterial` only in prose and are correctly not listed.
+
+### Proof of no harm (round 10)
+`node tools/parsecheck.mjs` → exit 0, "42 files parse, no GLSL template hazards".
+`node tools/capture.mjs --pose ref_00000 --out /tmp/meta_smoke.png --settle 8` → **exit 0**,
+`"ok": true`, `"via": "daemon"`, all three integrity channels empty, 4.9 MB PNG, and **no new
+warning on stderr** (settle 8 is below the multiple-of-16 check by design).
+`node tools/parsecheck-staged.mjs` → 0. `node tools/preflight.mjs` → **exit 0**, 12/12 checks
+ran, the same 4 advisories as before this round. `package.json` re-serialised and re-parsed;
+the concurrent wave's `blindcheck`/`advisory` entries preserved. No `src/` file was read for
+edit. `tools/metrics.py`, `tools/score.mjs`, `tools/blind.mjs`, `docs/LOOP.md` and
+`docs/KNOWN_ISSUES.md` were **not** touched. No measurement changed semantics, no band moved,
+nothing new runs inside the capture loop.
+
+### How to revert
+`git checkout -- tools/capture.mjs tools/nulltest.mjs tools/contracts.json package.json`
+and `rm tools/roicheck.mjs tools/roi_notes.json`. Nothing else reads any of it; `roicheck`
+and `contracts` are not wired into preflight, postflight or CI.
+
+### Turn one thing off
+1. E2 is a `process.stderr.write` — delete the `if (OPT.settle >= 16 …)` block.
+2. E3 — delete the `glued` block; the pre-existing warning for the same token stays.
+3. E1 — delete the control-leg block; `const ctl = …` down to `process.exit(4)`.
+4. E4/E5 cannot block anything: they are hand-run and exit 0 except on a direct lookup of a
+   flagged region (exit 1) or genuine rect drift.
+
+### Noticed, not done (round 10)
+* **`--settle 48` is the whole history's phase, and `tools/knobcheck.mjs` defaults to 16.**
+  Both are multiples of 16 so neither warns, but they are *different* phases of the same
+  limit cycle, and a knobcheck arm is therefore not comparable to a scored capture. Not
+  changed: altering knobcheck's default moves numbers already written into reports.
+* **The `weapon` ROI is ~65% sand and three reports quote it anyway** (`--audit` above).
+  **NEEDS: `reports/characters.md`, `reports/depthfx.md`, `reports/postfx.md`** — one line
+  each: *"the `weapon` region is a screen rectangle that is ~65% sand
+  (`reports/weapons.md:279`); this number is not a viewmodel measurement."*
+* **Nothing has ever recorded the run-to-run spread of a score axis.** `reports/metrics.md`
+  §6.1: *"nobody has ever run the same build twice and recorded the run-to-run spread of any
+  axis. Until someone does, no single-wave composite delta under about 2 points should be
+  believed — mine included."* E1 gives the per-frame version of this for one pose; the axis
+  version needs two full scored runs of one unchanged tree and an owner willing to spend
+  them. That is the single cheapest thing that would make every wave's headline number
+  interpretable, and it is still not on disk.
+* **The `world-material-hook` fix is a `src/` change with no owner.** Chain the hook in
+  `src/render/lighting.js:83`'s `registerMaterial`, or in `src/gfx/materialCommon.js:126-127`
+  — one place, ten callers. Every local workaround in `props/vegetation/terrain/rocks` can
+  then be deleted. Not attempted here: `src/` is owned elsewhere.
+
+---
+
+## Installed 2026-07-31 — round 10 (lens: trust — the two documents nobody ever checked)
+
+Rounds 2, 6 and 8 gated the *written record about measurements* (do citations resolve, do
+refuted claims stand, are the units one scale). This round went after the two documents that
+are **inputs to the work rather than reports about it**, and which no instrument has ever
+read: `docs/API.md` (what every module author codes against) and `README.md`'s rebuild recipe
+(the only instruction any second machine will ever have for producing the ground truth).
+Both are wrong today, and both were wrong silently.
+
+### V1. `tools/apicheck.mjs` — "These signatures are frozen" is now a checkable claim
+**Files:** `tools/apicheck.mjs` (new), `tools/preflight.mjs` (check 11, **advisory**),
+`package.json` (`apicheck`)
+
+`docs/API.md` opens with *"**These signatures are frozen.** If you own a module below, you
+must implement its interface exactly."* Nothing has ever verified that sentence. It matters
+more here than in a normal codebase because the same document tells every consumer to guard
+each call — `const y = terrain ? terrain.height(x, z) : 0` — which is correct for a module
+that did not load and **silently swallows a member that was never implemented**. `undefined`
+propagates as a fallback, never as an error. Same class as §12 (every collider `rocks.js`
+produced was silently discarded) and S1 (`H.setConfig(obj)` wrote `config['[object Object]']`
+and "returned quietly").
+
+**Live finding — three members of the `sky` contract do not exist in `src/world/sky.js`:**
+
+| documented (`docs/API.md:36`) | readers | consequence |
+|---|---|---|
+| `sky.envTexture` — "equirect or cube, HDR, for PMREM" | 0 | contract documented, unused both sides |
+| `sky.horizonColor` — "used by aerial perspective + fog" | 0 | same |
+| `sky.needsEnvUpdate` — "set true when the sky changes" | **1** | `src/render/env.js:724` runs `if (sky?.needsEnvUpdate) { dirty = true; force = true; … }` every frame. `sky.js` never sets it, so **the documented "re-capture the env probe when the sky changes" handshake can never fire.** `env.js` falls back to its own `sunMoveDeg` heuristic plus a time floor, so nothing errors and nothing says so. |
+
+The check is a **name test**, not a signature test, on purpose: a name test has zero false
+positives across all 15 documented modules (verified — only the three above are flagged),
+while anything cleverer needs a parser and starts inventing findings. It also verifies every
+documented `ctx.emit('a:b')` bus event has an emitter in `src/` — all 9 do today.
+
+**Not fixed here.** Implementing `needsEnvUpdate` is a `src/` change owned by a rendering
+wave. **NEEDS: `src/world/sky.js` or `docs/API.md`** — either set the flag where the sky
+changes, or delete the three lines from the frozen contract. Do not leave the contract
+describing code that is not there.
+
+### V2. `tools/refcheck.mjs` — the ground truth's shape, and whether anyone can rebuild it
+**Files:** `tools/refcheck.mjs` (new), `tools/preflight.mjs` (check 10, **advisory**),
+`package.json` (`refcheck`)
+
+T3 (`refstamp`) fingerprints whatever `ref/` is on disk — the right tool for "did *my*
+reference drift". It structurally cannot catch this one: on a fresh machine you generate the
+manifest **from your own rebuilt `ref/`**, and it certifies itself green.
+
+**The claim in the docs that is wrong — `README.md:31-33`.** Run verbatim, the documented
+rebuild recipe does not reproduce this reference set:
+
+```
+$ ffmpeg -i reference.mp4 -vf "select='not(mod(n,15))'" -vsync 0 \
+         -frame_pts 1 -frames:v 2 <scratch>/kf_%05d.png     # README.md, verbatim
+  -> kf_00000.png   3840x2160,  6.0 MB
+$ ref/keyframes/kf_00000.png
+  -> 1920x1080,  2.5 MB          (all 157 keyframes on disk are 1920x1080)
+```
+
+That is not cosmetic. `tools/metrics.py:298` resizes the **test** image to the **reference's**
+size — `test = load(test_path, size=(ref.shape[1], ref.shape[0]))` — so a 4K `ref/` silently
+upscales every 1080p render 2x before scoring. `detail`, `lap_ratio`, `edge_ratio` and
+`ms_ssim` all move, nothing errors, nothing warns, and the numbers are quietly incomparable to
+every row in `history.jsonl`. §26 with a much bigger lever.
+
+Two more defects in the same three-line block, measured the same session:
+
+* `.venv/bin/python tools/roi.py --all ref/keyframes ref/rois` — `roi.py --all` takes an
+  **image**, not a directory (`cv2.imread(<dir>)` returns `None` →
+  `AttributeError: 'NoneType' object has no attribute 'shape'`, reproduced), and writes to
+  `ref/rois` while the tree has `ref/roi`. Run verbatim it crashes.
+* That line is captioned *"regenerate signatures"* — but `roi.py` writes crops, not
+  signatures. `grep -rn roi_signatures tools/` returns three **readers** (`_pfx.py:15`,
+  `nullcheck.py:222`, `refstamp.mjs`) and **no writer**. `ref/roi_signatures.json` has no
+  generator in this repository, and neither does `ref/baseline.json` — the AAA ceiling
+  `docs/TARGETS.md` and `docs/ARCHITECTURE.md` quote as a pass criterion (see U3), nor
+  `ref/detail/*_4k.png`.
+
+So the honest status of the reference set is **MEASURED for the tree on this disk,
+UNREPRODUCIBLE anywhere else**, and the tool now says that mechanically instead of in prose.
+`refcheck` checks keyframe geometry against the live capture geometry (read from G2's
+`_capture.json` `opts.w/h`, falling back to `capture.mjs`'s parsed defaults), the presence of
+every artifact something reads, which artifacts have no generator, and both directions of the
+README recipe (a `ref/` path named there that is not on disk; a required artifact the recipe
+never mentions). `README.md` was **not edited** — it is not this round's file, and the
+correction it needs is a measurement someone must own, not a rewording.
+
+### V3. `tools/registrycheck.mjs` — the disproof registry is not exempt from the disproof registry
+**Files:** `tools/registrycheck.mjs` (new), `tools/advisory.mjs` (one line in `DEFAULT`),
+`package.json` (`registrycheck`)
+
+`claimcheck` scans `reports/*.md` and `docs/*.md`. It does not scan `tools/refuted.json` —
+and that file is not passive data: claimcheck **prints its `claim` / `refutedBy` / `truth`
+fields verbatim** as the authoritative explanation an agent reads when a claim fires. It is
+the most-read prose in the trust chain and the only prose nothing checks.
+
+**Live hit, exactly one, no false positives.** `fog-owns-desaturation.refutedBy` reads
+*"reports/vegetation.md:49 is the primary measurement — `--skip volumetricFog` produced a
+BYTE-IDENTICAL PNG at ref_00720 (with `--skip bloom` as the control, proving the skip
+mechanism works)"*. Every clause of that is refuted by a **different entry in the same file**,
+`skip-flag-can-disable-a-pass` (round 7, C3): `PASS_MANIFEST` never consults `skip`, so the
+arm *and its control* skipped nothing and byte-identical was guaranteed. C3 corrected the
+ledger's prose (T2b item 1 carries the strike-through) and left the registry field standing,
+so `claimcheck` still teaches every agent the void experiment as "the primary measurement".
+**A disproof that stops at the document that wrote it is §19 — and this is §19 inside the tool
+built to stop §19.**
+
+The conclusion of `fog-owns-desaturation` is not in question: §18 measured the real cause and
+stands on its own. What is void is one piece of its cited evidence.
+
+**NEEDS: `tools/refuted.json`** — replace that `refutedBy` with the §18 depth-clear evidence,
+which was measured properly: *"docs/KNOWN_ISSUES.md §18: `scene.js` cleared the depth texture
+shared with the G-buffer, so every world pixel integrated 460 m of haze; fixing it moved
+`sat_mean` 55.66 → 61.66. (The earlier `--skip volumetricFog` byte-identical result is void —
+`skip-flag-can-disable-a-pass`.)"* **Verified in a scratch copy: that text takes
+`registrycheck` to `ok`, exit 0 under `--strict`.** Not applied here because the same sentence
+is the registered `refutedBy` a concurrent wave is being asked to land into
+`docs/KNOWN_ISSUES.md` §8 via T2c, and the two must move together.
+
+Advisory by default (`--strict` for a human), for round 6's stated reason: this reads prose
+and judges it by regex, and its failure mode is blocking an agent over a sentence. An entry is
+never flagged for **naming** another entry's id — that is a cross-reference, not a repeat.
+
+### Proof each gate fires
+Fixtures built in `/tmp` scratch trees (`src tools docs` only, 2.1 MB — never a `tar` of the
+repo, per round 5), never inside the repository:
+
+| tool | test | result |
+|---|---|---|
+| `apicheck` | real tree | **exit 1**, the 3 `sky` members, `needsEnvUpdate` shown with its reader |
+| | doc corrected (3 lines deleted) | `ok — 15 module contract(s)`, **exit 0** |
+| | member documented for a module with no file in `src/` | **exit 0**, reported as "not landed", not as a defect |
+| | a documented `ctx.emit('ghost:event')` nobody emits | **exit 1**, named |
+| | `--warn` on the failing real tree | **exit 0** |
+| `refcheck` | real tree | **exit 0**, `ref/` at 1920x1080 ×157, README defects listed advisory |
+| | scratch `ref/` holding the **real** README-produced 4K frame | **exit 1**, `1 of 2 keyframe(s) are not 1920x1080` |
+| | same, `--warn` | **exit 0** |
+| | `ref/roi_signatures.json` deleted | **exit 1**, `MISSING … required by tools/_pfx.py:15` |
+| | 4K frame removed again | **exit 0** — not stuck failing |
+| `registrycheck` | real registry | 1 hit, `fog-owns-desaturation.refutedBy`, exit 0 / `--strict` **exit 1** |
+| | registry with the §18 evidence substituted | `ok — 5 registry entr(ies)`, **exit 0** |
+| | `tools/refuted.json` replaced with non-JSON | **exit 2** (BROKE, not a silent pass — `advisory.mjs` reddens on it) |
+
+### Proof of no harm
+`node tools/parsecheck.mjs` → `ok — 42 files parse, no GLSL template hazards`, exit 0.
+`node tools/capture.mjs --pose ref_00000 --out /tmp/meta_smoke.png --settle 8` → exit 0,
+`"ok": true`, all three integrity channels empty.
+`node tools/preflight.mjs` → exit 0. `node tools/advisory.mjs` → exit 0, 5 checks produced a
+result. `package.json` parses. No `src/` file was opened for edit; `tools/metrics.py`,
+`tools/score.mjs`, `tools/blind.mjs`, `docs/LOOP.md` and `docs/KNOWN_ISSUES.md` were not
+touched; no band, weight or metric changed; nothing new runs at capture time.
+
+### How to turn it off
+1. All three exit 0 under `--warn` (`refcheck`, `apicheck`) or by default (`registrycheck`).
+2. Both preflight checks are `add(..., false)` — advisory, they can never fail a wave — and
+   each is wrapped in `existsSync`, so deleting the tool makes the check disappear silently.
+3. Full revert: `rm tools/refcheck.mjs tools/apicheck.mjs tools/registrycheck.mjs`, drop the
+   three script lines from `package.json`, `git checkout -- tools/preflight.mjs
+   tools/advisory.mjs`. Nothing else imports any of it.
+
+### Noticed, not done (round 10)
+* **`refcheck`'s README audit is path-existence only.** It cannot tell that
+  `tools/roi.py --all ref/keyframes …` passes a directory where an image is required — that
+  was found by *running* the line. A general "does this documented command actually run"
+  gate is the obvious next step and is much bigger than a path test; the specific defect is
+  written into the tool's docblock so it survives.
+* **`ref/frames_full/` and `ref/contact_sheet.png` are on disk, read by nothing I could find,
+  and named in no document.** Left out of the required inventory rather than guessed at.
+* **Nothing checks `docs/WORLD.md`, `docs/WEAPON.md` or `docs/ARCHITECTURE.md` against
+  `src/`** the way `apicheck` now checks `docs/API.md`. API.md was picked first because it is
+  the only one that declares itself frozen and the only one whose consumers are told to guard
+  every call.
+* **`apicheck` verifies presence, never behaviour.** `terrain.height()` returning `NaN` past
+  the sea stacks — which API.md explicitly requires to be defined everywhere — is invisible
+  to it, and is exactly the kind of thing a `NaN`-to-framebuffer defect (§24) starts as.
+
+---
+
+## Installed 2026-07-31 — round 10 (lens: adherence — the rule with no command, and the command that could not fail)
+
+Round 8 measured the brief against the reports and bundled the report-side rules into
+`postflight`. This round asked the same question of the *machine* side: which gates are
+actually reached by the commands people type, and does the hard one still fail when it
+should. Two of the four findings are that a gate exists and nothing routes to it; the
+fourth is that the project's only hard gate has been unable to fail for as long as this
+machine has been on Node 26.
+
+### A11. `tools/parsecheck.mjs` could not detect a syntax error in ANY file under `src/`
+**Files:** `tools/parsecheck.mjs`, `tools/parsecheck-staged.mjs` (one argument each)
+
+`node --check <file>.js` **exits 0 on a file that does not parse** whenever that file
+contains ESM syntax (measured, Node v26.5.0). `package.json` is `"type": "module"` and 42 of
+42 files under `src/` open with `import`, so the parse gate — the **hard** check `preflight`
+blocks on, the check `.githooks/pre-commit` enforces, the tool written for §20 and cited in
+`docs/AGENT_BRIEF.md`, `docs/LOOP.md` §4 and `blind.mjs --capture` — has been structurally
+incapable of failing on this codebase.
+
+Measured, in a scratch copy of `src/` under `/tmp` (never in the repo):
+
+```
+$ printf '\nthis is not javascript at all\n'  >> /tmp/ptest/src/world/ocean.js
+$ printf '\nconst broken = ;\n'               >> /tmp/ptest/src/render/passes/volumetricFog.js
+$ node tools/parsecheck.mjs
+ok — 42 files parse, no GLSL template hazards          <- exit 0
+$ node -e "import('/tmp/ptest/src/world/ocean.js')"
+SyntaxError: Unexpected identifier 'is'                 <- the module is dead
+```
+
+That is §20 exactly — `ocean.js` stops parsing, `src/modules.js` skips it silently, the
+subsystem vanishes from every frame and gets scored anyway (Waves F and G) — passing green
+through the gate built to stop §20. `reports/ocean_waveH.md` §1a already recorded a stray
+backtick that "got past `node --check`" and attributed it to an even number of strays
+re-closing the template (C1's hole, fixed in round 7). This is a second, wider mechanism
+under the same symptom, and C1's scan only covers `/* glsl */` templates.
+
+The pre-commit hook had the same hole through `parsecheck-staged.mjs`, which wrote the
+staged blob to a scratch `*.js`. A/B on one fixture in a throwaway git repo under `/tmp`
+(a copy of this repo's ocean module, staged at src/ocean.js there, with garbage appended):
+**`git show HEAD:tools/parsecheck-staged.mjs` → exit 0** (commit allowed),
+patched → exit 1 (commit blocked, correct §20 message). `tools/stagedcheck.mjs:83` already
+forced `.mjs` on its own scratch copies "// force ESM parse", so the instruments were
+covered and only `src/` was exposed.
+
+**Fix:** parse it as a module — `--input-type=module --check -`, source on stdin, no temp
+file, nothing executed. Module mode *only*, not both modes: `"type": "module"` makes the
+module goal the correct parse, and keeping the old file-mode check would be a false-positive
+generator on any Node that does not auto-detect ESM (CI pins node 22), where
+`node --check ocean.js` reports `Unexpected token 'export'` on a perfectly good file.
+Verified: real tree 42/42 pass, exit 0, **0.96 s** (was 0.79 s); broken scratch tree names
+both files with correct line numbers, exit 1.
+
+### A12. The gate that ran for nobody — `preflight` is wired only to `npm run`
+**Files:** `tools/preflight.mjs` (writes `.preflight-stamp.json`), `tools/capture.mjs`
+(reads it, prints a NOTE), `.gitignore`, `docs/AGENT_BRIEF.md`
+
+G3 made preflight one command and wired it as `precapture` / `prescore`. Nobody invokes it
+that way: across `reports/` and `docs/`, **31** sites run `node tools/capture.mjs` or
+`node tools/score.mjs` directly against **3** that mention the npm form — including
+`docs/LOOP.md` §4 ("what to do every wave"), which runs `node tools/score.mjs --tag waveX`,
+and every proof-of-no-harm in this ledger. Neither `capture.mjs` nor `score.mjs` runs
+preflight itself. So posecheck (§17.1), reference coverage (a smaller `n` written to
+history with no warning), §16 quiescence, §27's wedged daemon and §29's load check have
+been gating a path nobody walks.
+
+Preflight now leaves `.preflight-stamp.json` (gitignored: it describes one tree at one
+instant) and `capture.mjs` prints one NOTE when it is absent, failed, or older than the
+newest `src/**.js` mtime. **Advisory, and deliberately so** — the §20 outcome is already
+fatal at capture through G1's integrity channels, so this is a receipt, not a second gate.
+It runs no subprocess and launches nothing (a `stat` walk, ~2 ms), it is inside a
+`try/catch`, and it is silent while the stamp is fresh, so it cannot become wallpaper.
+Escape: `HALO_NO_PREFLIGHT_NOTE=1`.
+
+### A13. The acceptance gate has been judged once in fourteen scored runs
+**Files:** `tools/blindcheck.mjs` (new), `tools/postflight.mjs` (check 8),
+`package.json` (`blindcheck`), `docs/AGENT_BRIEF.md` (R2b-2)
+
+`docs/LOOP.md` §5.6: *"Run the blind test every wave, not at the end … Five waves were
+spent optimising proxies that a single 30-minute blind test would have invalidated on day
+one."* §5.7: *"The blind test is the score."* Measured from the two ledgers: `scores/blind.jsonl`
+holds **one** human judgement — `waveH`, whose own note says "backfilled" — against **14**
+scored runs in `scores/history.jsonl`. Four runs have landed since, including the
+29.44 → 16.85 collapse across the Wave I pose refit, and none was judged.
+
+Why: `docs/AGENT_BRIEF.md` — the file wave scripts inject — **never referenced
+`docs/LOOP.md`**, so its seven standing rules reached no agent, and no tool ever compared
+the two files. `blindcheck` is that comparison (reads two JSONL files, ~30 ms, never
+invokes `tools/blind.mjs`, which is owned elsewhere); `postflight` runs it; R2b-2 in the
+brief now points at LOOP §5.2 and §5.7 by name.
+
+### A14. `tools/reportgate.mjs` — the report-side rules get their first automatic trigger
+**Files:** `tools/reportgate.mjs` (new), `.githooks/pre-commit` (third stage, advisory)
+
+R7 provenance: 0 of 28. R9 `NEEDS:` routing: 0 of 28, against 26 prose handoffs. Round 8
+gave those rules a command (`postflight`) but no trigger — and this project's own diagnosis
+is that the failure mode is never "the check was wrong", it is "nobody ran it". Every report
+this project keeps passes exactly one machine gate: the orchestrator's commit
+(`tools/checkpoint.md`: "the orchestrator should commit after every wave"). The hook already
+inspected staged `src/*.js` and staged instruments; it now also prints, for staged
+`reports/*.md`, the R7/R9 items — capped at 12 lines, never blocking, **always exit 0**.
+It shells out to `reportlint --json` and `needscheck --json` rather than re-implementing
+their regexes, so there is one definition of each rule and this cannot drift from it.
+Escape: `HALO_NO_REPORT_GATE=1 git commit`; removal is the last two lines of the hook.
+
+### R5 in the brief named the dead instrument
+`docs/AGENT_BRIEF.md` R5 — "isolate and measure", the rule the orchestrator quotes most —
+told agents to null a term with `--skip <module>`, `--only`, or `--config <term>=0` without
+distinguishing modules from passes. `--skip <pass>` reaches no pass (C3,
+`skip-flag-can-disable-a-pass`), and `--config k=0` cannot turn off 3 of 7 `*Enabled` gates
+(S1). R5 is now a three-row table — module / pass / knob, each with the instrument that
+actually works and the one that silently does not — plus the sentence that was missing:
+**a byte-identical arm is not a result.**
+
+### Proof of no harm (round 10)
+`node tools/parsecheck.mjs` → `ok — 42 files parse, no GLSL template hazards`, exit 0.
+`node tools/capture.mjs --pose ref_00000 --out /tmp/meta_smoke.png --settle 8` → exit 0,
+`"ok": true`, `"via": "daemon"`, all three integrity channels empty, 4.9 MB PNG, no NOTE
+printed (the stamp was fresh — the correct silent case).
+`node tools/preflight.mjs` → exit 0. `sh .githooks/pre-commit` on the real tree → exit 0.
+`node tools/postflight.mjs`, `node tools/blindcheck.mjs`, `node tools/reportgate.mjs` → all
+exit 0. `node -e "JSON.parse(readFileSync('package.json'))"` → ok. No `src/` file was read
+for edit; `tools/metrics.py`, `tools/score.mjs`, `tools/blind.mjs`, `docs/LOOP.md` and
+`docs/KNOWN_ISSUES.md` were not touched; no measurement changed semantics.
+
+### How to revert
+`git checkout -- tools/parsecheck.mjs tools/parsecheck-staged.mjs tools/preflight.mjs
+tools/capture.mjs tools/postflight.mjs .githooks/pre-commit .gitignore package.json
+docs/AGENT_BRIEF.md && rm tools/blindcheck.mjs tools/reportgate.mjs .preflight-stamp.json`.
+Nothing else reads any of it. Note that A11 is the one change that should **not** be
+reverted without replacing it: reverting restores a hard gate that cannot fail.
+
+### Noticed, not done (round 10)
+* **`score.mjs` still runs no preflight and cannot be edited from here** (owned by a
+  concurrent wave). A12's NOTE reaches it only because `score.mjs` spawns `capture.mjs`.
+  Two lines in `score.mjs` — spawn `preflight --quiet`, abort on exit 1 — would make the
+  gate hard on the path that writes `history.jsonl`. Recommendation for whoever owns it.
+* **The `--check` hole is a *class*, not one bug.** Anything in `tools/` that validates
+  JavaScript by writing it to a `.js` file and running `node --check` has it.
+  `stagedcheck.mjs` is already correct; nothing else in `tools/` does this today, but the
+  next tool that does will inherit it silently.
+* **`blindcheck` counts runs, not waves.** Four `waveI-*` rows are arguably one wave. It is
+  deliberately the harsher reading: `--max-gap N` relaxes it, and the number that matters
+  (`0 human judgements since the last refit`) is unchanged either way.
+* **Nothing still verifies that the wave script injected `docs/AGENT_BRIEF.md`** rather than
+  a re-typed copy. The brief's own "what this brief still does not say" list says so; A12's
+  and A13's edits compound only if the file is what agents are actually given.
+
+## Installed 2026-07-31 — round 11 (lens: gates — the green line printed over a hole)
+
+### T4. `tools/preflight.mjs` — a delegating check must say so when its instrument didn't answer
+
+**File:** `tools/preflight.mjs` (edited only; no new file, no semantics changed on any check
+that already ran).
+
+**The recurrence this closes.** Three of preflight's ten checks delegate to another script
+instead of doing the work inline: check 2 (`posecheck` → `tools/_posecheck.mjs`), check 8
+(`provenance` → `tools/provcheck.mjs`), check 9 (`scale` → `tools/scalecheck.mjs`). Before
+this round, two of the three were wrapped in `if (existsSync(...))` / `if (d)` — when the
+sub-tool was absent, unparseable, or its JSON didn't parse, the whole `if` body was skipped
+and the check simply never appeared in `results`. `preflight ok` printed over the hole with no
+trace it had ever intended to check pose grounding or scale currency. The third,
+`provenance`, was worse: `const n = d?.incomparable ?? 0` never looked at `r.status`, so a
+`provcheck.mjs` that crashed, printed a stack trace to stdout, or was deleted still produced
+`n = 0` — and preflight printed the *positive* line, `"ok  provenance — adjacent scored runs
+share one pose set and one instrument"`, manufactured from a tool that never answered. This is
+the exact shape the ledger already names twice — T1/round-1's `git show <dead-sha> | grep -c`
+printing `0` (a true-negative's output from a command that could not run) and round-2/§9's
+`--config` arms comparing a frame with itself — one level up: a *meta*-gate silently reporting
+"the gates are fine" when a gate's own instrument is missing. It is also live-relevant, not
+hypothetical: a fresh clone is missing 22 of the 61 files in `tools/` today (round-7's
+`guardrails-committed` check, #6 in this same file, measures exactly that), so a fresh clone
+hit this hole on three checks simultaneously and `preflight ok` was still the printed verdict.
+
+**What changed.** Added `missing(name, why)`, which records the check as `ran:false` and
+prints `SKIP <name> — <why> — THIS CHECK DID NOT RUN` — always advisory (`hard:false`, per
+this file's own round-7 precedent: a gate that cannot run must be loud but must never block a
+wave, because on a fresh clone *not running* is the normal state for several of these). Wired
+into all three delegating checks:
+* `posecheck` and `scale` now call `missing()` when their script is absent instead of
+  vanishing from `results` entirely.
+* `provenance` and `scale` now require a **parseable verdict field** —
+  `typeof d.incomparable === 'number'` and `typeof d.status === 'string'` respectively —
+  before taking either the pass or the fail branch. A crash, a stack trace on stdout, or `d ==
+  null` all route to `missing()`, never to the reassuring branch.
+* The verdict line now states its own coverage: `preflight ok — 10/10 checks ran` (or however
+  many total checks exist), and a run with holes reads `preflight ok — 7/10 checks ran; 3 DID
+  NOT RUN: posecheck, provenance, scale`. `--json` gained `ran`, `total`, `notRun`.
+
+**Fire-tested**, in a scratch copy under `/tmp` built from `git archive HEAD` (never the real
+tree):
+* Deleted `tools/_posecheck.mjs` and `tools/scalecheck.mjs`, replaced `tools/provcheck.mjs`
+  with a script that `throw`s immediately (stdout empty, exit 1, no JSON — the exact shape of
+  a crashed instrument). Ran `node tools/preflight.mjs`: printed
+  `SKIP posecheck — tools/_posecheck.mjs is not on disk … — THIS CHECK DID NOT RUN`,
+  `SKIP provenance — tools/provcheck.mjs --json returned no parseable verdict (exit 1) — THIS
+  CHECK DID NOT RUN`, `SKIP scale — tools/scalecheck.mjs is not on disk — THIS CHECK DID NOT
+  RUN`, and the verdict line read `[7/10 checks ran]` — the hole is now visible instead of
+  silently absorbed into an `ok`.
+* Isolated the exact old-vs-new contrast with the three original lines standalone: fed
+  `{stdout: "", status: 1}` (a crashed provcheck) through the pre-fix logic
+  (`const n = d?.incomparable ?? 0`) and the post-fix logic side by side. Old code prints
+  `"ok  provenance — adjacent scored runs share one pose set and one instrument"`. New code
+  prints `"SKIP provenance — tools/provcheck.mjs --json returned no parseable verdict (exit
+  1) — THIS CHECK DID NOT RUN"`. Same crashed instrument, opposite claim about the tree.
+* Restored all three files in the scratch copy and reran: all 10 checks reported `ran:true`
+  again (`posecheck` itself then failed on a real defect specific to that partial
+  `git-archive` copy — expected, and itself evidence the gate isn't rubber-stamping in either
+  direction: present-and-broken still reads differently from absent).
+* Real tree, before and after this change: `node tools/preflight.mjs --json` → `total: 12,
+  ran: 12, notRun: []` both times — identical checks, identical verdicts, plus the new
+  coverage suffix on the text form. No existing check's `ok`/`hard` value moved.
+
+**No harm.** `node tools/parsecheck.mjs` → `ok — 42 files parse, no GLSL template hazards`
+(exit 0). `node tools/capture.mjs --pose ref_00000 --out /tmp/meta_smoke.png --settle 8` →
+`{"ok": true, "via": "daemon", ...}`, exit 0, PNG written (4.9 MB). No `src/` file touched.
+
+**How to run it:** it already is — `posecheck`/`provenance`/`scale` run every time `node
+tools/preflight.mjs` runs, which is every `npm run capture` / `npm run score`
+(`precapture`/`prescore`) and the pre-publish checklist. No new invocation to remember.
+
+**Turn it off:** the `missing()` branch is advisory by construction — `hard:false` — so it can
+never fail a build or block a wave on its own; the worst it does is add a `SKIP … THIS CHECK
+DID NOT RUN` line and shrink the `N/10` coverage count. If the line itself becomes a nuisance
+(e.g. deliberately not shipping `tools/_posecheck.mjs` on a lightweight clone), delete the
+three-line block that calls `missing()` for that check in `tools/preflight.mjs` and the check
+simply stops being attempted — same as before this round, minus the silent hole.
+
+## Installed 2026-07-31 — round 11 (lens: verification — does the E4 gate actually fire)
+
+### V1. E4 re-verified; the "finish it" proposal evaluated and only half-adopted
+**Files:** none changed in `tools/`, `tools/roi_notes.json` or `package.json` — this round
+added no code. `tools/roicheck.mjs`, `tools/roi_notes.json` and the `roicheck` npm script
+already existed in the working tree exactly as E4 describes them, and E4 already documents
+them; nothing here duplicates that write-up.
+
+This round was dispatched with a proposal attached: *"finish the one open item — add the
+weapon-ROI caveat citation to `reports/characters.md`, `reports/depthfx.md` and
+`reports/postfx.md`, then `git add tools/roicheck.mjs tools/roi_notes.json package.json` to
+commit the tool — reject this as redundant with E4."* Checked, not taken on faith:
+
+- **The "redundant with E4" framing does not hold.** E4's own "Noticed, not done" section
+  lists those three citations as *undone*, not done — an entry documenting a gap is not the
+  same as closing it. Rejecting the citation work as "redundant" would have been exactly the
+  kind of unverified claim this project keeps warning about propagating.
+- **The citation edits were not made anyway — not because they are redundant, but because
+  `reports/*.md` is outside this task's file allowlist** (only `tools/` new files,
+  `.githooks/*`, `.github/workflows/*`, `package.json` scripts, `docs/META_LEDGER.md`,
+  `docs/AGENT_BRIEF.md`, `.gitignore`, and the five named `tools/*.mjs` are in scope). Left
+  as a recommendation below, correctly attributed to scope, not to redundancy.
+- **The `git add`/commit step was not taken either — because no commit was requested this
+  round**, not because it is redundant. `tools/roicheck.mjs`, `tools/roi_notes.json` and the
+  `package.json` `roicheck` line remain uncommitted (`git status`: `??`, `??`, `M`) at the end
+  of this round. Whoever commits round 10/11's work should include them.
+
+**The gate was made to fail on purpose, off-repo, to check it actually catches something.**
+Copied `tools/roicheck.mjs`, `roi_notes.json` and the four `REGIONS`-table files
+(`roi.py`, `_imdiff.py`, `_cloudstat.py`, `_vegmask.py`) to a scratch tree under `/tmp`, edited
+`_imdiff.py`'s `'sand'` rect from `(0.02, 0.66, 0.55, 0.99)` to `(0.02, 0.60, 0.55, 0.99)`:
+
+```
+$ node /tmp/.../roicheck_test/tools/roicheck.mjs --drift
+REGION RECT DRIFT — 1 disagreement(s):
+  tools/_imdiff.py: 'sand' is (0.02, 0.6, 0.55, 0.99) but tools/roi.py says (0.02, 0.66, 0.55, 0.99)
+exit 1
+```
+
+Same command against the real, unmodified tree: `ok — 4 REGIONS tables agree with
+tools/roi.py on every shared region.`, exit 0. Also re-ran the two lookup paths E4 documents:
+`node tools/roicheck.mjs weapon` and `node tools/roicheck.mjs sky_sun ref_00720` both still
+exit 1 with the quoted caveat and source; `node tools/roicheck.mjs sand ref_00120` (a region
+with no recorded note at that pose) exits 0 with the "nobody has looked yet" line, not a false
+flag. `--audit` still reports the same three files (`characters.md`, `depthfx.md`,
+`postfx.md`) as quoting `weapon` without citing the caveat — the open item is still open.
+
+### Proof of no harm (round 11)
+`node tools/parsecheck.mjs` → `ok — 42 files parse, no GLSL template hazards`, exit 0.
+`node tools/capture.mjs --pose ref_00000 --out /tmp/meta_smoke.png --settle 8` → exit 0,
+`"ok": true`, `"via": "daemon"`, all three integrity channels (`missing`, `failedModules`,
+`missingPasses`) empty, no warnings, 4.9 MB PNG.
+
+### How to revert
+Nothing to revert — no file under version control was changed except this ledger entry.
+The `/tmp` scratch tree used to force the drift failure was never inside the repo.
+
+### Turn one thing off
+Not applicable — E4 was already off by default (hand-run, not wired into preflight,
+postflight or CI); this round changed none of that.
+
+### Noticed, not done (round 11)
+* **The weapon-ROI citations are still the one concrete remaining edit** (`reports/characters.md`,
+  `reports/depthfx.md`, `reports/postfx.md`, one line each near their `weapon` numbers,
+  citing `reports/weapons.md:279`'s "~65% sand"). Not done here because `reports/*.md` is
+  outside this round's file allowlist; whoever owns those reports should close it.
+* **`tools/roicheck.mjs`, `tools/roi_notes.json` and the `package.json` `roicheck` line are
+  still uncommitted.** They exist correctly in the working tree; nobody has run `git add` on
+  them yet.
+
+## Installed 2026-07-31 — round 12 (lens: gates — the refusal that reads a field that does not exist)
+
+### G17. `tools/gatecheck.mjs` — does blind.mjs's refusal gate check a field capture.mjs emits?
+**Files:** `tools/gatecheck.mjs` (new), `tools/preflight.mjs` (one more advisory check, +14
+lines, additive)
+
+`tools/blind.mjs:143` (the acceptance gate's own refusal — "a blind test with a missing
+subsystem is not a fair fight") reads `info.failedModules?.length` off the JSON.parse'd
+`capture.mjs` stdout. Verified against a live capture during this round:
+`capture.mjs`'s real stdout contract is `{ ok, via, files, stats, integrity, warnings,
+criticalWarnings }`; `info.failedModules` is always `undefined`, so the branch has never
+fired. The three real integrity channels — `missing` (§20: killed `ocean.js`/`rocks.js`),
+`failedModules` (§11: `physics` dead in every capture), `missingPasses` (§19) — all live
+under `info.integrity`, unread. Second, smaller hole in the same file: the `--score` tally
+counts only the poses a judge typed (`n++` in the loop) and never compares `n` against
+`Object.keys(key.pairs).length`, so a judge who submits 5 of 9 picks gets a clean `n:5` row
+appended to `scores/blind.jsonl` with nothing marking it partial.
+
+**Not fixed in `tools/blind.mjs` itself** — it is on this round's do-not-touch list, owned by
+a concurrent wave. The two one-line fixes are: (1) refuse on
+`[...(info.integrity?.missing||[]), ...(info.integrity?.failedModules||[]), ...(info.integrity?.missingPasses||[])].length`
+instead of `info.failedModules?.length`; (2) after the tally loop, if
+`n < Object.keys(key.pairs).length`, print `PARTIAL: n of N pairs judged` and record
+`partial: true` in `logRow`. `tools/gatecheck.mjs` is the recommendation made checkable
+instead of a paragraph: it reads `capture.mjs` and `blind.mjs` as text, checks every
+`<parsedVar>.<field>` access in blind.mjs's refusal block against capture.mjs's real
+top-level and `integrity`-nested keys, and flags a field that only exists nested (the exact
+signature of this bug) or a missing partial-tally guard. Read-only, static, ~20 ms, no GPU,
+no capture, no daemon.
+
+**Proof it fires**, `node tools/gatecheck.mjs` against the real, unmodified tree:
+```
+gatecheck: 2 finding(s) in tools/blind.mjs:
+  UNREACHABLE GATE: reads `info.failedModules` but capture.mjs only puts "failedModules"
+  under `info.integrity.failedModules` — this condition can never be true.
+  PARTIAL TALLY: the --score tally loop never compares its count `n` against
+  `Object.keys(key.pairs).length` — a judge who submits fewer picks than pairs shown gets a
+  clean row with nothing marking it partial.
+```
+exit 1. **Proof it stops firing once fixed** — `node tools/gatecheck.mjs --selftest` copies
+the real `capture.mjs` and `blind.mjs` into a scratch dir under `/tmp` (read-only on the
+repo), applies the exact two-part fix above to an in-memory copy, confirms the copy still
+parses (`node --check`), and re-runs the same detector against it:
+```
+SELFTEST PASSED — detector correctly distinguishes broken from fixed
+```
+i.e. the unmodified copy trips both findings, the patched copy trips neither. `--selftest`
+is left in the tool permanently so the next person to touch `blind.mjs`'s capture-stdout
+handling can re-run this proof without hand-editing anything.
+
+Wired into `preflight.mjs` as check 12 (`blind-gate`), advisory (`hard: false`, matching
+`api-contract`/`scale`/`provenance`) — it never blocks a wave, and it will go green
+automatically the moment `blind.mjs`'s owner applies the fix, no further action needed.
+
+**A reviewer proposed treating this as belt-and-suspenders on `cap.status` plus a summed
+integrity-length check, phrased like `capture.mjs`'s own `integrityGate`, rather than
+re-deriving the bad-channel list inline** — evaluated and not adopted as a change to the
+*recommended blind.mjs fix* (the reviewer agreed the two one-line changes are already
+minimal and did not ask to block on it); it is exactly what `checkUnreachableGate`'s
+`nestedUnder` reporting already surfaces, so no further tool change was needed either.
+
+### Proof of no harm (round 12)
+`node tools/parsecheck.mjs` → `ok — 42 files parse, no GLSL template hazards`, exit 0.
+`node tools/capture.mjs --pose ref_00000 --out /tmp/meta_smoke.png --settle 8` → exit 0,
+`"ok": true`, `"via": "daemon"`, all three integrity channels (`missing`, `failedModules`,
+`missingPasses`) empty, no warnings — and this capture's own JSON is itself a live
+confirmation of the finding: `failedModules` appears at `stats.failedModules` (`[]`) and
+`integrity.failedModules` (`[]`), never at the top level.
+
+### How to revert
+`tools/gatecheck.mjs` is a new, standalone file — `rm tools/gatecheck.mjs` removes it and
+the tool entirely. To stop it running inside `preflight`, delete the 14-line
+`if (existsSync(join(ROOT, 'tools/gatecheck.mjs')))` block (check 12) from
+`tools/preflight.mjs`; every other check is unaffected. Neither `tools/blind.mjs` nor
+`tools/capture.mjs` was touched, so there is nothing to revert in either.
+
+### Turn one thing off
+The check is already advisory (`hard: false`) — it can never fail a build. If the printed
+line becomes noise before `blind.mjs` is fixed, delete check 12 from `preflight.mjs` (above);
+`node tools/gatecheck.mjs` still works standalone for anyone who wants to check by hand.
+
+### Noticed, not done (round 12)
+* **The actual `tools/blind.mjs` fix is not applied** — it is a two-line change and the file
+  is owned by a concurrent wave this round. `tools/gatecheck.mjs` will report clean the
+  moment it lands; no further ledger action will be needed.
+* **`gatecheck.mjs` only checks `tools/blind.mjs` against `tools/capture.mjs` by default.**
+  It accepts `--capture`/`--blind` path overrides, but nothing else in the project currently
+  parses `capture.mjs`'s stdout the way `blind.mjs` does, so no second target was added. If
+  a future consumer starts parsing capture's JSON, pointing `--blind` at it (name is a
+  historical accident of what this was built for, not a hard requirement) reuses the same
+  detector for free.
+
+## Installed 2026-07-31 — round 12 (lens: gates — the fallback that never says why)
+
+### G13. `tools/capture.mjs` — `viaDaemon()` states its reason instead of collapsing to `null`
+
+**Files:** `tools/capture.mjs` only (`viaDaemon()`'s three non-success return sites, one
+stderr line in `main()`, one field in the standalone JSON and in `writeProvenance()`). No
+`src/` file touched, no measurement semantics changed, no new dependency, nothing added at
+capture time beyond a string comparison and a `process.stderr.write`.
+
+**What was wrong.** `viaDaemon()` flattened three distinct outcomes to the same `null`:
+daemon not running (`daemonPort()` returned nothing), an HTTP/timeout error hitting a daemon
+that does exist (`AbortSignal.timeout`, non-2xx status, network failure), and a daemon that
+ran the request and answered `{ok:false, err, logs}`. `main()`'s `if (d) { … }` then silently
+took the standalone path with nothing on stderr saying a fallback had happened, let alone why.
+`tools/captured.mjs`'s own header states the design intent — "silently falls back to
+standalone … so nothing breaks if it dies" — and, two lines later, what that costs at scale:
+standalone is ~1 GB per agent and "exhausted system memory (measured 14 GB of 15 GB used, 0 GB
+available, at 17 agents)", which is the entire reason the daemon exists. A fallback storm under
+load therefore reproduces the exact failure the daemon was built to remove, invisibly. §19 is
+the precedent for the diagnostic cost of a discarded reason: a pass that had stopped *loading*
+was misdiagnosed as "a stale-code daemon bug" and shipped a workaround costing a vite + Chrome
+per agent, precisely because the daemon's own diagnostics never reached the caller. G2's
+provenance stamp already records *which* path a capture took (`via: daemon | standalone`); the
+*reason* for a standalone run was still thrown away unread.
+
+**What changed.** A reviewer's simplification was adopted over the original module-level-flag
+sketch: `viaDaemon()` now returns `{ ok: false, reason }` on each of its three non-success
+exits instead of `null`, and `main()` destructures `reason` straight off that return value —
+no module-level mutable state for a future refactor to stomp on, consistent with how
+`integrityReport()`/`integrityGate()` already pass data by return value in this same file.
+
+* `viaDaemon()`: `if (!port) return { ok: false, reason: 'no daemon' };` /
+  `if (!r.ok) return { ok: false, reason: \`daemon error: HTTP ${r.status}\` };` /
+  `if (!out.ok) return { ok: false, reason: \`daemon returned ok:false: ${String(out.err ||
+  '').slice(0, 300)}\` };` / `catch (e) { return { ok: false, reason: \`daemon error:
+  ${e.message}\` }; }`. On success it still returns `out` unchanged (`d.ok === true`, no
+  `reason` field), so the daemon-success branch in `main()` is untouched.
+* `main()`: `if (d.ok) { … }` replaces the old truthiness check; on the non-success branch it
+  writes one line to stderr — `[capture] DAEMON UNAVAILABLE (<reason>) — falling back to
+  standalone; this spawns its own vite + Chrome (~1 GB). See tools/captured.mjs header.` — and
+  carries `daemonFallback: reason` into the standalone run.
+* The standalone path's printed JSON and `writeProvenance()` record both gained
+  `daemonFallback` (`null` when the daemon path was skipped outright via `--port` or
+  `HALO_NO_DAEMON`, since that is a deliberate standalone request, not a silent fallback).
+  `scores/provenance.jsonl` is tracked, so this reaches a reviewer even though `shots/` does
+  not — same join key G2 already established (outdir + timestamp).
+
+Exit codes are unchanged everywhere. This is a stamp and a message, not a gate — a fallback
+still succeeds if standalone capture succeeds, exactly as before.
+
+**Proof it fires**, in two layers, both in a scratch copy under `/tmp` (never in the repo,
+never touching the live shared daemon that a concurrent wave is using against this same tree):
+
+1. **Extracted-logic unit test** (`unit_test_viaDaemon.mjs`, verbatim copy of the edited
+   function body, driven against a local mock HTTP server so all five paths are exercised in
+   under a second, no vite/Chrome/GPU needed):
+
+   | case | mock response | result |
+   |---|---|---|
+   | no daemon reachable | `port = null` | `reason: 'no daemon'` |
+   | daemon up, HTTP error | `/capture` → 503 | `reason: 'daemon error: HTTP 503'` |
+   | daemon ran, `ok:false` | `{ok:false, err:'BOOT FAILED: ReferenceError: addStatic is not defined'}` | `reason: 'daemon returned ok:false: BOOT FAILED: …'` |
+   | connection refused mid-request | server closed before the fetch | `reason` starts with `'daemon error:'` |
+   | success passthrough | `{ok:true, shots:{…}}` | `d.ok === true`, `d.reason === undefined` |
+
+   All five passed on first run.
+
+2. **Full-pipeline integration test**, real `tools/capture.mjs` from a lean scratch copy
+   (`rsync --exclude=ref --exclude=shots --exclude=reference.mp4 --exclude=.git
+   --exclude=.venv --exclude=.gitnexus`, 96 MB — copying the whole 15 GB tree once filled the
+   7.8 GB `/tmp` tmpfs and took down this session's own bash output with ENOSPC, a fresh
+   instance of the exact hazard round 5's "Noticed, not done" already recorded; recovered by
+   `rm -rf` and re-copying narrower), with `PORT_FILE` in that copy alone repointed at a
+   scratch path so the test never talks to the real machine-wide daemon:
+   * A fake daemon answering `/health` ok but `/capture` with `{ok:false, err:'BOOT FAILED:
+     simulated daemon breakage for gate test'}` → `node tools/capture.mjs --pose ref_00000
+     --out …` printed exactly one line on stderr: `[capture] DAEMON UNAVAILABLE (daemon
+     returned ok:false: BOOT FAILED: simulated daemon breakage for gate test) — falling back
+     to standalone; this spawns its own vite + Chrome (~1 GB). See tools/captured.mjs
+     header.`, fell through to a real standalone capture, and **still produced a correct
+     1920x1080 PNG** (exit 0) — proving the fallback message does not turn a recoverable
+     failure into a hard one. Both the printed JSON and `scores/provenance.jsonl`'s appended
+     record carried `daemonFallback: "daemon returned ok:false: BOOT FAILED: simulated daemon
+     breakage for gate test"`.
+   * **No false positive**, same scratch copy: a fake daemon that answers normally
+     (`ok:true`, a 1x1 PNG) produced `via: "daemon"`, no `DAEMON UNAVAILABLE` line on stderr,
+     and no `daemonFallback` field at all in the printed JSON — the message and the field
+     appear only on an actual fallback.
+
+**Proof of no harm** (real repo, unmodified — the live shared daemon was already up and
+serving this exact tree, `root: /workspace/zer0/products/halo`, confirmed via `/health`
+before running):
+
+```
+$ node tools/parsecheck.mjs
+ok — 42 files parse, no GLSL template hazards
+
+$ node tools/capture.mjs --pose ref_00000 --out /tmp/meta_smoke.png --settle 8
+captured ref_00000 (daemon)
+{ "ok": true, "via": "daemon", "files": ["/tmp/meta_smoke.png"], …
+  "integrity": { "missing": [], "failedModules": [], "missingPasses": [] },
+  "warnings": [], "criticalWarnings": [] }
+```
+Exit 0 both times, no `daemonFallback` field printed (correct — the daemon path succeeded),
+`/tmp/meta_smoke.png` is a real 1920x1080 PNG (4.9 MB).
+
+**How to run it:** nothing new to remember — it fires on every `node tools/capture.mjs`
+invocation automatically, exactly where `via: daemon | standalone` already prints today.
+
+**How to turn it off if it becomes a nuisance:**
+1. It is a stderr line and two JSON/provenance fields, not a gate — it cannot fail a build or
+   change an exit code, so there is nothing to bypass per-run.
+2. If the line itself is unwanted noise (e.g. a machine that deliberately never runs the
+   daemon), the underlying condition — `HALO_NO_DAEMON=1` or `--port <n>` — already skips the
+   whole daemon-attempt block and `daemonFallback` stays `null`; that is the existing,
+   unmodified escape hatch, not a new one.
+3. To remove the feature entirely: `git checkout -- tools/capture.mjs`. Nothing else in the
+   repo reads the `daemonFallback` field yet, so reverting breaks nothing downstream.
+
+### Noticed, not done (round 12)
+* **`scores/provenance.jsonl` now carries a `daemonFallback` field that nothing consumes.**
+  `tools/provcheck.mjs` and `tools/postflight.mjs` were both named in this round's brief as the
+  intended readers ("so `provcheck`/`postflight` can join it") but both are owned by a
+  concurrent wave and out of this round's file allowlist. Wiring a "daemon fell back N times in
+  the last M captures" rollup into either is the natural next step and is left for whoever owns
+  them.
+* **The `!r.ok` (HTTP status) branch is not one of the three outcomes named in the task brief**
+  (`'no daemon'`, `daemon error: ${e.message}`, `daemon returned ok:false: …`) but is a real,
+  distinct fourth path in the existing code (a daemon that answers with a non-2xx status
+  without throwing) that was equally silent before this change. Given a `daemon error: HTTP
+  ${r.status}` reason rather than folding it into the catch-block wording, since conflating an
+  HTTP-error response with a network-level exception would have re-created exactly the kind of
+  flattening this entry exists to undo. Flagged here rather than left unmentioned, since it
+  widens the fix slightly past the letter of the three named cases while staying inside its
+  spirit.

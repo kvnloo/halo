@@ -30,10 +30,41 @@ for (const rel of files) {
   const abs = resolve(ROOT, rel);
 
   // 1. does it actually parse?
+  //
+  //    MEASURED 2026-07-31 on Node v26.5.0: `node --check <file>.js` EXITS 0 on a file that
+  //    does not parse, whenever the file contains ESM syntax. Every file under `src/` is
+  //    ESM (`"type": "module"`, and 42 of 42 open with `import`), so this gate — the hard
+  //    check `preflight` blocks on and `.githooks/pre-commit` enforces, written for §20 —
+  //    could not fail:
+  //
+  //      $ cp -r src /tmp/ptest/src && printf '\nthis is not javascript at all\n' >> /tmp/ptest/src/world/ocean.js
+  //      $ printf '\nconst broken = ;\n' >> /tmp/ptest/src/render/passes/volumetricFog.js
+  //      $ node tools/parsecheck.mjs        # from /tmp/ptest
+  //      ok — 42 files parse, no GLSL template hazards        <- exit 0
+  //      $ node -e "import('/tmp/ptest/src/world/ocean.js')"
+  //      SyntaxError: Unexpected identifier 'is'              <- the module is dead
+  //
+  //    That is exactly §20 — `ocean.js` stops parsing, `src/modules.js` skips it silently,
+  //    the subsystem vanishes from every frame and gets scored anyway — passing green
+  //    through the gate built to stop §20. `reports/ocean_waveH.md` §1a already recorded a
+  //    stray backtick that "got past `node --check`" and blamed the even-backtick re-close;
+  //    this is a second, wider mechanism under the same symptom.
+  //
+  //    The fix is one argument: check it AS A MODULE. `--input-type=module --check -` reads
+  //    the source on stdin, so there is no temp file and nothing is executed.
+  //
+  //    Module mode — not both modes. `package.json` says `"type": "module"`, so the module
+  //    goal is the only correct parse for these files, and it is the stricter one. Running
+  //    the old file-mode check as well would be a false-positive generator on any Node
+  //    that does NOT auto-detect ESM (CI pins node 22): there, `node --check ocean.js`
+  //    reports "Unexpected token 'export'" on a perfectly good file and reddens the tree.
+  //    Verified on the real tree after this change: 42 of 42 still pass.
   try {
-    execFileSync(process.execPath, ['--check', abs], { stdio: 'pipe' });
+    execFileSync(process.execPath, ['--input-type=module', '--check', '-'],
+      { stdio: 'pipe', input: readFileSync(abs, 'utf8') });
   } catch (e) {
-    const msg = String(e.stderr || e).split('\n').filter(Boolean).slice(0, 4).join('\n    ');
+    const msg = String(e.stderr || e).split('\n').filter(Boolean).slice(0, 4).join('\n    ')
+      .replace(/\[stdin\]/g, rel);
     console.error(`FAIL ${rel}\n    ${msg}`);
     bad++;
     continue;

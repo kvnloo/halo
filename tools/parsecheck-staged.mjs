@@ -36,10 +36,17 @@ for (const rel of staged) {
   writeFileSync(scratch, src);
 
   // 1. does the staged blob parse?
-  try { execFileSync(process.execPath, ['--check', scratch], { stdio: 'pipe' }); }
+  //
+  //    AS A MODULE. `node --check <name>.js` exits 0 on a file that does not parse whenever
+  //    that file contains ESM syntax (measured on Node v26.5.0; every file under `src/` is
+  //    ESM). This hook is the §20 gate, and with the old file-mode check a staged
+  //    `ocean.js` with a stray backtick — the exact bug it was written for — committed
+  //    clean. Same one-argument fix as `tools/parsecheck.mjs`; `tools/stagedcheck.mjs`
+  //    already forces `.mjs` on its own scratch copies for this reason.
+  try { execFileSync(process.execPath, ['--input-type=module', '--check', '-'], { stdio: 'pipe', input: src }); }
   catch (e) {
     const msg = String(e.stderr || e).split('\n').filter(Boolean).slice(0, 4).join('\n    ')
-      .split(scratch).join(rel);
+      .split(scratch).join(rel).replace(/\[stdin\]/g, rel);
     console.error(`FAIL ${rel}\n    ${msg}`);
     bad++;
     continue;

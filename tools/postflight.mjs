@@ -226,6 +226,27 @@ if (!report) {
   add('refstamp', c.status === 0, ((c.stdout || c.stderr || '').split('\n')[0] || '').trim());
 }
 
+/* 8 ------------------------------------------------- the gate that decides the project
+ * `docs/LOOP.md` §5.7: "The blind test is the score. Everything in scores/history.jsonl is
+ * a proxy that was picked for being cheap. When a proxy and the blind test disagree, the
+ * proxy is wrong. It has disagreed once, by 9 pairs to nil." §5.6: "Run the blind test
+ * every wave, not at the end ... Five waves were spent optimising proxies that a single
+ * 30-minute blind test would have invalidated on day one."
+ *
+ * Measured: one human judgement (`waveH`, backfilled) against 14 scored runs. Neither
+ * `docs/AGENT_BRIEF.md` nor any tool ever named `docs/LOOP.md`'s standing rules, and
+ * nothing compared the two ledgers — so "every wave" had no reader and no counter.
+ * Advisory and repo-wide (not per-report): whether the wave's gate has been run is the
+ * orchestrator's call, but the last agent to finish is the one who can still say it. */
+{
+  const b = run(['tools/blindcheck.mjs', '--json']);
+  let out = null;
+  try { out = JSON.parse(b.stdout); } catch { }
+  add('blind gate is current (LOOP §5.6)', out ? out.ok : true,
+    out ? (out.ok ? out.summary : `${out.summary}. Unjudged: ${out.sinceTags.join(' ')} — node tools/blind.mjs --capture --contact`)
+        : 'blindcheck did not report (skipped)');
+}
+
 /* ------------------------------------------------------------------------------ verdict */
 const fails = results.filter((r) => !r.ok);
 

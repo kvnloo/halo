@@ -13,7 +13,7 @@
  */
 import puppeteer from 'puppeteer';
 import { spawn, execFileSync } from 'node:child_process';
-import { writeFileSync, readFileSync, appendFileSync, mkdirSync, existsSync, openSync, closeSync, unlinkSync, readdirSync, statSync } from 'node:fs';
+import { writeFileSync, readFileSync, appendFileSync, mkdirSync, existsSync, openSync, closeSync, unlinkSync, readdirSync, statSync, realpathSync } from 'node:fs';
 import { dirname, resolve, join as pjoin } from 'node:path';
 import { createHash } from 'node:crypto';
 import { tmpdir, loadavg, cpus, totalmem } from 'node:os';
@@ -148,7 +148,7 @@ const ROOT = resolve(new URL('..', import.meta.url).pathname);
 {
   const KNOWN_FLAGS = new Set(['pose', 'out', 'outdir', 'w', 'h', 'settle', 'time', 'seed',
     'only', 'skip', 'all', 'video', 'port', 'keep-server', 'timeout', 'verbose', 'config',
-    'allow-missing', 'selftest-integrity', 'strict-warn']);
+    'allow-missing', 'selftest-integrity', 'strict-warn', 'allow-stale']);
   const unknown = [], eqForm = [];
   for (const tok of argv) {
     if (!tok.startsWith('--')) continue;
@@ -162,6 +162,56 @@ const ROOT = resolve(new URL('..', import.meta.url).pathname);
   if (unknown.length) process.stderr.write(
     `[capture] WARNING: unknown flag(s) IGNORED, this capture used defaults instead: ${unknown.join(' ')}\n` +
     `[capture]          known flags: ${[...KNOWN_FLAGS].map((f) => '--' + f).join(' ')}\n`);
+
+  /* An unknown flag that CONTAINS WHITESPACE is not a typo, it is a shell quoting bug, and
+   * it is fatal because there is no reading of the resulting capture that is correct.
+   *
+   * `reports/ocean_waveH.md` §1: "zsh does not word-split an unquoted `$args`, so a scripted
+   * sweep silently passes `"--skip ocean"` as ONE token and every variant comes back
+   * byte-identical." Every arm of that battery was the shipped build. Byte-identical is also
+   * the signature of an inert pass (`skip-flag-can-disable-a-pass` in tools/refuted.json,
+   * KNOWN_ISSUES §28/§9/§21), and this project has confused the two at least four times.
+   * The `--only`/`--skip` name check below cannot see it: `arg('skip')` never matched, so
+   * OPT.skip is null and the module list is untouched.
+   *
+   * Zero false positives by construction: no flag this file defines contains a space. */
+  const glued = unknown.filter((t) => /\s/.test(t));
+  if (glued.length) {
+    process.stderr.write(
+      `\n[capture] FATAL: a single argv token contains whitespace: ${glued.map((t) => JSON.stringify(t)).join(' ')}\n` +
+      `[capture]   That is a shell quoting bug, not a flag. The flag was IGNORED and this\n` +
+      `[capture]   capture would have been the DEFAULT build — indistinguishable from a\n` +
+      `[capture]   correct arm, and byte-identical to every other arm of the same sweep\n` +
+      `[capture]   (reports/ocean_waveH.md §1: zsh does not word-split an unquoted $args).\n` +
+      `[capture]   Write the flags out literally: --skip ocean, not "$args".\n\n`);
+    process.exit(2);
+  }
+
+  /* --settle must be a multiple of 16, or you are comparing TAA phases.
+   *
+   * reports/taa.md §4, measured: with a fixed alpha = 0.09 the converged still is PERIODIC
+   * WITH PERIOD 16, not a fixed point. Phase-matched frames (48/64/96/128) agree to 3 code
+   * values; frame 48 vs 49 differs by up to 53 code values on exactly the high-contrast
+   * rock/sky silhouettes the `detail` and `structure` axes look at. That report's own
+   * conclusion: "Anyone who just bumps the settle to 50 will move scores and blame their
+   * own subsystem." KNOWN_ISSUES §26 priced the same class at 0.52 composite points
+   * (`waveG` vs `waveG-settle96`, identical code) and -3.55 on `ref_01500` alone.
+   *
+   * It has already happened at least three times, and every one of those numbers is still
+   * quoted as a result: `reports/characters.md:73` and `:141` (the whole character A/B at
+   * `--settle 24`), `reports/sky.md:167` (`--settle 24`), `docs/KNOWN_ISSUES.md:308-309`
+   * (§9's exposureEV A/B at `--settle 40`). 24 and 40 are both phase 8 — the worst case,
+   * half a period from the settle-48 baseline every other number in the project uses.
+   *
+   * Advisory only: it is a comparability hazard, not a broken capture. Values under 16 are
+   * left silent — they have not completed one TAA period at all, so they are obviously a
+   * smoke capture (`--settle 8` is this repo's own smoke command) and not a measurement. */
+  if (OPT.settle >= 16 && OPT.settle % 16 !== 0) process.stderr.write(
+    `[capture] WARNING: --settle ${OPT.settle} is not a multiple of 16 (phase ${OPT.settle % 16}).\n` +
+    `[capture]          TAA's converged still is periodic with period 16 (reports/taa.md §4):\n` +
+    `[capture]          an off-phase settle is a different picture by up to 53 code values on\n` +
+    `[capture]          high-contrast edges. Comparable to another --settle ${OPT.settle} capture only;\n` +
+    `[capture]          NOT to the --settle 48 baseline every score in history.jsonl uses.\n`);
 
   let names = null;
   try {
@@ -183,6 +233,106 @@ const ROOT = resolve(new URL('..', import.meta.url).pathname);
         process.exit(2);
       }
     }
+  }
+}
+
+/* --------------------------------------------- was this tree gated before measuring? ---
+ * `tools/preflight.mjs` calls itself "ONE command every agent and workflow runs before it
+ * measures anything". It is wired only to `npm run capture` / `npm run score`
+ * (package.json `precapture` / `prescore`) — and nobody invokes it that way. Counted
+ * across `reports/` and `docs/`: 31 sites run `node tools/capture.mjs` or
+ * `node tools/score.mjs` directly, 3 mention the npm form. `docs/LOOP.md` §4 — the
+ * per-wave recipe — runs `node tools/score.mjs --tag waveX`, and every proof-of-no-harm
+ * in `docs/META_LEDGER.md` runs `node tools/capture.mjs --pose ref_00000`. Both bypass
+ * every preflight check, and always have: posecheck (§17.1 — a pose sunk under the
+ * terrain), reference coverage (a smaller `n` written to history.jsonl with no warning),
+ * §16 quiescence, §27's wedged daemon, §29's oversubscribed box.
+ *
+ * So preflight leaves `.preflight-stamp.json` and this says whether it is still valid for
+ * the tree about to be captured. ADVISORY by design: the §20 outcome preflight's hard
+ * check exists to stop is already fatal here through the integrity channels, so this is
+ * a receipt, not a second gate. It runs no subprocess, launches nothing, and cannot fail
+ * a capture — it stats `src/**.js` and prints to stderr.
+ *
+ * Silence it: `HALO_NO_PREFLIGHT_NOTE=1`. Make it stop being true: `node tools/preflight.mjs`. */
+if (!has('selftest-integrity') && process.env.HALO_NO_PREFLIGHT_NOTE !== '1') {
+  try {
+    const stampPath = resolve(ROOT, '.preflight-stamp.json');
+    const stamp = existsSync(stampPath) ? JSON.parse(readFileSync(stampPath, 'utf8')) : null;
+    let newest = 0, newestFile = '';
+    const walk = (d) => {
+      for (const e of readdirSync(d, { withFileTypes: true })) {
+        if (e.name === 'node_modules' || e.name.startsWith('.')) continue;
+        const p = pjoin(d, e.name);
+        if (e.isDirectory()) walk(p);
+        else if (e.name.endsWith('.js')) {
+          const m = statSync(p).mtimeMs;
+          if (m > newest) { newest = m; newestFile = p.slice(ROOT.length + 1); }
+        }
+      }
+    };
+    walk(resolve(ROOT, 'src'));
+
+    let why = null;
+    if (!stamp) why = 'preflight has never been run against this working tree';
+    else if (!stamp.ok) why = `the last preflight FAILED (${(stamp.hardFails || []).join(', ') || 'hard gate'}) at ${stamp.at}`;
+    else if (newest > stamp.t) why = `preflight last ran ${stamp.at}, before src/ changed (${newestFile})`;
+
+    if (why) process.stderr.write(
+      `[capture] NOTE: ${why}.\n` +
+      `[capture]       This capture is ungated: nothing has checked that every src/*.js parses\n` +
+      `[capture]       (§20), that no pose has sunk under the terrain (§17.1), that a reference\n` +
+      `[capture]       keyframe exists for every scored pose, or that src/ is quiescent (§16).\n` +
+      `[capture]       Run:  node tools/preflight.mjs      (~2 s, no GPU)   [HALO_NO_PREFLIGHT_NOTE=1 to silence]\n`);
+  } catch { /* a receipt that cannot be read must never fail the capture that read it */ }
+}
+
+/* ------------------------------------------------- a scored outdir must hold ONE run ---
+ * This file never clears `--outdir`, and `tools/score.mjs:115` measures *every* `ref_*.png`
+ * it finds there:
+ *
+ *     const shots = readdirSync(join(ROOT, outdir)).filter((f) => /^ref_\d+\.png$/.test(f));
+ *
+ * So `node tools/score.mjs --pose ref_00450` — the second invocation in score.mjs's own
+ * docblock — captures ONE pose into `shots/latest` and then averages it with eight frames
+ * from whenever that directory was last full. Every existing gate passes while it happens:
+ * the capture exits 0, all three integrity channels are clean (the stale frames came from a
+ * build that was also complete), `n` is still 9 so historycheck's pose-count check is
+ * satisfied, and the row in history.jsonl is indistinguishable from a real one. It is on
+ * disk right now — `shots/latest` holds frames five hours and an unknown number of `src/`
+ * edits apart, and `scores/rescore_latest.json` was written from that mixture with `"n": 9`.
+ *
+ * `tools/shotcheck.mjs` diagnoses this after the fact and is wired into nothing. This is
+ * the same rule at the only moment the mixture can be prevented instead of explained.
+ *
+ * Deliberately narrow, because `shots/latest` is also the machine's junk drawer (ab_*.png,
+ * ch_*.png, probe output): it fires ONLY when a single `ref_NNNNN` pose is written into a
+ * directory that already holds a *different* `ref_NNNNN.png`. `--all` rewrites all of them,
+ * `--out` writes one named file, and a non-`ref_` probe pose is not scored — none of those
+ * can produce the mixture, and none of them trips this.
+ */
+if (!OPT.out && !OPT.all && !OPT.video && !has('selftest-integrity') &&
+    !(has('allow-stale') || process.env.HALO_ALLOW_STALE === '1') &&
+    /^ref_\d+$/.test(String(OPT.pose))) {
+  let stale = [];
+  try {
+    stale = readdirSync(resolve(ROOT, OPT.outdir))
+      .filter((f) => /^ref_\d+\.png$/.test(f) && f !== `${OPT.pose}.png`);
+  } catch { /* directory does not exist yet: nothing stale by construction */ }
+  if (stale.length) {
+    stale.sort();
+    process.stderr.write(
+      `\n[capture] FATAL: ${OPT.outdir}/ already holds ${stale.length} other ref_ frame(s) that\n` +
+      `[capture]   this single-pose capture will NOT rewrite:\n` +
+      `[capture]     ${stale.join(' ')}\n` +
+      `[capture]   tools/score.mjs measures every ref_*.png in the directory, so those frames\n` +
+      `[capture]   would be averaged into this run's score as if they belonged to it, with the\n` +
+      `[capture]   full pose count n and no way to tell afterwards (tools/shotcheck.mjs).\n` +
+      `[capture]   Fix, either:\n` +
+      `[capture]     node tools/capture.mjs --all --outdir ${OPT.outdir} ...   # re-take the set\n` +
+      `[capture]     --outdir shots/<something-new>                            # a fresh directory\n` +
+      `[capture]   Really want one pose beside older ones? --allow-stale (or HALO_ALLOW_STALE=1)\n\n`);
+    process.exit(6);
   }
 }
 
@@ -375,6 +525,47 @@ async function waitForServer(url, ms = 60000) {
  */
 const PORT_FILE = '/tmp/halo-captured.port';
 
+/* ------------------------------------------------------- the daemon serves ONE tree ---
+ * The daemon is machine-wide: it holds a vite rooted at whatever directory it was STARTED
+ * from, and it answers every request from that tree no matter who asks. So a capture taken
+ * inside a second checkout — a scratch copy, a git worktree, a bisect — is answered from
+ * the ORIGINAL tree and comes back `"ok": true` with all three integrity channels empty.
+ * It is indistinguishable from a genuine null result, and every two-tree operation
+ * (ablation, bisecting a regression, verifying a fix) is exposed to it. A reviewer hit this
+ * live: three deliberately broken files under /tmp scored clean, and they "nearly recorded
+ * the gate as failing" (META_LEDGER round 5, "Noticed, not done").
+ *
+ * That note asked for exactly this: "a daemon /health field carrying its own repo root so
+ * capture.mjs can refuse a daemon whose root != process.cwd()". G12 added the field and a
+ * preflight check — but preflight resolves ROOT from its own file, so running it inside the
+ * scratch copy is the only way it can ever fire, and the documented workflow is to run
+ * preflight in the main tree and then capture elsewhere. The refusal has to live at the
+ * fetch, which is here.
+ *
+ * Cost: one string compare on a response this function already awaited. It cannot fire on
+ * the main tree (roots match) and it cannot fire on a daemon built before G12 (no `root`).
+ */
+function refuseForeignDaemon(health) {
+  if (process.env.HALO_ALLOW_FOREIGN_DAEMON === '1') return;
+  const theirs = health && typeof health.root === 'string' ? health.root : null;
+  if (!theirs) return;                     // pre-G12 daemon: cannot know, do not cry wolf
+  let a, b;
+  try { a = realpathSync(theirs); b = realpathSync(ROOT); } catch { return; }
+  if (a === b) return;
+  process.stderr.write(
+    `\n[capture] FATAL: the shared capture daemon serves a DIFFERENT tree.\n` +
+    `[capture]   daemon root : ${a}${health.pid ? `  (pid ${health.pid})` : ''}\n` +
+    `[capture]   this tree   : ${b}\n` +
+    `[capture]   Every frame it returns would be rendered from the other tree, and the\n` +
+    `[capture]   integrity channels would come back empty — a confident null result that\n` +
+    `[capture]   measured none of your changes (META_LEDGER round 5 / G12).\n` +
+    `[capture]   Fix, either:\n` +
+    `[capture]     HALO_NO_DAEMON=1 node tools/capture.mjs ...     # capture this tree standalone\n` +
+    `[capture]     curl -s localhost:$(cat ${PORT_FILE})/stop      # stop the foreign daemon\n` +
+    `[capture]   Deliberate? HALO_ALLOW_FOREIGN_DAEMON=1\n\n`);
+  process.exit(5);
+}
+
 async function daemonPort() {
   try {
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -382,7 +573,12 @@ async function daemonPort() {
       const p = readFileSync(PORT_FILE, 'utf8').trim();
       try {
         const r = await fetch(`http://127.0.0.1:${p}/health`, { signal: AbortSignal.timeout(2500) });
-        if (r.ok) return p;
+        if (r.ok) {
+          let health = null;
+          try { health = await r.json(); } catch { }
+          refuseForeignDaemon(health);
+          return p;
+        }
       } catch { }
       try { unlinkSync(PORT_FILE); } catch { }   // stale
     }
@@ -403,9 +599,22 @@ async function daemonPort() {
   } catch { return null; }
 }
 
+/* ---------------------------------------------------- why did we fall back to standalone? ---
+ * `viaDaemon()` used to flatten three distinct outcomes — no daemon running, an HTTP/timeout
+ * error hitting it, and a daemon that ran and answered `{ok:false, err, logs}` — to the same
+ * `null`, and `main()` silently took the standalone path. `captured.mjs`'s own header records
+ * what that costs at scale: standalone is ~1 GB per agent and exhausted system memory at 17
+ * agents, which is the entire reason the daemon exists. §19 is the precedent for the diagnostic
+ * cost of a discarded reason: a pass that had stopped loading was misdiagnosed as "a stale-code
+ * daemon bug" because nothing said why the daemon path was skipped.
+ *
+ * Now every non-success exit carries a `reason` string instead of collapsing to `null`, and
+ * `main()` reads it off the return value directly (no module-level mutable state to stomp).
+ * This changes no behaviour and no exit code — it is a return shape and a stderr line.
+ */
 async function viaDaemon(poses, all = false) {
   const port = await daemonPort();
-  if (!port) return null;
+  if (!port) return { ok: false, reason: 'no daemon' };
   try {
     const r = await fetch(`http://127.0.0.1:${port}/capture`, {
       method: 'POST',
@@ -417,10 +626,11 @@ async function viaDaemon(poses, all = false) {
       // nine poses in one page load legitimately takes minutes under load
       signal: AbortSignal.timeout(Math.max(OPT.timeout, (all ? 9 : (poses?.length || 1)) * 120000)),
     });
-    if (!r.ok) return null;
+    if (!r.ok) return { ok: false, reason: `daemon error: HTTP ${r.status}` };
     const out = await r.json();
-    return out.ok ? out : null;
-  } catch { return null; }
+    if (!out.ok) return { ok: false, reason: `daemon returned ok:false: ${String(out.err || '').slice(0, 300)}` };
+    return out;
+  } catch (e) { return { ok: false, reason: `daemon error: ${e.message}` }; }
 }
 
 async function main() {
@@ -439,10 +649,11 @@ async function main() {
 
   // Fast path: a shared daemon already holds a vite + Chrome. No semaphore needed -
   // the daemon bounds its own concurrency.
+  let daemonFallback = null;
   if (!OPT.port && !process.env.HALO_NO_DAEMON) {
     {
       const d = await viaDaemon(OPT.all ? null : [OPT.pose], OPT.all);
-      if (d) {
+      if (d.ok) {
         const files = [];
         for (const [pose, urls] of Object.entries(d.shots)) {
           urls.forEach((du, i) => {
@@ -467,6 +678,10 @@ async function main() {
         if (OPT.strictWarn && crit.length) process.exit(4);
         return;
       }
+      daemonFallback = d.reason || null;
+      process.stderr.write(
+        `[capture] DAEMON UNAVAILABLE (${daemonFallback}) — falling back to standalone; ` +
+        `this spawns its own vite + Chrome (~1 GB). See tools/captured.mjs header.\n`);
     }
   }
 
@@ -573,11 +788,11 @@ async function main() {
   const warnings = logs.filter((l) => /warn|error|404|THREE/i.test(l)).slice(0, 25);
   const rep = integrityReport(ok.missing, stats, ok.missingPasses);
   const dir = OPT.out ? dirname(OPT.out) : OPT.outdir;
-  writeProvenance(dir, { via: 'standalone', files: results, integrity: rep, warnings });
+  writeProvenance(dir, { via: 'standalone', files: results, integrity: rep, warnings, daemonFallback });
   const bad = OPT.allowMissing ? 0 : integrityGate(rep, 'standalone');
   const crit = reportCriticalWarnings(warnings, 'standalone');
   console.log(JSON.stringify({ ok: bad === 0, via: 'standalone', files: results, stats,
-    integrity: rep, warnings, criticalWarnings: crit }, null, 2));
+    integrity: rep, warnings, criticalWarnings: crit, daemonFallback }, null, 2));
 
   await browser.close();
   if (!OPT.keepServer) cleanup();

@@ -1,0 +1,37 @@
+{
+  "_readme": "Hand-maintained mapping of contract-id -> the file-content pattern that identifies its implementers. Adding an implementer (or a new contract) is a one-line edit here, made by the wave that adds it, not by an auditor reconstructing it later. Patterns are JS RegExp source strings, tested per-line (no /g, no multiline flags) against every *.js file under each contract's scanDirs. See tools/contracts.mjs.",
+  "contracts": {
+    "velocity-producer": {
+      "description": "Writes a per-vertex/per-pixel screen-space velocity (motion vector) consumed by TAA and motion blur. Three producers exist because terrain.js and vegetation.js opt out of scene.overrideMaterial for vertex displacement and carry their own G-buffer material; a fix to scene.js alone does not reach them.",
+      "pattern": "uCurrViewProj|vVegCur|prevClip",
+      "scanDirs": ["src"],
+      "knownIssue": "docs/KNOWN_ISSUES.md #1",
+      "status": "CLOSED (Wave G) - all three producers (scene.js/GBufferMaterial.js, terrain.js, vegetation.js) and all three consumers (taa.js, motionBlur.js, the G-buffer itself) fixed together and flip in sync under ctx.config.mvLegacyJitter.",
+      "history": "vegetation.js was accidentally left on the old, jittered pairing for two full waves after scene.js+taa.js were fixed together in the same commit - it has its own G-buffer material and nobody checked it. Found in Wave G by measuring meanY +1.570e-04 on matId 5 (foliage) in isolation. motionBlur.js carried a matching +0.5*uJitter compensation that also had to flip in the same change or the fix would have swapped one half-pixel error for another."
+    },
+    "collider-producer": {
+      "description": "Emits a raw collider object ({type, ...}) later validated by physics.js's validCollider() and swept into the static list via addStatic(). validCollider requires Vector3 for sphere.center/capsule.a/.b and a Box3 on box.box; a producer that emits the wrong shape (e.g. plain arrays, or {center,quaternion,halfExtents} for an oriented box physics has no OBB case for) is silently discarded with no visible symptom in the rendered frame.",
+      "pattern": "colliders\\.push\\(|addStatic\\(",
+      "scanDirs": ["src"],
+      "knownIssue": "docs/KNOWN_ISSUES.md #12",
+      "status": "PARTIAL - rocks.js FIXED (Wave E, was emitting plain arrays; every sea stack, cliff and boulder was non-solid). structures.js:1042,1049 (oriented bridge-deck/railing boxes) STILL OPEN - do not fix mechanically, needs an OBB type added to physics or a deliberate axis-aligned emit; converting silently would give the bridge wrong collision.",
+      "note": "The pattern this entry started from (a reviewer's suggestion) was `addStatic\\(` alone, which matches only src/game/physics.js - the single registration/validation site - and none of the three producer files actually audited in KNOWN_ISSUES #12 (props.js, structures.js, rocks.js). That pattern would have shown a fixer none of the siblings that mattered, which is the exact failure this tool exists to prevent. Broadened to also match `colliders.push(`, which is the literal call every producer uses; verified below to hit all three producers plus physics.js."
+    },
+    "world-material-hook": {
+      "description": "Installs a shader injection via material.onBeforeCompile, directly or through gfx/materialCommon.js's applyWorldMaterial(). applyWorldMaterial ends by calling lighting.registerMaterial() -> three's CSM.setupMaterial(), which does a BARE `material.onBeforeCompile = ...` with no chaining and therefore DISCARDS the hook applyWorldMaterial installed one line earlier. Every caller is affected; the ones that work re-install their hook AFTER registerMaterial and chain onto CSM's.",
+      "pattern": "applyWorldMaterial\\(|registerMaterial",
+      "scanDirs": ["src"],
+      "knownIssue": "reports/weapons.md:267-271, reports/characters.md:25-38",
+      "status": "OPEN, and unowned. Each caller either carries its own local re-install (props.js:618, vegetation.js:414-426, terrain.js:1481-1504, rocks.js:1735 all have a comment explaining the stomp) or silently gets three's default MeshStandardMaterial shading. Fixing it centrally means chaining in lighting.js:83's registerMaterial or in materialCommon.js:126-127; that is a src/ change and needs an owner.",
+      "history": "Found from the viewmodel side in wave 1 - reports/weapons.md:267: 'This affects every world material in the project, not just the viewmodel - not my file to fix.' Found AGAIN from the actor side a wave later - reports/characters.md:35: 'reports/weapons.md found the same bug from the viewmodel side in an earlier wave... It is still unfixed centrally.' Consequence measured there: aFx per-vertex roughness/metalness never reached the BRDF, so every actor surface shaded at the base roughness 0.6 / metalness 0.1 - 'one matte plastic for the whole cast' - and characters.md:224/:270 records constants that were then tuned against that fallback shade. Registered so the next agent to hit it sees the sibling list instead of rediscovering it a third time."
+    },
+    "depth-consumer": {
+      "description": "Reads the shared world depth texture (pipe.depthTex, bound to the uniform usually named tDepth). Whatever writes or clears that texture upstream is read by every one of these in the same frame.",
+      "pattern": "pipe\\.depthTex|\\btDepth\\b",
+      "scanDirs": ["src"],
+      "knownIssue": "docs/KNOWN_ISSUES.md #18",
+      "status": "SOURCE FIXED (Wave H) - scene.js gives the viewmodel its own depth attachment (pipe.viewDepthTex) instead of clearing the shared one. Discovered one consumer at a time across three waves (dof, motionBlur, taa, ssao, ssr, water refraction, then cloudComposite) before the source bug was found and fixed once.",
+      "history": "reports/clouds.md #10.1 documents a still-open second-order case in the same family: cloudComposite.js linearises pipe.depthTex with the MAIN camera's uNear/uFar against depth that, before Wave H, was written through the VIEWMODEL camera's own projection - a units mismatch on top of the shared-texture bug, in a file none of the other five consumers touch."
+    }
+  }
+}

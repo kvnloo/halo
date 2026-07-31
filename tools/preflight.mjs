@@ -24,7 +24,7 @@
  * Exit codes:  0 ok  •  1 a hard gate failed  •  2 preflight itself broke
  */
 import { spawnSync, execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, statSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, realpathSync, readdirSync, writeFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import os from 'node:os';
 
@@ -35,13 +35,38 @@ const asJson = argv.includes('--json');
 
 const results = [];
 const say = (s) => { if (!quiet && !asJson) console.log(s); };
-const add = (name, ok, detail, hard = true) => {
-  results.push({ name, ok, hard, detail });
+const add = (name, ok, detail, hard = true, ran = true) => {
+  results.push({ name, ok, hard, detail, ran });
   if (!asJson && (!ok || !quiet)) {
-    const mark = ok ? 'ok  ' : (hard ? 'FAIL' : 'warn');
+    const mark = ok ? 'ok  ' : (hard ? 'FAIL' : (ran ? 'warn' : 'SKIP'));
     console[ok ? 'log' : 'error'](`${mark} ${name}${detail ? ' — ' + detail : ''}`);
   }
 };
+
+/**
+ * A check whose sub-tool is missing, crashed, or printed something other than the JSON it
+ * was asked for MUST report that it did not run. It must never fall through to the
+ * reassuring branch.
+ *
+ * Three checks below delegate to another script. Before this, two of them (`posecheck`,
+ * `scale`) were wrapped in `if (existsSync(...))` / `if (d)` and vanished from the output
+ * entirely when their tool was absent or broken — and `preflight ok` was printed over the
+ * hole. The third (`provenance`) was worse than silent: it read
+ * `const n = d?.incomparable ?? 0` without ever consulting the exit status, so a provcheck
+ * that crashed, printed a stack trace, or was deleted produced `n = 0` and preflight
+ * printed the green line *"adjacent scored runs share one pose set and one instrument"* —
+ * a positive assertion about the tree, manufactured by a tool that never answered.
+ *
+ * That is the same shape as the failures this whole layer exists to catch: §28's
+ * `git show <dead-sha> | grep -c` printing `0` (a true negative's output, from a command
+ * that could not run), and §9's `--config` arms that compared a frame with itself. A gate
+ * that reports OK when its instrument is missing is the silent failure, one level up.
+ *
+ * `missing()` is advisory by construction (hard = false): a gate that cannot run must be
+ * loud, but it must never block a wave — a fresh clone is missing 22 of the 61 files in
+ * `tools/` (check 6), and preflight refusing to run there would be worse than the hole.
+ */
+const missing = (name, why) => add(name, false, `${why} — THIS CHECK DID NOT RUN`, false, false);
 
 function run(cmd, args) {
   return spawnSync(cmd, args, { cwd: ROOT, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 });
@@ -62,6 +87,8 @@ if (existsSync(join(ROOT, 'tools/_posecheck.mjs'))) {
   const fails = out.split('\n').filter((l) => /FAIL/.test(l)).slice(0, 5);
   add('posecheck', r.status === 0,
     r.status === 0 ? 'every pose above ground' : fails.join(' | ') || 'exit ' + r.status);
+} else {
+  missing('posecheck', 'tools/_posecheck.mjs is not on disk (src/world/poses.js names it as its gate)');
 }
 
 /* 3 --------------- a reference keyframe exists for every ref_ pose that will be scored
@@ -216,30 +243,104 @@ if (existsSync(join(ROOT, 'tools/_posecheck.mjs'))) {
   add('daemon-root', ok, detail, hard);
 }
 
+/* 10 --------------- the ground truth you are about to be scored against is the right shape
+ * `tools/refcheck.mjs` checks that ref/keyframes are at capture geometry. This is not
+ * cosmetic: tools/metrics.py:298 resizes the TEST image to the REFERENCE's size, so a
+ * reference set re-extracted at 4K (which is what README.md's rebuild recipe actually
+ * produces — measured) silently upscales every render 2x before scoring and moves every
+ * axis with no error. Advisory: on this disk it passes, and it can only ever be wrong for
+ * someone who rebuilt ref/. */
+if (existsSync(join(ROOT, 'tools/refcheck.mjs'))) {
+  const r = run(process.execPath, ['tools/refcheck.mjs', '--json']);
+  let d = null;
+  try { d = JSON.parse(r.stdout); } catch { }
+  if (d) {
+    const g = d.geometry || {};
+    add('reference-shape', d.ok !== false,
+      d.ok !== false
+        ? `ref/ is at capture geometry ${g.w}x${g.h}`
+        : `${(d.problems || []).map((p) => p.detail).join(' | ').slice(0, 200)} ` +
+          `(node tools/refcheck.mjs)`,
+      false);
+  }
+}
+
+/* 11 ------------------------- docs/API.md describes the code that is actually on disk
+ * "These signatures are frozen" is a claim with no instrument behind it, and API.md also
+ * tells every consumer to guard each call — which turns a member that was never
+ * implemented into a permanent silent false rather than an error. Advisory. */
+if (existsSync(join(ROOT, 'tools/apicheck.mjs'))) {
+  const r = run(process.execPath, ['tools/apicheck.mjs', '--json']);
+  let d = null;
+  try { d = JSON.parse(r.stdout); } catch { }
+  if (d) {
+    const n = (d.absent || []).length + (d.deadEvents || []).length;
+    add('api-contract', n === 0,
+      n === 0
+        ? `docs/API.md matches src/ (${d.modules} module contract(s))`
+        : `${n} member(s) documented as frozen in docs/API.md are absent from src/: ` +
+          `${(d.absent || []).map((a) => `${a.module}.${a.member}`).join(', ')} ` +
+          `(node tools/apicheck.mjs)`,
+      false);
+  }
+}
+
+/* 12 ------------------------- blind.mjs's refusal gate checks a field capture.mjs emits
+ * `tools/blind.mjs`'s "REFUSING: capture reported failedModules ..." refusal reads
+ * `info.failedModules`, a field capture.mjs never puts at the top level (it lives at
+ * `info.integrity.failedModules`), so the branch has never fired. Advisory: blind.mjs is
+ * owned by a concurrent wave and out of scope to fix here; this only keeps the finding
+ * visible. See tools/gatecheck.mjs. */
+if (existsSync(join(ROOT, 'tools/gatecheck.mjs'))) {
+  const r = run(process.execPath, ['tools/gatecheck.mjs', '--json']);
+  let d = null;
+  try { d = JSON.parse(r.stdout); } catch { }
+  if (d) {
+    const n = (d.findings || []).length;
+    add('blind-gate', n === 0,
+      n === 0
+        ? 'tools/blind.mjs\'s refusal gate checks fields tools/capture.mjs actually emits'
+        : `${n} finding(s) in tools/blind.mjs's capture-stdout handling: ${d.findings.join(' | ')} (node tools/gatecheck.mjs)`,
+      false);
+  }
+}
+
 /* 8 ------------------ the number you are about to take is comparable to the one above it
  * `tools/provcheck.mjs` joins scores/provenance.jsonl to scores/history.jsonl. Summarised
  * here so the one command says it; run the tool for the detail. */
-if (existsSync(join(ROOT, 'tools/provcheck.mjs'))) {
+if (!existsSync(join(ROOT, 'tools/provcheck.mjs'))) {
+  missing('provenance', 'tools/provcheck.mjs is not on disk');
+} else {
   const r = run(process.execPath, ['tools/provcheck.mjs', '--json']);
   let d = null;
   try { d = JSON.parse(r.stdout); } catch { }
-  const n = d?.incomparable ?? 0;
-  add('provenance', n === 0,
-    n ? `${n} adjacent pair(s) of scored runs were produced by different pose sets or different ` +
-        `measurement code — they are not one series (node tools/provcheck.mjs)`
-      : 'adjacent scored runs share one pose set and one instrument',
-    false);
+  // `incomparable` is the whole verdict, so its ABSENCE must not read as zero. Without
+  // this, a provcheck that crashed printed the green line instead of nothing.
+  if (d == null || typeof d.incomparable !== 'number') {
+    missing('provenance', `tools/provcheck.mjs --json returned no parseable verdict (exit ${r.status})`);
+  } else {
+    const n = d.incomparable;
+    add('provenance', n === 0,
+      n ? `${n} adjacent pair(s) of scored runs were produced by different pose sets or different ` +
+          `measurement code — they are not one series (node tools/provcheck.mjs)`
+        : 'adjacent scored runs share one pose set and one instrument',
+      false);
+  }
 }
 
 /* 9 ------------------ the ceiling you are aiming at is in the units you are scored in
  * `tools/metrics.py` was re-banded 2026-07-31; `ref/baseline.json` — the AAA ceiling quoted
  * as a pass criterion in docs/TARGETS.md and docs/ARCHITECTURE.md — was not regenerated and
  * carries no band stamp. Advisory: it is a document defect, never a reason to stop a wave. */
-if (existsSync(join(ROOT, 'tools/scalecheck.mjs'))) {
+if (!existsSync(join(ROOT, 'tools/scalecheck.mjs'))) {
+  missing('scale', 'tools/scalecheck.mjs is not on disk');
+} else {
   const r = run(process.execPath, ['tools/scalecheck.mjs', '--json']);
   let d = null;
   try { d = JSON.parse(r.stdout); } catch { }
-  if (d) {
+  if (!d || typeof d.status !== 'string') {
+    missing('scale', `tools/scalecheck.mjs --json returned no parseable verdict (exit ${r.status})`);
+  } else {
     add('scale', d.status !== 'stale',
       d.status === 'stale'
         ? `ref/baseline.json predates the metrics.py re-band, and ${d.quoteSites?.length ?? 0} ` +
@@ -285,14 +386,61 @@ if (existsSync(join(ROOT, 'tools/scalecheck.mjs'))) {
 
 /* ------------------------------------------------------------------------- verdict */
 const hardFails = results.filter((r) => !r.ok && r.hard);
-const softFails = results.filter((r) => !r.ok && !r.hard);
+const notRun = results.filter((r) => r.ran === false);
+const softFails = results.filter((r) => !r.ok && !r.hard && r.ran !== false);
+
+// "preflight ok" must state its own coverage. A green line over a checklist where three of
+// ten entries never executed is the assertion this round was written to remove.
+const coverage = `${results.length - notRun.length}/${results.length} checks ran`;
+
+/* -------------------------------------------------------------------- the stamp ---
+ * This file's own header says "ONE command every agent and workflow runs before it
+ * measures anything". Measured: it is wired ONLY to `npm run capture` / `npm run score`
+ * (package.json `precapture` / `prescore`), and essentially nobody invokes it that way.
+ * `node tools/capture.mjs` / `node tools/score.mjs` appear 31 times across reports/ and
+ * docs/ against 3 mentions of the npm form — including `docs/LOOP.md` §4 ("what to do
+ * every wave"), which runs `node tools/score.mjs --tag waveX` directly, and this repo's
+ * own smoke command. Both direct paths skip preflight entirely and always have.
+ *
+ * So preflight leaves a receipt, and `capture.mjs` reads it and says so when it is
+ * missing or older than the last `src/` write. Nothing here fails, blocks or slows a
+ * capture: it is a file write inside a try/catch, and the reader is a stat loop.
+ * The stamp is gitignored — it describes one working tree at one moment. */
+try {
+  const newest = (() => {
+    let t = 0;
+    const walk = (d) => {
+      for (const e of readdirSync(d, { withFileTypes: true })) {
+        if (e.name === 'node_modules' || e.name.startsWith('.')) continue;
+        const p = join(d, e.name);
+        if (e.isDirectory()) walk(p);
+        else if (e.name.endsWith('.js')) { const m = statSync(p).mtimeMs; if (m > t) t = m; }
+      }
+    };
+    walk(join(ROOT, 'src'));
+    return t;
+  })();
+  writeFileSync(join(ROOT, '.preflight-stamp.json'), JSON.stringify({
+    t: Date.now(),
+    at: new Date().toISOString(),
+    ok: hardFails.length === 0,
+    hardFails: hardFails.map((r) => r.name),
+    softFails: softFails.map((r) => r.name),
+    srcNewestMs: newest,
+    ran: results.length - notRun.length,
+    total: results.length,
+  }) + '\n');
+} catch { /* a receipt that cannot be written must never fail the check that wrote it */ }
 
 if (asJson) {
-  console.log(JSON.stringify({ ok: hardFails.length === 0, checks: results }, null, 2));
+  console.log(JSON.stringify({ ok: hardFails.length === 0, ran: results.length - notRun.length,
+    total: results.length, notRun: notRun.map((r) => r.name), checks: results }, null, 2));
 } else if (hardFails.length) {
-  console.error(`\npreflight FAILED (${hardFails.map((r) => r.name).join(', ')}) — do not measure this tree.`);
+  console.error(`\npreflight FAILED (${hardFails.map((r) => r.name).join(', ')}) — do not measure this tree. [${coverage}]`);
 } else {
-  say(`\npreflight ok${softFails.length ? ` (${softFails.length} advisory: ${softFails.map((r) => r.name).join(', ')})` : ''}`);
+  say(`\npreflight ok — ${coverage}` +
+    (notRun.length ? `; ${notRun.length} DID NOT RUN: ${notRun.map((r) => r.name).join(', ')}` : '') +
+    (softFails.length ? ` (${softFails.length} advisory: ${softFails.map((r) => r.name).join(', ')})` : ''));
 }
 
 process.exit(hardFails.length ? 1 : 0);

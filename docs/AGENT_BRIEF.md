@@ -31,7 +31,16 @@ Exit 0 means this tree is safe to measure. It runs, in ~2.5 s and with no GPU:
 | `src-quiescent` | advisory | measuring while a concurrent wave is mid-write (§16: six files rewritten *during* captures produced findings "that look real and are not") |
 | `daemon` | advisory | a wedged capture daemon, which looks identical to a busy one (§27 — one cost 15 minutes) |
 
-`npm run capture` and `npm run score` run it for you (`precapture` / `prescore`).
+`npm run capture` and `npm run score` run it for you (`precapture` / `prescore`) — **and
+that is the only way it has ever run.** Counted across `reports/` and `docs/`: 31 sites
+invoke `node tools/capture.mjs` / `node tools/score.mjs` directly against 3 that mention the
+npm form, including `docs/LOOP.md` §4 ("what to do every wave", which runs
+`node tools/score.mjs --tag waveX`) and every proof-of-no-harm in `docs/META_LEDGER.md`. So
+the table above has been gating almost nothing. `preflight` now leaves
+`.preflight-stamp.json` behind it, and `tools/capture.mjs` prints a one-line NOTE when that
+receipt is missing or older than the last `src/` write. The note is advisory and costs
+nothing (a `stat` loop, no subprocess); it goes away the moment you run preflight.
+`HALO_NO_PREFLIGHT_NOTE=1` silences it.
 
 ## The capture itself now refuses to hand you a broken scene
 
@@ -72,6 +81,11 @@ by 0.52 points on `--settle` alone (§26) — and `--settle` appears nowhere in 
 that contains a backtick inside a `/* glsl */` template. It checks the staged blob, not the
 working tree, because the working tree here is never quiescent.
 
+It then runs `tools/stagedcheck.mjs`, which applies the same rule to the instruments and the
+record: staged `tools/*.mjs` (`node --check`), `tools/*.py` (`py_compile`), and every staged
+`*.json` / `*.jsonl` (parsed per line, plus a trailing-newline check so the next append does
+not land on the last row). `scores/history.jsonl` is hand-edited and 17 files read it.
+
 Doing a salvage commit of deliberately half-finished work (as in `2651d8c`)?
 `git commit --no-verify`.
 
@@ -98,6 +112,7 @@ commands and the measured adherence to all of them was zero.
 | R9b MEASURED/INFERRED | a reader cannot tell your digits from your reasoning, so the next agent re-derives or, worse, believes |
 | R8 whole frame | `blind.md` T10 — a whole building missing from `ref_02220`, invisible to 26 reports each measuring its own ROI |
 | blind gate | `tools/tells.mjs` — the tell that decides *your* subsystem, uncited |
+| contract siblings | `tools/contracts.mjs` — the sibling files a fix left untouched, see R2c |
 | R9 `NEEDS:` routing | 26 cross-file handoffs written in prose, 0 machine-routable (`tools/needscheck.mjs`) |
 | shader errors | GLSL link failures sitting unread in your capture's `warnings[]` — see R3 |
 | citecheck / claimcheck / refstamp | dead citations, refuted claims, moved ground truth |
@@ -139,6 +154,21 @@ message is not.
 Grep it for your owned filename. Then read §16 (concurrency), §20 (silent module death)
 and §26 (settle is not a safety margin) whoever you are.
 
+## R2c. Closing a defect that names a contract? Check the siblings first
+
+```bash
+node tools/contracts.mjs <contract-id>      # e.g. velocity-producer, collider-producer, depth-consumer
+```
+
+Every contract in this codebase (a value convention shared by several files, e.g. "what a
+collider producer must emit for `physics.js` to accept it") has had 3-5 implementers and a
+fix that landed in one of them, with the rest rediscovered a wave later — `vegetation.js`
+stayed on a stale velocity pairing for two waves after `scene.js`+`taa.js` were fixed;
+`structures.js`'s colliders are still open a wave after `rocks.js`'s were fixed; the shared
+depth texture had six consumers found one at a time. `tools/contracts.mjs` prints, for a
+named contract, every file that currently implements it, with line numbers, from
+`tools/contracts.json`. State in your report what you found in each sibling file.
+
 ## R2b. Read the tell that decides your subsystem — it is the acceptance criterion
 
 ```bash
@@ -161,6 +191,33 @@ wrong rather than not good enough."*
 > T2 is about the beach. Until this rule existed, nothing in R1–R10 named `reports/blind.md`
 > at all, so agents optimised six scored axes while the ranked list of what gives the frame
 > away went unread. A movement in an axis that does not move a tell does not move the gate.*
+
+### R2b-2. The other instruction set: `docs/LOOP.md` §5
+
+This brief is not the only standing-rules document, and until now it never said so. Nothing
+in R1–R10 referenced `docs/LOOP.md`, whose §5 carries seven rules that are the orchestrator's
+own statement of what these numbers are worth. Read them; the two that decide how your
+report is used are:
+
+* **§5.2 — never report a composite without its worst axis.** "It has spent five waves
+  averaging a dead 0 against a live 94. Quote `axes.structure` and `raw.ms_ssim` alongside
+  any score, or quote nothing."
+* **§5.7 — the blind test *is* the score.** "Everything in `scores/history.jsonl` is a proxy
+  that was picked for being cheap. When a proxy and the blind test disagree, the proxy is
+  wrong. It has disagreed once, by 9 pairs to nil."
+
+```bash
+node tools/blindcheck.mjs        # how many scored runs since the gate was last judged
+```
+
+> *Adherence: §5.6 says "run the blind test every wave, not at the end … five waves were
+> spent optimising proxies that a single 30-minute blind test would have invalidated on day
+> one." `scores/blind.jsonl` holds **one** human judgement — `waveH`, and its own note says
+> "backfilled" — against **14** scored runs in `scores/history.jsonl`. Four runs have landed
+> since, including the 29.44 → 16.85 collapse across the Wave I pose refit, and none was
+> judged. Same shape as every other rule here: it was a paragraph in a document agents were
+> never pointed at, and no tool compared the two ledgers. `blindcheck` is that command, and
+> `postflight` runs it for you.*
 
 ## R3. Gate every measurement, and say so in the report
 
@@ -201,12 +258,24 @@ Byte-identical frames mean the thing is dead and every constant you fit to it is
 
 ## R5. Isolate and measure. Never conclude from correlation
 
-Null the term out, re-capture, re-measure, conclude: `--skip <module>`,
-`--only <module>,pipeline`, `--config <term>=0`. The difference between the two captures
-*is* an exact semantic mask of what that term does.
+Null the term out, re-capture, re-measure, conclude. The difference between the two
+captures *is* an exact semantic mask of what that term does — **but only if the arm you
+think you turned off was actually turned off.** Pick the instrument by what the thing is:
+
+| the thing | how to null it | what NOT to use |
+|---|---|---|
+| a **module** (`ocean`, `rocks`, `vegetation`, …) | `--skip <module>` / `--only <module>,pipeline` — read by `src/modules.js`, and `capture.mjs` is now **fatal** on a name that is not in the manifest | — |
+| a **pass** (`ssao`, `ssr`, `dof`, `taa`, `volumetricFog`, `bloom`, …) | `node tools/ablate.mjs --targets <pass>`, or `__HALO__.togglePass()` | **`--skip <pass>` reaches no pass.** `src/render/pipeline.js`'s `PASS_MANIFEST` is a fixed list loaded unconditionally and never reads `skip`/`only` (`skip-flag-can-disable-a-pass` in `tools/refuted.json`) |
+| a **knob** (`aoStrength`, `exposure`, …) | `node tools/knobcheck.mjs --config k=v` to validate the key **before** spending a capture, then `--config <term>=0` | a `*Enabled` gate written `(c.k ?? cfg.k) !== false`: `--config` can only send `0` or `'false'`, never boolean `false`, so **3 of 7 pass switches cannot be turned off this way** (`knobcheck --gates`) |
 
 Do not write "X causes Y" unless you have a capture with X removed. Write "X correlates
 with Y; not isolated" — that sentence is allowed, and it is useful.
+
+**A byte-identical arm is not a result.** It is equally the signature of an inert
+subsystem *and* of a flag that did nothing, and this project has confused the two at least
+four times (`reports/vegetation.md:49`, `reports/tonemap.md:70`, `reports/taa.md:164`,
+`tools/_convprobe.mjs:16`) — including in the measurement registered as the disproof of
+KNOWN_ISSUES §8. Run a control arm you *know* differs before you believe a null.
 
 > *Why:* §8 is the orchestrator's own mistake, recorded verbatim: "I reasoned from a
 > correlation ('everything looks white, so the albedos must be white') instead of running

@@ -12,6 +12,23 @@
 # one tree the working copy of a file is routinely mid-write while an unrelated commit
 # runs (§16). Only what you are actually committing is inspected.
 #
+# The second check applies the same staged-blob technique to the INSTRUMENTS and the
+# RECORD — tools/*.mjs, tools/*.py, and every staged *.json / *.jsonl. The §16 hazard was
+# never specific to src/: scores/history.jsonl is the only longitudinal record, 17 files
+# read it, and it is hand-edited (its last row is a hand-typed discontinuity marker).
+#
 # Escape hatch (salvage commits — see commit 2651d8c, where landing 23 half-finished
 # subsystems on disk was the whole point):   git commit --no-verify
-exec node "$(git rev-parse --show-toplevel)/tools/parsecheck-staged.mjs"
+#
+# The third stage is ADVISORY and always exits 0: the staged reports/*.md. The commit is
+# the only machine gate every report in this project passes through (tools/checkpoint.md:
+# "the orchestrator should commit after every wave"), and the report-side rules R7 and R9
+# have never had an automatic trigger — measured adherence 0 of 28 for both. It prints and
+# gets out of the way.   Silence one commit: HALO_NO_REPORT_GATE=1 git commit ...
+ROOT="$(git rev-parse --show-toplevel)"
+node "$ROOT/tools/parsecheck-staged.mjs" || exit $?
+node "$ROOT/tools/stagedcheck.mjs" || exit $?
+if [ -z "$HALO_NO_REPORT_GATE" ] && [ -f "$ROOT/tools/reportgate.mjs" ]; then
+  node "$ROOT/tools/reportgate.mjs" || true
+fi
+exit 0

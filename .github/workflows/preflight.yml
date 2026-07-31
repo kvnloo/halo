@@ -38,8 +38,10 @@ jobs:
       - name: posecheck — no camera pose has sunk under the terrain
         run: node tools/_posecheck.mjs
 
-      - name: staged-blob parse gate is itself runnable
-        run: node tools/parsecheck-staged.mjs
+      - name: staged-blob parse gates are themselves runnable
+        run: |
+          node tools/parsecheck-staged.mjs
+          node tools/stagedcheck.mjs
 
       # `npm run selftest` so CI and a reviewer invoke the exact same string; the flag is
       # in capture.mjs's KNOWN_FLAGS, so this step stays silent when green rather than
@@ -55,20 +57,17 @@ jobs:
       - name: scores/history.jsonl is parseable and monotonically appended
         run: node tools/historycheck.mjs
 
-      # Advisory, never red: the trust chain over the written record. citecheck resolves the
-      # git objects and paths reports cite (four SHAs quoted as measurement provenance no
-      # longer exist, including the three in the KNOWN_ISSUES §28 reproduction, where
-      # `git show <bad> | grep -c` prints 0 — indistinguishable from a true negative).
-      # claimcheck finds refuted claims from tools/refuted.json still standing unannotated
-      # (§19's HALO_NO_DAEMON=1 had already spread to two other reports).
-      - name: citecheck / claimcheck (advisory)
-        run: |
-          node tools/citecheck.mjs --warn || true
-          node tools/claimcheck.mjs || true
-
-      # Advisory: joins scores/provenance.jsonl to scores/history.jsonl. Adjacent rows in the
-      # series that were captured under different poses.js / metrics.py are not one series —
-      # waveI-posefit -> fitstand -> handstand each changed both, and the only record of it is
-      # a hand-typed "== POSE REFIT LINE ==" row someone added afterwards.
-      - name: provcheck (advisory)
-        run: node tools/provcheck.mjs || true
+      # The trust chain over the written record. Findings here are advisory and never turn
+      # the job red; a check that CRASHED does, because `|| true` — what these four steps
+      # used to be — makes a tool that died on startup the same colour as a tool that passed.
+      # That is the project's signature failure (META_LEDGER round 5: citecheck "had a SECOND
+      # way of never measuring anything"; §28's own reproduction prints `0` for a dangling
+      # SHA, "indistinguishable from a true negative"). tools/advisory.mjs keeps the exit code:
+      #   0/1 = the check produced a result   >=2, a signal, or a stack trace = it did not run
+      #
+      #   citecheck  — the git objects and paths reports cite still resolve
+      #   claimcheck — refuted claims from tools/refuted.json still standing unannotated
+      #   provcheck  — adjacent history.jsonl rows share a pose set and an instrument
+      #   shotcheck  — a scored shots/<tag> holds frames from exactly one capture
+      - name: advisory checks (findings advisory, a crashed check is not)
+        run: node tools/advisory.mjs

@@ -1,26 +1,28 @@
 {
   "tag": "rescore_waveH",
   "n": 9,
+  "n_expected": 9,
+  "band_version": 2,
   "rescored_from": "shots/waveH",
-  "score": 16.39,
-  "score_comparative": 13.86,
-  "score_geometric": 8.39,
+  "score": 17.56,
+  "score_comparative": 14.21,
+  "score_geometric": 9.95,
   "score_legacy": 29.44,
   "axes": {
-    "structure": 21.0967,
-    "grade": 3.0656,
-    "perceptual": 16.3256,
-    "detail": 32.7433,
-    "geometry": 18.4511,
-    "spectrum": 11.36
+    "structure": 24.0378,
+    "grade": 4.3311,
+    "perceptual": 12.9744,
+    "detail": 37.0367,
+    "geometry": 23.6956,
+    "spectrum": 10.0344
   },
   "progress": {
-    "structure": 16.5867,
-    "grade": -60.0867,
-    "perceptual": 11.3133,
-    "detail": 10.3211,
-    "geometry": -41.55,
-    "spectrum": -146.1044
+    "structure": 22.2578,
+    "grade": -50.79,
+    "perceptual": 6.6411,
+    "detail": 13.5322,
+    "geometry": -36.37,
+    "spectrum": -129.5856
   },
   "axes_legacy": {
     "structure": 3.4233,
@@ -31,7 +33,7 @@
     "spectrum": 94.1533
   },
   "raw": {
-    "structure": 0.6855,
+    "structure": 0.2476,
     "grade": 0.6292,
     "perceptual": 0.6724,
     "detail": 0.3752,
@@ -75,220 +77,220 @@
   "worst": [
     {
       "pose": "ref_02220",
-      "score": 6.67,
+      "score": 8.22,
       "axes": {
-        "structure": 8.39,
-        "grade": 2.8,
-        "perceptual": 12.56,
-        "detail": 6.5,
-        "geometry": 2.59,
-        "spectrum": 0.33
+        "structure": 15.13,
+        "grade": 4.06,
+        "perceptual": 11.12,
+        "detail": 6.37,
+        "geometry": 1.56,
+        "spectrum": 0.88
       }
     },
     {
       "pose": "ref_01500",
-      "score": 9.49,
+      "score": 10.72,
       "axes": {
-        "structure": 9.47,
-        "grade": 3.9,
-        "perceptual": 17.31,
-        "detail": 5.99,
-        "geometry": 15.45,
-        "spectrum": 0.19
+        "structure": 14.08,
+        "grade": 5.16,
+        "perceptual": 13.75,
+        "detail": 5.78,
+        "geometry": 21.55,
+        "spectrum": 0.61
       }
     },
     {
-      "pose": "ref_00840",
-      "score": 13.82,
+      "pose": "ref_00720",
+      "score": 13.6,
       "axes": {
-        "structure": 17.52,
-        "grade": 2.31,
-        "perceptual": 7.42,
-        "detail": 33.77,
-        "geometry": 30.45,
-        "spectrum": 1.57
+        "structure": 15.8,
+        "grade": 3.56,
+        "perceptual": 6.28,
+        "detail": 10.43,
+        "geometry": 2.05,
+        "spectrum": 74.53
       }
     }
   ],
   "per_pose": [
     {
       "pose": "ref_00000",
-      "score": 17.21,
+      "score": 17.74,
       "axes": {
-        "structure": 11.07,
-        "grade": 3.09,
-        "perceptual": 17.56,
-        "detail": 73.08,
-        "geometry": 8.76,
-        "spectrum": 0.98
+        "structure": 9.81,
+        "grade": 4.37,
+        "perceptual": 13.89,
+        "detail": 83.53,
+        "geometry": 9.58,
+        "spectrum": 1.89
       },
       "progress": {
-        "structure": 3,
-        "grade": -58.58,
-        "perceptual": 17.24,
-        "detail": 88.82,
-        "geometry": -9.33,
-        "spectrum": -133.7
+        "structure": -0.6,
+        "grade": -49.49,
+        "perceptual": 10.87,
+        "detail": 94.53,
+        "geometry": -2.25,
+        "spectrum": -118.79
       }
     },
     {
       "pose": "ref_00120",
-      "score": 21.06,
+      "score": 21.11,
       "axes": {
-        "structure": 11.69,
-        "grade": 3.04,
-        "perceptual": 20.95,
-        "detail": 92.86,
-        "geometry": 15.01,
-        "spectrum": 0.09
+        "structure": 11.29,
+        "grade": 4.32,
+        "perceptual": 15.66,
+        "detail": 96.97,
+        "geometry": 20.71,
+        "spectrum": 0.37
       },
       "progress": {
-        "structure": 4.61,
-        "grade": -59.47,
-        "perceptual": 22.81,
-        "detail": 102.36,
-        "geometry": 24.97,
-        "spectrum": -380.02
+        "structure": 3.66,
+        "grade": -50.26,
+        "perceptual": 14.85,
+        "detail": 108.5,
+        "geometry": 34.07,
+        "spectrum": -333.06
       }
     },
     {
       "pose": "ref_00450",
-      "score": 16.26,
+      "score": 17.08,
       "axes": {
-        "structure": 12.28,
-        "grade": 3.12,
-        "perceptual": 29.74,
-        "detail": 36.74,
-        "geometry": 9.67,
-        "spectrum": 3.65
+        "structure": 18.28,
+        "grade": 4.4,
+        "perceptual": 20.1,
+        "detail": 45.24,
+        "geometry": 11.08,
+        "spectrum": 4.72
       },
       "progress": {
-        "structure": 6.09,
-        "grade": -57.98,
-        "perceptual": 34.44,
-        "detail": 61.49,
-        "geometry": -2.27,
-        "spectrum": -48.74
+        "structure": 18.48,
+        "grade": -48.98,
+        "perceptual": 23.16,
+        "detail": 66.33,
+        "geometry": 5.23,
+        "spectrum": -44.89
       }
     },
     {
       "pose": "ref_00600",
-      "score": 30.57,
+      "score": 25.15,
       "axes": {
-        "structure": 95.08,
-        "grade": 3.79,
-        "perceptual": 24.68,
-        "detail": 1.12,
-        "geometry": 0.94,
-        "spectrum": 0.75
+        "structure": 78.95,
+        "grade": 5.06,
+        "perceptual": 17.57,
+        "detail": 0.8,
+        "geometry": 0.34,
+        "spectrum": 1.58
       },
       "progress": {
-        "structure": 114.41,
-        "grade": -47.17,
-        "perceptual": 28.14,
-        "detail": -215.06,
-        "geometry": -323.6,
-        "spectrum": -154.37
+        "structure": 82.9,
+        "grade": -39.68,
+        "perceptual": 18.66,
+        "detail": -219.02,
+        "geometry": -335.06,
+        "spectrum": -136.78
       }
     },
     {
       "pose": "ref_00720",
-      "score": 14.09,
+      "score": 13.6,
       "axes": {
-        "structure": 13.91,
-        "grade": 2.32,
-        "perceptual": 5.19,
-        "detail": 9.9,
-        "geometry": 3.1,
-        "spectrum": 92.69
+        "structure": 15.8,
+        "grade": 3.56,
+        "perceptual": 6.28,
+        "detail": 10.43,
+        "geometry": 2.05,
+        "spectrum": 74.53
       },
       "progress": {
-        "structure": 9.8,
-        "grade": -75.56,
-        "perceptual": -19.83,
-        "detail": -0.62,
-        "geometry": -109.8,
-        "spectrum": 103.86
+        "structure": 13.93,
+        "grade": -64.1,
+        "perceptual": -15.6,
+        "detail": 2.24,
+        "geometry": -108.65,
+        "spectrum": 87.85
       }
     },
     {
       "pose": "ref_00840",
-      "score": 13.82,
+      "score": 21.23,
       "axes": {
-        "structure": 17.52,
-        "grade": 2.31,
-        "perceptual": 7.42,
-        "detail": 33.77,
-        "geometry": 30.45,
-        "spectrum": 1.57
+        "structure": 33.78,
+        "grade": 3.55,
+        "perceptual": 7.9,
+        "detail": 41.49,
+        "geometry": 50.01,
+        "spectrum": 2.63
       },
       "progress": {
-        "structure": 16.79,
-        "grade": -75.79,
-        "perceptual": -9,
-        "detail": 58.17,
-        "geometry": 58.56,
-        "spectrum": -99.83
+        "structure": 38.91,
+        "grade": -64.3,
+        "perceptual": -7.86,
+        "detail": 62.9,
+        "geometry": 69.65,
+        "spectrum": -89.33
       }
     },
     {
       "pose": "ref_01500",
-      "score": 9.49,
+      "score": 10.72,
       "axes": {
-        "structure": 9.47,
-        "grade": 3.9,
-        "perceptual": 17.31,
-        "detail": 5.99,
-        "geometry": 15.45,
-        "spectrum": 0.19
+        "structure": 14.08,
+        "grade": 5.16,
+        "perceptual": 13.75,
+        "detail": 5.78,
+        "geometry": 21.55,
+        "spectrum": 0.61
       },
       "progress": {
-        "structure": -1.59,
-        "grade": -45.66,
-        "perceptual": 16.79,
-        "detail": -33.76,
-        "geometry": 26.57,
-        "spectrum": -287.45
+        "structure": 10.39,
+        "grade": -38.38,
+        "perceptual": 10.55,
+        "detail": -31.95,
+        "geometry": 35.77,
+        "spectrum": -252.54
       }
     },
     {
       "pose": "ref_01800",
-      "score": 18.31,
+      "score": 23.22,
       "axes": {
-        "structure": 10.46,
-        "grade": 3.22,
-        "perceptual": 11.52,
-        "detail": 34.73,
-        "geometry": 80.09,
-        "spectrum": 1.99
+        "structure": 19.22,
+        "grade": 4.5,
+        "perceptual": 10.5,
+        "detail": 42.72,
+        "geometry": 96.38,
+        "spectrum": 3.1
       },
       "progress": {
-        "structure": 1.33,
-        "grade": -56.17,
-        "perceptual": 4.3,
-        "detail": 59.29,
-        "geometry": 94.67,
-        "spectrum": -84.22
+        "structure": 20.06,
+        "grade": -47.42,
+        "perceptual": 1.63,
+        "detail": 64.06,
+        "geometry": 107.89,
+        "spectrum": -75.76
       }
     },
     {
       "pose": "ref_02220",
-      "score": 6.67,
+      "score": 8.22,
       "axes": {
-        "structure": 8.39,
-        "grade": 2.8,
-        "perceptual": 12.56,
-        "detail": 6.5,
-        "geometry": 2.59,
-        "spectrum": 0.33
+        "structure": 15.13,
+        "grade": 4.06,
+        "perceptual": 11.12,
+        "detail": 6.37,
+        "geometry": 1.56,
+        "spectrum": 0.88
       },
       "progress": {
-        "structure": -5.16,
-        "grade": -64.4,
-        "perceptual": 6.93,
-        "detail": -27.8,
-        "geometry": -133.72,
-        "spectrum": -230.47
+        "structure": 12.59,
+        "grade": -54.5,
+        "perceptual": 3.51,
+        "detail": -25.8,
+        "geometry": -133.98,
+        "spectrum": -202.97
       }
     }
   ]

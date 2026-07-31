@@ -12,3 +12,7 @@ shots/*
 # A dozen agents were each committing their own copies of these.
 scores/_tmp_*.json
 .venv/
+# tools/preflight.mjs's receipt: "this tree was gated at this moment". tools/capture.mjs
+# reads it to say whether preflight has run since src/ last changed. It describes one
+# working tree at one instant and is meaningless in anyone else's clone.
+.preflight-stamp.json

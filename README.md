@@ -10,6 +10,33 @@ npm install
 npm run dev            # http://localhost:5173
 ```
 
+## The reference material is not in this repo
+
+`reference.mp4` and everything under `ref/` — the extracted keyframes and 4K detail crops —
+are frames of a commercial game. They are not ours to redistribute, so they are gitignored
+and absent from history. The engine runs without them; the *measurement* tooling does not,
+because `tools/metrics.py` has nothing to score against.
+
+To reproduce the loop, supply your own capture of the beach as `reference.mp4` and rebuild
+the layout the tools expect. No script survives for this — the extraction was done by hand
+early on and never got written down, which is its own small lesson:
+
+```
+ref/keyframes/kf_NNNNN.png   # frame NNNNN of the clip, zero-padded to 5 digits
+ref/detail/*_4k.png          # full-res crops: rock, sand, sky, bridge, weapon
+ref/roi_signatures.json      # per-region stats the scores are compared against
+```
+
+```bash
+ffmpeg -i reference.mp4 -vf "select='not(mod(n,15))'" -vsync 0 \
+       -frame_pts 1 ref/keyframes/kf_%05d.png
+.venv/bin/python tools/roi.py --all ref/keyframes ref/rois     # regenerate signatures
+```
+
+Camera poses in `src/world/poses.js` are hand-fitted to *our* clip, so a different capture
+needs them refitted (`tools/fitpose.mjs`). Scores are only meaningful against the reference
+they were fitted to — the numbers in `scores/history.jsonl` and `docs/TARGETS.md` are ours.
+
 ## How this is built
 
 The interesting part of this project is not the renderer, it is the **loop**.

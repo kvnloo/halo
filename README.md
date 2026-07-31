@@ -5,6 +5,9 @@ A first-person shooter in Three.js, built to match the visual bar of
 `reference.mp4`; every visual decision in this repo is measured against it rather
 than eyeballed.
 
+**Reference video (source on X):** [Halo: Campaign Evolved — 4K max settings / DLSS 4.5 capture by @GeForce_JacobF](https://x.com/GeForce_JacobF/status/2082333194335170983)  
+Reposted for project context: [@_kvnloo](https://x.com/_kvnloo).
+
 ```bash
 npm install
 npm run dev            # http://localhost:5173
@@ -17,7 +20,10 @@ are frames of a commercial game. They are not ours to redistribute, so they are 
 and absent from history. The engine runs without them; the *measurement* tooling does not,
 because `tools/metrics.py` has nothing to score against.
 
-To reproduce the loop, supply your own capture of the beach as `reference.mp4` and rebuild
+**Public source clip:** the 4K beach capture above (NVIDIA / @GeForce_JacobF on X). Locally,
+download/save it as `reference.mp4` for the measurement loop (do not commit the file).
+
+To reproduce the loop, supply that capture (or your own beach take) as `reference.mp4` and rebuild
 the layout the tools expect. No script survives for this — the extraction was done by hand
 early on and never got written down, which is its own small lesson:
 

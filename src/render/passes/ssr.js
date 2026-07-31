@@ -1,6 +1,5 @@
 import * as THREE from 'three';
 import { Pass, fsMaterial, makeRT, FullScreenQuad } from '../RenderPipeline.js';
-import { ensureOpaqueDepth, opaqueDepthTexture } from './ssao.js';
 
 /**
  * `ssr` — screen-space reflections, for wet sand and water.
@@ -29,9 +28,10 @@ import { ensureOpaqueDepth, opaqueDepthTexture } from './ssao.js';
  * ---------------------------------------------------------------------------
  * THE MARCH
  *
- * A perspective-correct screen-space DDA against the OPAQUE depth snapshot (see the top
- * of `ssao.js` — `pipe.depthTex` itself is wiped by the viewmodel's `clearDepth()` before
- * post runs, which is why this pass rendered nothing at all until that was fixed), not a
+ * A perspective-correct screen-space DDA against `pipe.depthTex` — opaque world depth,
+ * valid for the whole post chain since KNOWN_ISSUES §18 was closed (`reports/depth.md`;
+ * before that this pass marched against a buffer containing only the viewmodel and its
+ * first guard rejected every world pixel) — not a
  * view-space march. The ray's two endpoints are projected to screen, and the march interpolates
  * **linearly in screen space** while interpolating **1/z linearly** alongside — which is
  * the only interpolation that is correct under perspective. That matters here more than
@@ -147,9 +147,9 @@ import { ensureOpaqueDepth, opaqueDepthTexture } from './ssao.js';
  * The right fix for the sea is research §6.2 option (2): trace SSR **inside the ocean
  * surface shader**, from the water surface, against the opaque depth buffer. The ray
  * origin and the wave normal are both correct there, there is no one-frame lag, and the
- * opaque depth it needs is now published as `pipe.opaqueDepthTex` (see the top of
- * `ssao.js`) — before that snapshot existed there was no usable depth for it to march
- * against, which is a large part of why this was never wired up.
+ * opaque depth it needs is `pipe.depthTex`, which since KNOWN_ISSUES §18 closed actually
+ * contains the world — before that there was no usable depth for it to march against,
+ * which is a large part of why this was never wired up.
  *
  * If the ocean owner instead wants the published-texture route (§6.2 option 1), the
  * binding is:
@@ -167,7 +167,6 @@ import { ensureOpaqueDepth, opaqueDepthTexture } from './ssao.js';
  *   ssrEnabled 1     ssrStrength 1.0    ssrMaxDist 90     ssrThickness 0.55
  *   ssrThickMax 2.5  ssrEdgeFade 0.12   ssrAlpha 0.15     ssrWetRoughClamp 0.12
  *   ssrDepthPhi 0.06
- *   ssrLegacyDepth 0 — read the broken shared `pipe.depthTex` again, for an A/B
  *   ssrDebug 0       1 = reflection, 2 = confidence, 3 = applied weight
  */
 
@@ -728,10 +727,6 @@ export function create(opts = {}) {
     ctx.on?.('camera:teleport', () => { frames = 0; });
     ctx.on?.('engine:resize', () => { frames = 0; });
 
-    // `pipe.depthTex` holds the viewmodel and nothing else by the time post runs — see the
-    // header of ssao.js. Without this the march's first guard rejects every world pixel.
-    ensureOpaqueDepth(ctx, pipe);
-
     p.setSize(pipe.w > 2 ? pipe.w : ctx.size.w, pipe.h > 2 ? pipe.h : ctx.size.h, ctx);
   };
 
@@ -774,7 +769,9 @@ export function create(opts = {}) {
     const pe = pipe.unjitteredProj.elements;
     const tanX = 1 / Math.max(Math.abs(pe[0]), 1e-6);
     const tanY = 1 / Math.max(Math.abs(pe[5]), 1e-6);
-    const depthTex = (c.ssrLegacyDepth ? pipe.depthTex : opaqueDepthTexture(pipe));
+    // Canonical world depth (KNOWN_ISSUES §18 closed). The private snapshot this used to
+    // read was proved bit-identical and has been deleted; see the header of ssao.js.
+    const depthTex = pipe.depthTex;
 
     /* -------------------------------------------------- 1. colour pyramid */
     {

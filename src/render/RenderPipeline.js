@@ -93,6 +93,22 @@ export class Pass {
  * Scene rendering itself is split into layers so translucent things (water, particles,
  * the viewmodel) can be sequenced correctly relative to post effects that need the
  * opaque-only image (SSR, refraction, AO).
+ *
+ * ---------------------------------------------------------------------------
+ * DEPTH CONTRACT - read this before you sample depth anywhere.
+ *
+ *   pipe.depthTex      Raw (non-linear) depth of the OPAQUE WORLD, full resolution,
+ *                      NearestFilter, built by the G-buffer pre-pass under the WORLD
+ *                      camera's projection. `1.0` means sky/nothing. Valid for the whole
+ *                      frame, including the entire post chain. Does NOT contain the
+ *                      viewmodel, the water surface, or particles.
+ *   pipe.viewDepthTex  Raw depth of the VIEWMODEL alone, under `viewCamera`'s projection
+ *                      (near 0.002, far 12). `1.0` means "not the weapon". Use it as a
+ *                      mask, not as a distance - its near/far are not the world's.
+ *
+ * Historically these were one texture, `scene.js` cleared it before the weapon draw, and
+ * every post pass that sampled depth was reading a buffer containing a gun and nothing
+ * else (KNOWN_ISSUES #18). That is fixed; the two are now separate attachments.
  */
 export const LAYER = {
   DEFAULT: 0,
@@ -134,9 +150,40 @@ export class RenderPipeline {
     this._maxAniso = renderer.capabilities.getMaxAnisotropy();
 
     // Depth is sampled by fog, water, AO, SSR and clouds - it must be a real texture.
+    //
+    // THIS BUFFER IS THE WORLD'S, AND ONLY THE WORLD'S (KNOWN_ISSUES #18).
+    // It is written once per frame, by the G-buffer pre-pass, over the OPAQUE + DEFAULT
+    // layers. Nothing else writes it: sky, water, glass and particles all render with
+    // `depthWrite: false`, and the viewmodel now has its own attachment (below). So from
+    // the end of the pre-pass to the end of the frame `depthTex` holds opaque world depth
+    // and holds it unchanged - which is exactly the contract every post pass assumed and
+    // none of them got, because step 7 of `scene.js` used to clear this texture and refill
+    // it with the weapon alone.
     this.depthTex = new THREE.DepthTexture(1, 1, THREE.FloatType);
     this.depthTex.minFilter = THREE.NearestFilter;
     this.depthTex.magFilter = THREE.NearestFilter;
+
+    // The viewmodel's private depth attachment.
+    //
+    // The first-person weapon is drawn through `viewCamera` (near 0.002 m, far 12 m), a
+    // completely different projection from the world camera (near 0.06 m, far 12000 m).
+    // Its depth values are therefore not comparable with world depth even in principle -
+    // a gun 0.3 m from the eye writes a value that decodes, under the world's near/far,
+    // to ~8-22 m. It cannot share a buffer with the world; it can only overwrite it.
+    // So it gets its own, cleared before the weapon draw, and `scene.js` swaps it onto
+    // `sceneRT` for that one draw and swaps the world's back afterwards. three r0.185.1
+    // supports exactly this: `WebGLRenderer.setRenderTarget` compares the target's current
+    // `depthTexture` against `__boundDepthTexture` and re-runs `setupDepthRenderbuffer`
+    // when they differ (three.module.js:18925-18945). Two `framebufferTexture2D` calls a
+    // frame, no copies, no extra draws.
+    //
+    // Published because it is also an exact viewmodel MASK: it is cleared to 1.0 and only
+    // the weapon writes it, so `texture(tViewDepth, uv).r < 1.0` is true on weapon pixels
+    // and nowhere else. Any depth-driven post pass that must not treat the gun as though
+    // it were the beach behind it (fog, DoF) can gate on that in one line.
+    this.viewDepthTex = new THREE.DepthTexture(1, 1, THREE.FloatType);
+    this.viewDepthTex.minFilter = THREE.NearestFilter;
+    this.viewDepthTex.magFilter = THREE.NearestFilter;
 
     // G-buffer: MRT0 = view-space normal (xyz) + roughness (w)
     //           MRT1 = motion vector (xy) + material id (z) + curvature/edge (w)
@@ -154,6 +201,7 @@ export class RenderPipeline {
     for (const t of this.gbuffer.textures) t.colorSpace = THREE.NoColorSpace;
 
     // HDR scene colour (shares the pre-pass depth so opaque geometry needs no re-depth).
+    // `scene.js` step 7 temporarily points this at `viewDepthTex` and puts it back.
     this.sceneRT = makeRT(1, 1, { type: this.opts.hdrType, depthBuffer: true });
     this.sceneRT.depthTexture = this.depthTex;
 
@@ -190,8 +238,14 @@ export class RenderPipeline {
     const rw = Math.max(2, Math.round(w * s)), rh = Math.max(2, Math.round(h * s));
     if (rw === this.w && rh === this.h) return;
     this.w = rw; this.h = rh;
-    this.depthTex.image.width = rw; this.depthTex.image.height = rh;
-    this.depthTex.needsUpdate = true;
+    // Both depth attachments must track the target size: three throws
+    // 'Attached DepthTexture is initialized to the incorrect size' on the next bind
+    // otherwise, and `viewDepthTex` is only bound once a frame so the throw would land
+    // in the middle of the weapon draw rather than at the resize.
+    for (const dt of [this.depthTex, this.viewDepthTex]) {
+      dt.image.width = rw; dt.image.height = rh;
+      dt.needsUpdate = true;
+    }
     for (const rt of [this.gbuffer, this.sceneRT, this.opaqueRT, this.rtA, this.rtB]) rt.setSize(rw, rh);
     this.viewCamera.aspect = w / h;
     this.viewCamera.updateProjectionMatrix();
@@ -259,6 +313,8 @@ export class RenderPipeline {
   dispose() {
     for (const p of this.passes) p.dispose?.();
     for (const rt of [this.gbuffer, this.sceneRT, this.opaqueRT, this.rtA, this.rtB]) rt?.dispose();
+    this.depthTex?.dispose();
+    this.viewDepthTex?.dispose();
     this._copyQuad.dispose();
   }
 }

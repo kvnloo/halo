@@ -75,13 +75,33 @@ class Builder {
   vert(p, bi, col, fx) {
     this.pos.push(p.x, p.y, p.z);
     this.col.push(col.r, col.g, col.b);
-    this.fx.push(fx[0], fx[1], fx[2]);
+    this.fx.push(fx[0], fx[1], fx[2], fx[3] ?? SURF.SUIT);
     this.si.push(bi, 0, 0, 0);
     this.sw.push(1, 0, 0, 0);
     return this.pos.length / 3 - 1;
   }
   quad(a, b, c, d) { this.idx.push(a, b, c, a, c, d); }
   tri(a, b, c) { this.idx.push(a, b, c); }
+
+  /**
+   * Emit a convex polygon with the winding chosen so its normal points away from
+   * `ref`. Chamfered boxes have 26 facets whose correct winding is genuinely hard to
+   * reason about by hand, and a single flipped quad renders as a black hole in the
+   * armour. Deciding it from the geometry cannot be got wrong.
+   */
+  poly(bi, pts, col, fx, ref) {
+    if (pts.length < 3) return;
+    _e.set(0, 0, 0);
+    for (const p of pts) _e.add(p);
+    _e.divideScalar(pts.length);
+    _f.copy(pts[1]).sub(pts[0]).cross(_c.copy(pts[2]).sub(pts[0]));
+    const outward = _e.clone().sub(ref);
+    const flip = _f.dot(outward) < 0;
+    const v = pts.map((p) => this.vert(p, bi, col, fx));
+    for (let i = 1; i < v.length - 1; i++) {
+      if (flip) this.tri(v[0], v[i + 1], v[i]); else this.tri(v[0], v[i], v[i + 1]);
+    }
+  }
 
   /**
    * A tapered tube from `p0` to `p1`.
@@ -157,16 +177,26 @@ class Builder {
     }
   }
 
-  /** Ellipsoid — heads, methane tanks, joints. */
+  /**
+   * Ellipsoid — heads, methane tanks, joints.
+   *
+   * `o.theta = [start, length]` and `o.phi = [start, length]` cut a partial shell, which
+   * is how visors are made: a lens that is a slightly larger copy of the helmet ellipsoid,
+   * restricted to the front, hugs the helmet surface exactly. A separate protruding
+   * ellipsoid does not — it reads as a snout.
+   * -Z is the facing direction, which is theta = -PI/2.
+   */
   blob(bi, ctr, rx, ry, rz, o = {}) {
     const seg = o.seg ?? 10, rows = o.rows ?? 7, col = o.col, fx = o.fx || [0, 0, 0.6];
     const sq = o.squash || null;   // [yFrom, scaleXZ] pinch, for beaks/snouts
+    const th0 = o.theta ? o.theta[0] : 0, thL = o.theta ? o.theta[1] : Math.PI * 2;
+    const ph0 = o.phi ? o.phi[0] : 0, phL = o.phi ? o.phi[1] : Math.PI;
     const grid = [];
     for (let r = 0; r <= rows; r++) {
-      const phi = (r / rows) * Math.PI;
+      const phi = ph0 + (r / rows) * phL;
       const row = [];
       for (let i = 0; i <= seg; i++) {
-        const th = (i / seg) * Math.PI * 2;
+        const th = th0 + (i / seg) * thL;
         let sx = Math.sin(phi) * Math.cos(th), sy = Math.cos(phi), sz = Math.sin(phi) * Math.sin(th);
         let k = 1;
         if (sq && sy > sq[0]) k = 1 - (1 - sq[1]) * ((sy - sq[0]) / (1 - sq[0]));
@@ -181,22 +211,71 @@ class Builder {
         this.quad(grid[r][i], grid[r][i + 1], grid[r + 1][i + 1], grid[r + 1][i]);
   }
 
-  /** Flat-shaded box, optionally tapered — armour plates, weapon bodies. */
+  /**
+   * Flat-shaded box, optionally tapered — armour plates, weapon bodies.
+   *
+   * `o.bevel` (metres) chamfers every edge and corner. That is the single change that
+   * makes a plate stop reading as a painted-on colour region: an un-chamfered box has
+   * one lit face and one shadowed face meeting at a 90 degree crease, which carries no
+   * highlight, whereas a 45 degree chamfer catches a bright specular line along every
+   * silhouette edge and the eye reads that line as thickness. Costs 44 triangles
+   * instead of 12.
+   */
   plate(bi, ctr, half, o = {}) {
     const col = o.col, fx = o.fx || [0, 0, 0.5];
     const t = o.taper ?? 1, sh = o.shear || [0, 0];
-    const P = (sx, sy, sz) => {
+    const b = o.bevel ?? 0;
+    const P = (sx, sy, sz, ix, iy, iz) => {
       const k = sy > 0 ? t : 1;
-      return _d.set(ctr.x + sx * half[0] * k + sh[0] * sy,
-        ctr.y + sy * half[1],
-        ctr.z + sz * half[2] * k + sh[1] * sy).clone();
+      const hx = Math.max(half[0] * k - ix, half[0] * k * 0.1);
+      const hy = Math.max(half[1] - iy, half[1] * 0.1);
+      const hz = Math.max(half[2] * k - iz, half[2] * k * 0.1);
+      return _d.set(ctr.x + sx * hx + sh[0] * sy, ctr.y + sy * hy, ctr.z + sz * hz + sh[1] * sy).clone();
     };
-    const c = [P(-1, -1, -1), P(1, -1, -1), P(1, -1, 1), P(-1, -1, 1),
-      P(-1, 1, -1), P(1, 1, -1), P(1, 1, 1), P(-1, 1, 1)];
-    const faces = [[0, 3, 2, 1], [4, 5, 6, 7], [0, 1, 5, 4], [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7]];
-    for (const f of faces) {
-      const v = f.map((i) => this.vert(c[i], bi, col, fx));
-      this.quad(v[0], v[1], v[2], v[3]);
+    if (b <= 0) {
+      const c = [P(-1, -1, -1, 0, 0, 0), P(1, -1, -1, 0, 0, 0), P(1, -1, 1, 0, 0, 0), P(-1, -1, 1, 0, 0, 0),
+        P(-1, 1, -1, 0, 0, 0), P(1, 1, -1, 0, 0, 0), P(1, 1, 1, 0, 0, 0), P(-1, 1, 1, 0, 0, 0)];
+      const faces = [[0, 3, 2, 1], [4, 5, 6, 7], [0, 1, 5, 4], [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7]];
+      for (const f of faces) {
+        const v = f.map((i) => this.vert(c[i], bi, col, fx));
+        this.quad(v[0], v[1], v[2], v[3]);
+      }
+      return;
+    }
+
+    // Three vertices per corner, one owned by each adjacent face: the face keeps its
+    // own axis at full extent and is inset on the other two.
+    const V = {};
+    for (const sx of [-1, 1]) for (const sy of [-1, 1]) for (const sz of [-1, 1]) {
+      V[`x${sx}${sy}${sz}`] = P(sx, sy, sz, 0, b, b);
+      V[`y${sx}${sy}${sz}`] = P(sx, sy, sz, b, 0, b);
+      V[`z${sx}${sy}${sz}`] = P(sx, sy, sz, b, b, 0);
+    }
+    const ref = _b.copy(ctr);
+    // 6 main faces
+    for (const [ax, s] of [['x', 1], ['x', -1], ['y', 1], ['y', -1], ['z', 1], ['z', -1]]) {
+      const pts = [];
+      for (const [u, v] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+        pts.push(ax === 'x' ? V[`x${s}${u}${v}`] : ax === 'y' ? V[`y${u}${s}${v}`] : V[`z${u}${v}${s}`]);
+      }
+      this.poly(bi, pts, col, fx, ref);
+    }
+    // 12 edge chamfers: each edge fixes two signs, the third runs -1 -> +1
+    const EDGES = [
+      ['x', 'y', 'z'], ['y', 'z', 'x'], ['z', 'x', 'y'],
+    ];
+    for (const [a1, a2, free] of EDGES) {
+      for (const s1 of [-1, 1]) for (const s2 of [-1, 1]) {
+        const key = (ax, fv) => {
+          const sg = { [a1]: s1, [a2]: s2, [free]: fv };
+          return `${ax}${sg.x}${sg.y}${sg.z}`;
+        };
+        this.poly(bi, [V[key(a1, -1)], V[key(a2, -1)], V[key(a2, 1)], V[key(a1, 1)]], col, fx, ref);
+      }
+    }
+    // 8 corner chamfers
+    for (const sx of [-1, 1]) for (const sy of [-1, 1]) for (const sz of [-1, 1]) {
+      this.poly(bi, [V[`x${sx}${sy}${sz}`], V[`y${sx}${sy}${sz}`], V[`z${sx}${sy}${sz}`]], col, fx, ref);
     }
   }
 
@@ -204,7 +283,7 @@ class Builder {
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute(this.pos, 3));
     g.setAttribute('color', new THREE.Float32BufferAttribute(this.col, 3));
-    g.setAttribute('aFx', new THREE.Float32BufferAttribute(this.fx, 3));
+    g.setAttribute('aFx', new THREE.Float32BufferAttribute(this.fx, 4));
     g.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(this.si, 4));
     g.setAttribute('skinWeight', new THREE.Float32BufferAttribute(this.sw, 4));
     g.setIndex(this.idx);
@@ -246,16 +325,32 @@ const PAL = {
   jackalPlate: srgb(0x6a4a2d), jackalSkin: srgb(0xa8977a), jackalDark: srgb(0x3b3128),
   glowCyan: srgb(0x8ef2ff), glowGreen: srgb(0x9dff7a), glowViolet: srgb(0xc98cff),
   metal: srgb(0x54585f),
+  // Visors are near-black on purpose. A visor is read entirely from its specular: a
+  // mid-grey lens has no contrast against the helmet and disappears.
+  visorDark: srgb(0x14161c), visorWarm: srgb(0x1c1712), trim: srgb(0x1b1d22),
 };
 
 /* ------------------------------------------------------------------ the actors */
 
-/* fx attribute = [emissive, metalness, roughness] */
-const FX_SUIT = [0, 0.05, 0.62];
-const FX_PLATE = [0, 0.45, 0.34];
-const FX_METAL = [0, 0.85, 0.28];
-const FX_GLOW = [4.0, 0.0, 0.9];
-const FX_GLOW_SOFT = [1.6, 0.0, 0.9];
+/**
+ * `aFx` attribute = [emissive, metalness, roughness, surfaceClass].
+ *
+ * The fourth channel is what lets one program shade five different materials. Before it
+ * existed every actor surface was a flat Lambert facet with no seams, no bevel wear and
+ * — measured — not one pixel above luminance 200 anywhere on any of the twelve actors,
+ * in a frame whose sand reaches 221. Flat plastic. The class selects which procedural
+ * detail model runs in the fragment shader.
+ */
+const SURF = { SUIT: 0, PLATE: 1, METAL: 2, GLOW: 3, VISOR: 4, SKIN: 5 };
+
+const FX_SUIT = [0, 0.05, 0.62, SURF.SUIT];
+const FX_PLATE = [0, 0.42, 0.30, SURF.PLATE];
+const FX_METAL = [0, 0.85, 0.24, SURF.METAL];
+const FX_GLOW = [4.0, 0.0, 0.9, SURF.GLOW];
+const FX_GLOW_SOFT = [1.6, 0.0, 0.9, SURF.GLOW];
+const FX_SKIN = [0, 0.02, 0.70, SURF.SKIN];
+/** Visor: near-black dielectric with a mirror finish. The spec IS the read. */
+const FX_VISOR = [0, 0.30, 0.055, SURF.VISOR];
 
 function buildGrunt(major) {
   const T = [
@@ -292,13 +387,21 @@ function buildGrunt(major) {
   B.limb(I('pelvis'), W[I('pelvis')].clone().add(_a.set(0, -0.06, 0)),
     W[I('chest')], [[0, 0.155, 0.14], [0.4, 0.175, 0.155], [1, 0.145, 0.135]],
     { sides: 10, e: 3.0, col: PAL.gruntSkin, fx: FX_SUIT });
-  // chest plate
+  // chest plate — chamfered, with a proud collar band so it layers instead of reading
+  // as one painted slab
   B.plate(I('chest'), W[I('chest')].clone().add(_a.set(0, 0.02, -0.10)), [0.155, 0.13, 0.07],
-    { col: armor, fx: FX_PLATE, taper: 0.9 });
+    { col: armor, fx: FX_PLATE, taper: 0.9, bevel: 0.020 });
+  B.plate(I('chest'), W[I('chest')].clone().add(_a.set(0, 0.115, -0.115)), [0.125, 0.030, 0.065],
+    { col: PAL.trim, fx: FX_METAL, taper: 0.9, bevel: 0.010 });
+  B.plate(I('chest'), W[I('chest')].clone().add(_a.set(0, -0.04, -0.155)), [0.085, 0.055, 0.022],
+    { col: armorHi, fx: FX_PLATE, bevel: 0.010 });
   // shoulder pads
   for (const s of [1, -1]) {
-    B.plate(I(s > 0 ? 'clavL' : 'clavR'), W[I(s > 0 ? 'clavL' : 'clavR')].clone().add(_a.set(s * 0.03, 0.02, 0)),
-      [0.075, 0.07, 0.085], { col: armorHi, fx: FX_PLATE, taper: 0.65 });
+    const C = s > 0 ? 'clavL' : 'clavR';
+    B.plate(I(C), W[I(C)].clone().add(_a.set(s * 0.03, 0.02, 0)),
+      [0.075, 0.07, 0.085], { col: armorHi, fx: FX_PLATE, taper: 0.65, bevel: 0.016 });
+    B.plate(I(C), W[I(C)].clone().add(_a.set(s * 0.055, -0.045, 0)),
+      [0.038, 0.028, 0.075], { col: PAL.trim, fx: FX_METAL, bevel: 0.008 });
   }
 
   // methane backpack: two tanks + a regulator block
@@ -315,11 +418,27 @@ function buildGrunt(major) {
 
   // head: small skull under a conical mask with a glowing intake
   B.blob(I('head'), W[I('head')].clone().add(_a.set(0, 0.03, 0.02)), 0.105, 0.105, 0.10,
-    { col: PAL.gruntSkin, fx: FX_SUIT, seg: 10, rows: 7 });
+    { col: PAL.gruntSkin, fx: FX_SKIN, seg: 10, rows: 7 });
   B.limb(I('head'), W[I('head')].clone().add(_a.set(0, 0.055, 0.05)),
     W[I('head')].clone().add(_a.set(0, -0.045, -0.155)),
     [[0, 0.11, 0.115], [0.45, 0.095, 0.10], [1, 0.045, 0.045]],
     { sides: 10, e: 2.4, col: PAL.gruntMask, fx: FX_METAL });
+  // Breather cowl, plus a dark visor band wrapped around the mask cone as a short
+  // sleeve at 1.05x the local cone radius — an ellipsoid lens would spear out of the
+  // nose of the cone instead of sitting on it.
+  B.plate(I('head'), W[I('head')].clone().add(_a.set(0, 0.078, -0.030)), [0.078, 0.028, 0.080],
+    { col: armorHi, fx: FX_PLATE, taper: 0.8, bevel: 0.009 });
+  {
+    const mA = W[I('head')].clone().add(_a.set(0, 0.055, 0.05));
+    const mB = W[I('head')].clone().add(_a.set(0, -0.045, -0.155));
+    const at = (t) => mA.clone().lerp(mB, t);
+    B.limb(I('head'), at(0.30), at(0.57),
+      [[0, 0.105, 0.109], [1, 0.089, 0.092]],
+      { sides: 12, e: 2.4, col: PAL.visorDark, fx: FX_VISOR, cap: false });
+    for (const s of [1, -1])
+      B.blob(I('head'), at(0.44).add(_a.set(s * 0.048, 0.048, 0)), 0.020, 0.014, 0.024,
+        { col: PAL.glowCyan, fx: FX_GLOW, seg: 6, rows: 4 });
+  }
   B.blob(I('head'), W[I('head')].clone().add(_a.set(0, -0.045, -0.155)), 0.042, 0.042, 0.03,
     { col: PAL.glowCyan, fx: FX_GLOW, seg: 8, rows: 5 });
   // mask hoses back to the tanks
@@ -336,8 +455,10 @@ function buildGrunt(major) {
       { sides: 7, col: PAL.gruntSkin, fx: FX_SUIT });
     B.limb(I(F), W[I(F)], W[I(H)], [[0, 0.05, 0.05], [1, 0.038, 0.038]],
       { sides: 7, col: armor, fx: FX_PLATE });
+    B.plate(I(F), W[I(F)].clone().add(_a.set(s * 0.012, -0.055, 0.005)), [0.030, 0.048, 0.052],
+      { col: PAL.trim, fx: FX_METAL, bevel: 0.008 });
     B.blob(I(H), W[I(H)].clone().add(_a.set(0, -0.02, 0)), 0.042, 0.05, 0.045,
-      { col: PAL.gruntSkin, fx: FX_SUIT, seg: 7, rows: 5 });
+      { col: PAL.gruntSkin, fx: FX_SKIN, seg: 7, rows: 5 });
   }
 
   // legs
@@ -348,8 +469,10 @@ function buildGrunt(major) {
       { sides: 8, col: PAL.gruntSkin, fx: FX_SUIT });
     B.limb(I(SH), W[I(SH)], W[I(FO)], [[0, 0.062, 0.062], [1, 0.05, 0.05]],
       { sides: 8, col: armor, fx: FX_PLATE });
+    B.plate(I(SH), W[I(SH)].clone().add(_a.set(0, -0.055, -0.048)), [0.048, 0.050, 0.020],
+      { col: armorHi, fx: FX_PLATE, bevel: 0.009 });
     B.plate(I(FO), W[I(FO)].clone().add(_a.set(0, -0.035, -0.045)), [0.055, 0.035, 0.105],
-      { col: PAL.gruntMask, fx: FX_PLATE });
+      { col: PAL.gruntMask, fx: FX_PLATE, bevel: 0.012 });
     void TO;
   }
 
@@ -406,39 +529,69 @@ function buildElite(major) {
   B.limb(I('spine'), W[I('spine')], W[I('chest')],
     [[0, 0.155, 0.13], [1, 0.20, 0.15]], { sides: 10, e: 3, col: PAL.eliteSuit, fx: FX_SUIT });
   B.plate(I('chest'), W[I('chest')].clone().add(_a.set(0, -0.02, -0.10)), [0.215, 0.20, 0.095],
-    { col: armor, fx: FX_PLATE, taper: 1.06, shear: [0, -0.02] });
+    { col: armor, fx: FX_PLATE, taper: 1.06, shear: [0, -0.02], bevel: 0.028 });
   B.plate(I('chest'), W[I('chest')].clone().add(_a.set(0, 0.05, 0.12)), [0.19, 0.17, 0.075],
-    { col: armorHi, fx: FX_PLATE, taper: 0.85 });
+    { col: armorHi, fx: FX_PLATE, taper: 0.85, bevel: 0.024 });
   B.plate(I('pelvis'), W[I('pelvis')].clone().add(_a.set(0, -0.10, -0.10)), [0.155, 0.13, 0.07],
-    { col: armor, fx: FX_PLATE, taper: 0.7 });
+    { col: armor, fx: FX_PLATE, taper: 0.7, bevel: 0.020 });
+  // sternum spine + collar band: two proud layers so the chest is not one flat slab
+  B.plate(I('chest'), W[I('chest')].clone().add(_a.set(0, -0.02, -0.185)), [0.052, 0.185, 0.030],
+    { col: armorHi, fx: FX_PLATE, taper: 0.75, bevel: 0.012 });
+  B.plate(I('chest'), W[I('chest')].clone().add(_a.set(0, 0.165, -0.09)), [0.165, 0.036, 0.085],
+    { col: PAL.trim, fx: FX_METAL, bevel: 0.012 });
+  for (const s of [1, -1])
+    B.plate(I('chest'), W[I('chest')].clone().add(_a.set(s * 0.145, -0.10, -0.15)), [0.055, 0.075, 0.032],
+      { col: PAL.trim, fx: FX_METAL, bevel: 0.010 });
 
-  // pauldrons — the Elite's read at distance is almost entirely this silhouette
+  // Pauldrons — the Elite's read at distance is almost entirely this silhouette, so they
+  // stand off and above the shoulder rather than hugging it, with a separate rolled lip.
   for (const s of [1, -1]) {
     const C = s > 0 ? 'clavL' : 'clavR';
-    B.limb(I(C), W[I(C)].clone().add(_a.set(s * 0.02, 0.06, 0)), W[I(C)].clone().add(_a.set(s * 0.20, -0.10, 0)),
-      [[0, 0.115, 0.13], [0.5, 0.135, 0.155], [1, 0.075, 0.09]],
-      { sides: 8, e: 3.6, col: armorHi, fx: FX_PLATE, flat: true });
-    B.plate(I(C), W[I(C)].clone().add(_a.set(s * 0.11, 0.04, 0)), [0.10, 0.055, 0.135],
-      { col: armor, fx: FX_PLATE, taper: 0.75 });
+    B.limb(I(C), W[I(C)].clone().add(_a.set(s * 0.01, 0.105, 0)), W[I(C)].clone().add(_a.set(s * 0.255, -0.135, 0)),
+      [[0, 0.115, 0.135], [0.45, 0.165, 0.185], [0.8, 0.145, 0.165], [1, 0.075, 0.09]],
+      { sides: 9, e: 3.6, col: armorHi, fx: FX_PLATE, flat: true });
+    B.plate(I(C), W[I(C)].clone().add(_a.set(s * 0.135, 0.055, 0)), [0.115, 0.045, 0.165],
+      { col: armor, fx: FX_PLATE, taper: 0.75, bevel: 0.018 });
+    B.plate(I(C), W[I(C)].clone().add(_a.set(s * 0.215, -0.075, 0)), [0.048, 0.055, 0.115],
+      { col: PAL.trim, fx: FX_METAL, taper: 0.8, bevel: 0.012 });
   }
 
-  // head: elongated helm, four mandibles
+  // Head: elongated helm, four mandibles, and — the single biggest identity cue — a
+  // dark mirror visor. An Elite whose face is the same colour as its helmet reads as a
+  // bulb on a stick; the visor is what gives the head a front.
   B.blob(I('head'), W[I('head')].clone().add(_a.set(0, 0.03, 0.02)), 0.115, 0.135, 0.15,
     { col: armor, fx: FX_PLATE, seg: 10, rows: 8, shear: -0.03 });
   B.plate(I('head'), W[I('head')].clone().add(_a.set(0, 0.10, 0.05)), [0.055, 0.055, 0.14],
-    { col: armorHi, fx: FX_PLATE, taper: 0.4 });
-  B.blob(I('head'), W[I('head')].clone().add(_a.set(0, -0.035, -0.08)), 0.085, 0.075, 0.08,
-    { col: PAL.eliteSkin, fx: FX_SUIT, seg: 8, rows: 6 });
+    { col: armorHi, fx: FX_PLATE, taper: 0.4, bevel: 0.012 });
+  B.blob(I('head'), W[I('head')].clone().add(_a.set(0, -0.048, -0.085)), 0.068, 0.058, 0.062,
+    { col: srgb(0x3a3229), fx: FX_SKIN, seg: 8, rows: 6 });
+  // Visor: two concentric shells of the helmet ellipsoid itself, restricted to the front
+  // and grown 4 and 7 mm, so the lens lies ON the helmet with a raised trim surround.
+  const hc = W[I('head')].clone().add(_a.set(0, 0.03, 0.02));
+  const FRONT = -Math.PI / 2;
+  B.blob(I('head'), hc, 0.115 * 1.062, 0.135 * 1.052, 0.15 * 1.048,
+    { col: PAL.trim, fx: FX_METAL, seg: 14, rows: 7, shear: -0.03,
+      theta: [FRONT - 0.95, 1.90], phi: [0.74, 0.68] });
+  B.blob(I('head'), hc, 0.115 * 1.035, 0.135 * 1.028, 0.15 * 1.026,
+    { col: PAL.visorDark, fx: FX_VISOR, seg: 14, rows: 6, shear: -0.03,
+      theta: [FRONT - 0.80, 1.60], phi: [0.82, 0.50] });
+  // Mandibles: splayed wide into an X and tapered to points. Clustered, fat jaws read
+  // as a bunch of grapes stuck to the face; the splay is the whole silhouette cue.
   for (const [n, sx, sy] of [['jawUL', 1, 1], ['jawUR', -1, 1], ['jawLL', 1, -1], ['jawLR', -1, -1]]) {
     const o = W[I(n)];
-    B.limb(I(n), o, o.clone().add(_a.set(sx * 0.035, sy * 0.02 - 0.03, -0.115)),
-      [[0, 0.032, 0.036], [0.6, 0.026, 0.03], [1, 0.010, 0.012]],
-      { sides: 6, col: PAL.eliteSkin, fx: FX_SUIT });
+    B.limb(I(n), o, o.clone().add(_a.set(sx * 0.072, sy * 0.030 - 0.036, -0.140)),
+      [[0, 0.027, 0.030], [0.55, 0.019, 0.022], [1, 0.007, 0.008]],
+      { sides: 6, col: PAL.eliteSkin, fx: FX_SKIN });
+    // thin armoured cap over the root only
+    B.limb(I(n), o.clone().add(_a.set(sx * 0.002, sy * 0.001, 0.006)),
+      o.clone().add(_a.set(sx * 0.030, sy * 0.013 - 0.015, -0.058)),
+      [[0, 0.031, 0.034], [1, 0.019, 0.021]],
+      { sides: 6, col: armorHi, fx: FX_PLATE, cap: false });
   }
   // helmet mandible guards
   for (const s of [1, -1])
     B.plate(I('head'), W[I('head')].clone().add(_a.set(s * 0.10, -0.015, -0.06)), [0.032, 0.075, 0.085],
-      { col: armorHi, fx: FX_PLATE, taper: 0.7 });
+      { col: armorHi, fx: FX_PLATE, taper: 0.7, bevel: 0.010 });
 
   // arms
   for (const s of [1, -1]) {
@@ -447,6 +600,10 @@ function buildElite(major) {
       { sides: 8, col: PAL.eliteSuit, fx: FX_SUIT });
     B.limb(I(F), W[I(F)], W[I(H)], [[0, 0.075, 0.075], [0.45, 0.085, 0.085], [1, 0.05, 0.05]],
       { sides: 8, e: 3, col: armor, fx: FX_PLATE });
+    B.plate(I(F), W[I(F)].clone().add(_a.set(s * 0.020, -0.115, 0)), [0.042, 0.095, 0.085],
+      { col: PAL.trim, fx: FX_METAL, taper: 0.85, bevel: 0.011 });
+    B.plate(I(U), W[I(U)].clone().add(_a.set(s * 0.008, -0.20, 0)), [0.085, 0.070, 0.088],
+      { col: armorHi, fx: FX_PLATE, taper: 0.8, bevel: 0.014 });
     B.blob(I(H), W[I(H)].clone().add(_a.set(0, -0.035, 0)), 0.055, 0.07, 0.06,
       { col: PAL.eliteSuit, fx: FX_SUIT, seg: 7, rows: 5 });
   }
@@ -466,15 +623,19 @@ function buildElite(major) {
       B.limb(I(FO), W[I(FO)].clone().add(_a.set(0, 0.015, 0.01)),
         W[I(FO)].clone().add(_a.set(t * 0.05, -0.01, -0.115)),
         [[0, 0.032, 0.032], [1, 0.020, 0.020]], { sides: 6, col: PAL.eliteSuit, fx: FX_SUIT });
-    // knee plate
+    // knee plate + thigh cuisse
     B.plate(I(SH), W[I(SH)].clone().add(_a.set(0, -0.02, -0.06)), [0.075, 0.085, 0.045],
-      { col: armorHi, fx: FX_PLATE, taper: 0.8 });
+      { col: armorHi, fx: FX_PLATE, taper: 0.8, bevel: 0.014 });
+    B.plate(I(TH), W[I(TH)].clone().add(_a.set(s * 0.02, -0.20, -0.045)), [0.105, 0.155, 0.075],
+      { col: armor, fx: FX_PLATE, taper: 0.85, bevel: 0.018 });
+    B.plate(I(ME), W[I(ME)].clone().add(_a.set(0, -0.07, -0.02)), [0.055, 0.070, 0.050],
+      { col: PAL.trim, fx: FX_METAL, taper: 0.85, bevel: 0.010 });
   }
 
   // plasma rifle
   const hp = W[I('handR')].clone().add(_a.set(0, -0.04, -0.06));
   B.plate(I('handR'), hp.clone().add(_a.set(0, 0.05, -0.05)), [0.05, 0.075, 0.19],
-    { col: srgb(0x3a4472), fx: FX_METAL, taper: 0.8 });
+    { col: srgb(0x3a4472), fx: FX_METAL, taper: 0.8, bevel: 0.012 });
   for (const s of [1, -1])
     B.limb(I('handR'), hp.clone().add(_a.set(s * 0.035, 0.06, -0.20)),
       hp.clone().add(_a.set(s * 0.055, 0.045, -0.34)),
@@ -519,17 +680,28 @@ function buildJackal() {
     [[0, 0.14, 0.13], [0.5, 0.155, 0.14], [1, 0.13, 0.125]],
     { sides: 9, e: 3, col: PAL.jackalSkin, fx: FX_SUIT });
   B.plate(I('chest'), W[I('chest')].clone().add(_a.set(0, 0, -0.08)), [0.13, 0.12, 0.06],
-    { col: PAL.jackalPlate, fx: FX_PLATE, taper: 0.85 });
+    { col: PAL.jackalPlate, fx: FX_PLATE, taper: 0.85, bevel: 0.016 });
+  B.plate(I('chest'), W[I('chest')].clone().add(_a.set(0, 0.095, -0.095)), [0.105, 0.026, 0.055],
+    { col: PAL.jackalDark, fx: FX_METAL, bevel: 0.008 });
 
   // long beaked head with a bony crest
   B.blob(I('head'), W[I('head')].clone().add(_a.set(0, 0.02, 0.01)), 0.078, 0.085, 0.10,
-    { col: PAL.jackalSkin, fx: FX_SUIT, seg: 9, rows: 7 });
+    { col: PAL.jackalSkin, fx: FX_SKIN, seg: 9, rows: 7 });
   B.limb(I('head'), W[I('head')].clone().add(_a.set(0, 0, -0.03)),
     W[I('head')].clone().add(_a.set(0, -0.035, -0.24)),
     [[0, 0.062, 0.055], [0.5, 0.04, 0.035], [1, 0.014, 0.012]],
-    { sides: 7, col: PAL.jackalSkin, fx: FX_SUIT });
+    { sides: 7, col: PAL.jackalSkin, fx: FX_SKIN });
   B.plate(I('head'), W[I('head')].clone().add(_a.set(0, 0.10, 0.02)), [0.012, 0.075, 0.10],
     { col: PAL.jackalDark, fx: FX_SUIT, taper: 0.5, shear: [0, 0.05] });
+  // eyes, and the comms headset lens that gives the profile a hard point
+  for (const s of [1, -1]) {
+    B.blob(I('head'), W[I('head')].clone().add(_a.set(s * 0.052, 0.030, -0.055)), 0.020, 0.020, 0.019,
+      { col: PAL.visorWarm, fx: FX_VISOR, seg: 7, rows: 5 });
+    B.blob(I('head'), W[I('head')].clone().add(_a.set(s * 0.058, 0.032, -0.060)), 0.009, 0.009, 0.008,
+      { col: PAL.glowViolet, fx: FX_GLOW_SOFT, seg: 6, rows: 4 });
+  }
+  B.plate(I('head'), W[I('head')].clone().add(_a.set(0.072, 0.012, -0.015)), [0.020, 0.040, 0.048],
+    { col: PAL.jackalDark, fx: FX_METAL, bevel: 0.007 });
 
   for (const s of [1, -1]) {
     const U = s > 0 ? 'uarmL' : 'uarmR', F = s > 0 ? 'farmL' : 'farmR', H = s > 0 ? 'handL' : 'handR';
@@ -559,9 +731,14 @@ function buildJackal() {
   const gp = W[I('farmL')].clone().add(_a.set(0.05, -0.10, -0.16));
   B.limb(I('farmL'), gp.clone().add(_a.set(-0.02, 0.42, 0.05)), gp.clone().add(_a.set(0.02, -0.42, -0.05)),
     [[0, 0.05, 0.02], [0.18, 0.20, 0.035], [0.5, 0.245, 0.04], [0.82, 0.20, 0.035], [1, 0.05, 0.02]],
-    { sides: 12, e: 2.2, col: srgb(0x7a4a1c), fx: [0.5, 0.1, 0.35], bow: [0, 0.05] });
+    // Emissive 0.5 was authored against a shader that never ran (see reports/characters.md
+    // §0). With the injection live it blew the shield out to a flat white board; 0.22 on a
+    // saturated amber reads as the energy barrier it is meant to be.
+    { sides: 12, e: 2.2, col: srgb(0xd9701e), fx: [0.22, 0.05, 0.40, SURF.GLOW], bow: [0, 0.05] });
   B.plate(I('farmL'), gp.clone().add(_a.set(0, 0.30, 0.02)), [0.055, 0.045, 0.035],
-    { col: PAL.jackalDark, fx: FX_METAL });
+    { col: PAL.jackalDark, fx: FX_METAL, bevel: 0.008 });
+  B.plate(I('farmL'), gp.clone().add(_a.set(0, -0.30, -0.02)), [0.050, 0.040, 0.032],
+    { col: PAL.jackalDark, fx: FX_METAL, bevel: 0.008 });
 
   const hp = W[I('handR')].clone().add(_a.set(0, -0.02, -0.05));
   B.limb(I('handR'), hp.clone().add(_a.set(0, 0.02, 0.05)), hp.clone().add(_a.set(0, 0.02, -0.15)),
@@ -719,33 +896,211 @@ export function create(opts = {}) {
     return m;
   }
 
-  /** Per-actor clone so glow pulse / hit flash are per-actor uniforms; one program. */
-  function actorMaterial() {
+  /**
+   * Procedural armour surface, shared by every actor.
+   *
+   * The models were geometrically recognisable as Covenant before this existed and still
+   * read as placeholder junk, because every facet was a single flat Lambert value: no
+   * panel seams, no bevel highlight, no wear, no visor. Measured on the actor pixels
+   * alone (`tools/_chmask.py`), the whole encounter had `spec_frac` 0.000 and `p99` 188
+   * in a frame whose sand hits 221 — not one specular pixel on twelve characters.
+   *
+   * Three published pieces, all cheap, none of them a texture fetch:
+   *
+   *  - **Bump mapping unparametrised surfaces** (Mikkelsen, 2010 — the derivation behind
+   *    three's own `perturbNormalArb`): a scalar height field in object space is turned
+   *    into a normal perturbation using screen-space derivatives, so procedural relief
+   *    needs neither UVs nor tangents. `aiPerturb` below is that construction verbatim.
+   *  - **Triplanar projection** for the panel seams, weighted by the fourth power of the
+   *    object normal, so a seam grid lies flat on a curved pauldron with no stretching.
+   *  - **Curvature-driven edge wear**, the standard Substance/Frostbite trick: estimate
+   *    object-space curvature as |d(normal)| / |d(position)| in screen space, and use it
+   *    to lift metalness and drop roughness exactly along chamfers and creases. That is
+   *    what puts a bright line on every plate edge and makes armour read as thick.
+   *
+   * `uDetail` is per-actor: panel cell size has to scale with the body or a 1.3 m Grunt
+   * gets Elite-sized plating and reads as a doll.
+   */
+  function actorMaterial(def) {
     const m = baseMaterial.clone();
+    const cell = clamp(def ? def.height * 0.052 : 0.10, 0.055, 0.135);
     const u = {
       uGlow: { value: 1.0 },
       uHitFlash: { value: 0.0 },
       uMuzzle: { value: 0.0 },
       uShieldTint: { value: new THREE.Color(0, 0, 0) },
+      // x: panel frequency (1/m), y: micro frequency, z: wear amount, w: seed
+      uDetail: { value: new THREE.Vector4(1 / cell, 42.0, 1.0, 0.0) },
+      uVisorTint: { value: new THREE.Color(0.10, 0.26, 0.34) },
     };
-    applyWorldMaterial(m, ctx, {
+    // ------------------------------------------------------------------------------
+    // THE ACTOR INJECTION HAS NEVER RUN IN ANY CAPTURE. `applyWorldMaterial` ends with
+    // `ctx.get('lighting').registerMaterial(mat)`, and three's stock
+    // `CSM.setupMaterial` does a bare `material.onBeforeCompile = function(){...}` with
+    // no chaining (node_modules/three/examples/jsm/csm/CSM.js:443). It therefore
+    // overwrites the hook `applyWorldMaterial` installed one line earlier, and the whole
+    // injection — per-vertex roughness/metalness, emissive, aerial perspective — is
+    // discarded before the first compile. `lighting` is order 12 and every actor
+    // material is built at order 80, so the stomp is unconditional.
+    //
+    // Proof, one step: the block was made to write `diffuseColor = vec3(0)` under a
+    // uniform flag. The Elite rendered gold. A fragment block that runs cannot survive
+    // its own output being forced to black.
+    //
+    // That single fact explains the whole "placeholder junk" report better than any
+    // amount of geometry would: every actor surface was falling back to the base
+    // MeshStandardMaterial's roughness 0.6 / metalness 0.1, so armour, methane tanks and
+    // visors all shaded identically as matte plastic, with zero specular anywhere.
+    //
+    // `reports/weapons.md` found the same bug from the viewmodel side and its note says
+    // plainly that it affects every world material in the project. materialCommon.js and
+    // lighting.js are not my files; the fix that IS mine is to register with CSM first
+    // and then let `applyWorldMaterial` chain onto CSM's hook instead of the reverse.
+    ctx.get('lighting')?.registerMaterial?.(m);
+    const noLighting = { get: (n, ...rest) => (n === 'lighting' ? null : ctx.get(n, ...rest)) };
+    applyWorldMaterial(m, noLighting, {
       matId: MAT_ID.SKIN,
       inject: {
         key: 'ai_actor',
         uniforms: u,
-        vertexPars: 'attribute vec3 aFx;\nvarying vec3 vFx;',
-        vertex: 'vFx = aFx;',
-        pars: 'varying vec3 vFx;\nuniform float uGlow;\nuniform float uHitFlash;\nuniform float uMuzzle;\nuniform vec3 uShieldTint;',
+        vertexPars: 'attribute vec4 aFx;\nvarying vec4 vFx;\nvarying vec3 vDet;\nvarying vec3 vNObj;',
+        vertex: 'vFx = aFx;\nvDet = position.xyz;\nvNObj = normal;',
+        pars: `
+          varying vec4 vFx;
+          varying vec3 vDet;
+          varying vec3 vNObj;
+          uniform float uGlow;
+          uniform float uHitFlash;
+          uniform float uMuzzle;
+          uniform vec3 uShieldTint;
+          uniform vec4 uDetail;
+          uniform vec3 uVisorTint;
+
+          float aiHash13( vec3 p ){
+            p = fract( p * 0.1031 );
+            p += dot( p, p.yzx + 33.33 );
+            return fract( ( p.x + p.y ) * p.z );
+          }
+          float aiNoise( vec3 x ){
+            vec3 i = floor( x ), f = fract( x );
+            f = f * f * ( 3.0 - 2.0 * f );
+            float n000 = aiHash13( i + vec3( 0.0, 0.0, 0.0 ) );
+            float n100 = aiHash13( i + vec3( 1.0, 0.0, 0.0 ) );
+            float n010 = aiHash13( i + vec3( 0.0, 1.0, 0.0 ) );
+            float n110 = aiHash13( i + vec3( 1.0, 1.0, 0.0 ) );
+            float n001 = aiHash13( i + vec3( 0.0, 0.0, 1.0 ) );
+            float n101 = aiHash13( i + vec3( 1.0, 0.0, 1.0 ) );
+            float n011 = aiHash13( i + vec3( 0.0, 1.0, 1.0 ) );
+            float n111 = aiHash13( i + vec3( 1.0, 1.0, 1.0 ) );
+            return mix( mix( mix( n000, n100, f.x ), mix( n010, n110, f.x ), f.y ),
+                        mix( mix( n001, n101, f.x ), mix( n011, n111, f.x ), f.y ), f.z );
+          }
+
+          /* Distance to the nearest wall of a jittered rectangular panel tiling.
+             The sine warp is what stops it reading as graph paper. */
+          float aiSeam( vec2 p ){
+            vec2 q = p;
+            q.x += 0.24 * sin( p.y * 1.7 + 1.3 );
+            q.y += 0.17 * sin( p.x * 2.3 );
+            vec2 g = abs( fract( q ) - 0.5 );
+            return min( g.x, g.y * 1.25 );
+          }
+          /* Panel-to-panel albedo variation: one value per cell, same warp. */
+          float aiPanelId( vec2 p ){
+            vec2 q = p;
+            q.x += 0.24 * sin( p.y * 1.7 + 1.3 );
+            q.y += 0.17 * sin( p.x * 2.3 );
+            return aiHash13( vec3( floor( q ), 7.0 ) );
+          }
+
+          /* Mikkelsen 2010: height -> normal with no UVs and no tangent frame. */
+          vec3 aiPerturb( vec3 n, vec3 surfPos, float h, float scale ){
+            vec3 dpdx = dFdx( surfPos ), dpdy = dFdy( surfPos );
+            float dhdx = dFdx( h ), dhdy = dFdy( h );
+            vec3 r1 = cross( dpdy, n );
+            vec3 r2 = cross( n, dpdx );
+            float det = dot( dpdx, r1 );
+            vec3 grad = sign( det ) * ( dhdx * r1 + dhdy * r2 );
+            return normalize( abs( det ) * n - scale * grad );
+          }
+        `,
         // NOTE: <lights_physical_fragment> has already packed roughnessFactor /
         // metalnessFactor into `material` by the time this block runs, so the
         // per-vertex surface parameters have to be written into `material` itself.
+        // diffuseContribution / specularColorBlended are what the BRDF actually reads,
+        // so they must be rebuilt AFTER diffuseColor is modified, not before.
         fragment: `
           float aiRough = clamp( vFx.z, 0.04, 1.0 );
           float aiMetal = clamp( vFx.y, 0.0, 1.0 );
-          material.roughness = clamp( aiRough, 0.0525, 1.0 );
-          material.metalness = aiMetal;
-          material.diffuseContribution = diffuseColor.rgb * ( 1.0 - aiMetal );
-          material.specularColorBlended = mix( vec3( 0.04 ), diffuseColor.rgb, aiMetal );
+          float aiCls = vFx.w;
+          vec3 nObj = normalize( vNObj );
+          vec3 det = vDet * uDetail.x;
+
+          // Object-space curvature in 1/m. Both varyings are BIND-pose quantities, so the
+          // ratio is a real curvature and not a screen-size artefact. A smooth 5 cm limb
+          // tube reads ~20; a chamfer crease reads in the hundreds because the normal
+          // turns inside one pixel. The threshold below is what separates 'curved' from
+          // 'creased' — set it too low and every arm is worn down to bare metal.
+          float dPos = length( fwidth( vDet ) );
+          float crv = length( fwidth( vNObj ) ) / max( dPos, 1e-5 );
+
+          // triplanar weights, 4th power so the dominant axis wins cleanly
+          vec3 tw = pow( abs( nObj ), vec3( 4.0 ) );
+          tw /= max( tw.x + tw.y + tw.z, 1e-4 );
+
+          float height = 0.0;
+          float groove = 0.0;
+          float panel = 0.0;
+          float micro = aiNoise( vDet * uDetail.y ) - 0.5;
+
+          if ( aiCls == 1.0 || aiCls == 2.0 ) {
+            float s = tw.x * aiSeam( det.zy ) + tw.y * aiSeam( det.xz ) + tw.z * aiSeam( det.xy );
+            panel = tw.x * aiPanelId( det.zy ) + tw.y * aiPanelId( det.xz ) + tw.z * aiPanelId( det.xy );
+            groove = 1.0 - smoothstep( 0.0, 0.040, s );
+            // a shallow raised lip either side of the groove — the bevel read
+            float lip = smoothstep( 0.040, 0.075, s ) * ( 1.0 - smoothstep( 0.075, 0.130, s ) );
+            height = ( -groove * 0.0042 + lip * 0.0011 + micro * 0.00035 );
+          } else if ( aiCls == 4.0 ) {
+            height = micro * 0.00008;
+          } else if ( aiCls == 5.0 ) {
+            height = ( aiNoise( vDet * uDetail.y * 0.45 ) - 0.5 ) * 0.0016 + micro * 0.0004;
+          } else if ( aiCls == 0.0 ) {
+            // suit: a fine ribbed weave, strongest across the limb axis
+            float rib = sin( vDet.y * uDetail.x * 9.0 ) * 0.5;
+            height = ( rib * 0.0007 + micro * 0.0011 );
+          }
+
+          if ( aiCls != 3.0 ) normal = aiPerturb( normal, -vViewPosition, height, 1.0 );
+
+          float wear = smoothstep( 60.0, 260.0, crv ) * uDetail.z;
+
+          if ( aiCls == 1.0 || aiCls == 2.0 ) {
+            // cavity darkening in the seams, per-panel tonal drift, scuffed edges
+            diffuseColor.rgb *= 1.0 - 0.40 * groove;
+            diffuseColor.rgb *= 0.90 + 0.20 * panel + 0.10 * micro;
+            diffuseColor.rgb = mix( diffuseColor.rgb,
+                                    mix( diffuseColor.rgb, vec3( 0.42, 0.41, 0.40 ), 0.55 ), wear );
+            aiRough = mix( aiRough + 0.30 * groove, 0.17, wear );
+            aiMetal = mix( aiMetal, 0.92, wear * 0.8 );
+          } else if ( aiCls == 4.0 ) {
+            // visor: mirror dielectric, plus a cold Fresnel sheen so it catches the sky
+            aiRough = 0.045;
+            aiMetal = 0.55;
+            float fres = pow( 1.0 - clamp( dot( normal, normalize( vViewPosition ) ), 0.0, 1.0 ), 4.0 );
+            totalEmissiveRadiance += uVisorTint * ( 0.14 + fres * 1.15 );
+          } else if ( aiCls == 5.0 ) {
+            diffuseColor.rgb *= 0.92 + 0.16 * ( aiNoise( vDet * uDetail.y * 0.45 ) );
+            aiRough = mix( aiRough, 0.34, wear * 0.5 );
+          } else if ( aiCls == 0.0 ) {
+            diffuseColor.rgb *= 0.94 + 0.12 * micro;
+            aiRough = mix( aiRough, 0.44, wear * 0.6 );
+          }
+
+          material.roughness = clamp( aiRough, 0.0425, 1.0 );
+          material.metalness = clamp( aiMetal, 0.0, 1.0 );
+          material.diffuseColor = diffuseColor.rgb * ( 1.0 - material.metalness );
+          material.diffuseContribution = material.diffuseColor;
+          material.specularColorBlended = mix( vec3( 0.04 ), diffuseColor.rgb, material.metalness );
           float em = vFx.x * ( uGlow + uMuzzle * 2.5 );
           totalEmissiveRadiance += diffuseColor.rgb * em;
           totalEmissiveRadiance += uShieldTint;
@@ -767,7 +1122,7 @@ export function create(opts = {}) {
     const rig = built.rig;
     const geom = built.geom;
 
-    const mat = actorMaterial();
+    const mat = actorMaterial(def);
     const mesh = new THREE.SkinnedMesh(geom, mat);
     mesh.castShadow = true;
     mesh.receiveShadow = true;
@@ -1034,11 +1389,51 @@ export function create(opts = {}) {
   function terrainMod() { const t = ctx?.get('terrain'); return t && typeof t.height === 'function' ? t : null; }
   function physicsMod() { const p = ctx?.get('physics'); return p && typeof p.raycast === 'function' ? p : null; }
 
+  /**
+   * Ground height under (x,z), via `physics.raycast` so an actor standing on a rock or a
+   * structure deck plants on IT rather than on the terrain surface underneath.
+   *
+   * Measured before the change (`tools/_chprobe.mjs`, all 12 encounter actors): sole-to-
+   * ground gap was already within [-0.045, +0.036] m, mean 0.000, and `terrain.height`
+   * agreed with `physics.raycast` to the last digit at every one of the twelve positions
+   * — no static collider is under the tide-pool encounter. So this is not a bug fix; it
+   * is the fix that keeps holding when an actor is spawned somewhere else.
+   *
+   * It is called five-plus times per actor per frame (pelvis, two foot plants, two swing
+   * targets) and a raycast costs ~40 terrain height samples, so the *decision* is cached
+   * on a 0.5 m grid rather than the height: each cell records whether any static collider
+   * stands proud of the terrain there. On a clear cell — every cell in this encounter —
+   * the answer is the exact analytic terrain height, with no quantisation, at the same
+   * cost as before. Caching the height itself would quantise foot placement to the cell
+   * size and make actors step down a slope in visible 12 cm stairs.
+   */
+  const _groundCache = new Map();
+  const _rayFrom = new THREE.Vector3();
+  const _rayDown = new THREE.Vector3(0, -1, 0);
+
   function groundAt(x, z) {
     const t = terrainMod();
-    if (!t) return 0;
-    const y = t.height(x, z);
-    return Number.isFinite(y) ? y : 0;
+    const th = t ? t.height(x, z) : 0;
+    const base = Number.isFinite(th) ? th : 0;
+    const p = physicsMod();
+    if (!p) return base;
+
+    const cx = Math.round(x * 2), cz = Math.round(z * 2);
+    const key = cx * 65536 + cz;
+    let occupied = _groundCache.get(key);
+    if (occupied === undefined) {
+      const qx = cx * 0.5, qz = cz * 0.5;
+      const qh = t ? t.height(qx, qz) : 0;
+      _rayFrom.set(qx, (Number.isFinite(qh) ? qh : 0) + 3.0, qz);
+      const probe = p.raycast(_rayFrom, _rayDown, 6.0, p.MASK ? p.MASK.WORLD : undefined);
+      occupied = !!(probe && probe.body);
+      _groundCache.set(key, occupied);
+    }
+    if (!occupied) return base;
+
+    _rayFrom.set(x, base + 3.0, z);
+    const r = p.raycast(_rayFrom, _rayDown, 6.0, p.MASK ? p.MASK.WORLD : undefined);
+    return r && Number.isFinite(r.point.y) ? r.point.y : base;
   }
 
   /** Ray against the static world only (never against actors). */
@@ -1402,6 +1797,7 @@ export function create(opts = {}) {
     const t0 = performance.now();
 
     simTime += dt;
+    if (_groundCache.size > 8192) _groundCache.clear();   // static world; bound only
     const T = resolveTarget();
     const camPos = c.camera ? c.camera.position : T.eye;
 

@@ -18,11 +18,47 @@ import { Pass, fsMaterial, makeRT, FullScreenQuad } from '../RenderPipeline.js';
  *
  * Defaults, at `dofStrength: 'low'`:
  *
- *   - near field: full inside 0.28 m, gone by 1.6 m, peak 2.6 px of CoC. In practice
- *     that is the viewmodel and nothing else — the world's nearest geometry is the sand
- *     under the player's feet at ~1.6 m.
+ *   - near field: **world near blur is OFF** (`dofNearMaxCoC: 0`). The near field is the
+ *     VIEWMODEL's field and is delivered by `dofViewmodelCoC` through an exact weapon
+ *     mask. See "The near ramp was authored for a scene that does not exist" below —
+ *     this is the constant that changed this wave and it changed by measurement.
  *   - far field: nothing at all until 90 m, reaching 1.5 px only past 700 m. Aerial-
  *     perspective-scale softening on the far islets, not bokeh.
+ *
+ * ## The near ramp was authored for a scene that does not exist — MEASURED, wave I
+ *
+ * The header used to justify a 0.28 -> 1.6 m near ramp with: *'in practice that is the
+ * viewmodel and nothing else — the world's nearest geometry is the sand under the
+ * player's feet at ~1.6 m'*. That was written while KNOWN_ISSUES 18 was open, i.e. while
+ * `pipe.depthTex` held only the gun, so it could not be checked. It is now checkable and
+ * it is false. Read back off the corrected buffer at `ref_00000` (tools/_dfxprobe.mjs):
+ *
+ *                                          claimed    measured
+ *     nearest world geometry (z p01)         ~1.6 m      0.26 m
+ *     world depth median      (z p50)             -      1.13 m
+ *     frame inside dofNearStart = 1.60 m         ~0      47.4 %
+ *     frame given a near CoC over the floor      ~0      44.2 %
+ *
+ * The camera in this scene sits low; cobble props and sand fill the bottom half of the
+ * frame at 0.26-1.1 m. The decode was verified against a witness that does not touch the
+ * depth buffer at all — a CPU raycast of the same scene graph through the same pixels,
+ * which agrees with `linearZ()` to three decimals on every cell where both hit the same
+ * object (0.341/0.341, 0.612/0.611, 52.255/52.198, 50.517/50.520 m). So 0.26 m is real
+ * geometry and `uNear`/`uFar` are right.
+ *
+ * Turning the world path on with the old ramp, same build, `--config` only, `ref_00000`:
+ *
+ *                                        score   detail   sand lap_var   weapon lap_var
+ *     shipped (bypassed)                 33.14    91.72          614.7            500.6
+ *     dofWorldDepthValid=1 alone         24.99    51.36          145.7            187.4
+ *     dofWorldDepthValid=1, near off     33.14    91.63              -                -
+ *     reference kf_00000                     -        -          521.3            489.4
+ *
+ * -8.15 score, and the weapon ROI was already AT the reference before the blur. Hence
+ * `dofNearMaxCoC: 0`. The knob is kept, not deleted: a scene whose camera stands at
+ * normal eye height would have a legitimate use for it, and the ramp endpoints are still
+ * the right shape. It is the max that is zero, and it is zero because of the four numbers
+ * in the table above, not because near-field DoF is a bad idea.
  *
  * ## The CoC curve is a ramp, not a thin-lens solve, and that is deliberate
  *
@@ -51,80 +87,66 @@ import { Pass, fsMaterial, makeRT, FullScreenQuad } from '../RenderPipeline.js';
  * *over* the sharp+far result instead of being averaged into it. Averaging is what
  * produces the grey rim around a blurred gun barrel.
  *
- * ## Where the CoC comes from, and the three things that can go wrong with it
+ * ## Where the CoC comes from — and why the weapon test changed
  *
- * `cocAtUv()` is the only place depth is consulted, and it refuses to produce a CoC in
- * three cases. Each of these is a real state this build can be in right now:
+ * `cocAtUv()` is the only place depth is consulted. It resolves a pixel in this order:
  *
- *  1. **No G-buffer coverage** (`MRT1.a == 0`) — sky, or a hole. The sky is at infinity
+ *  1. **The viewmodel**, from `pipe.viewDepthTex` — its OWN depth attachment, cleared to
+ *     1.0 and written by nothing but the weapon, so `texture(tViewDepth, uv).r < 1.0` is
+ *     an EXACT mask. It gets a *fixed* near CoC (`dofViewmodelCoC`) and no depth lookup:
+ *     the weapon is rasterised through a 0.002-12 m frustum, so `linearZ()` under the
+ *     world's 0.06-12000 m near/far would be meaningless on it, and it sits at a fixed
+ *     distance from the eye by construction, so a constant is the right model rather than
+ *     an approximation.
+ *
+ *     **This test is new and it is not optional.** The old test was 'depth written, no
+ *     G-buffer coverage', which was exact only BECAUSE KNOWN_ISSUES 18 was open. With 18
+ *     closed the gun is not in `pipe.depthTex` at all, so a gun pixel has coverage from
+ *     the terrain behind it and takes the covered-geometry path — it reads the CoC of
+ *     whatever is BEHIND the weapon. Measured, per pose, over the weapon's ~209 k px:
+ *
+ *                 world behind gun   weapon px given   given far    mean CoC
+ *                        (z p50)        near blur         blur
+ *         ref_00000        0.33 m         100.0 %          0 %      -2.50 px
+ *         ref_00120        1.09 m          62.1 %          0 %      -0.79 px
+ *         ref_00600       13.82 m           0.0 %        6.1 %      +0.09 px
+ *         others         2.0-2.7 m           0             0            ~0
+ *
+ *     At `ref_00000` the entire weapon received the maximum near CoC. The old heuristic is
+ *     not merely weaker now, it is EMPTY: counted directly off the GPU, the set
+ *     {depth written AND no coverage} is **0 pixels**, and {coverage AND no depth} is also
+ *     **0** — the two masks are the identical 1 777 000-pixel set. Not 'small'. Zero.
+ *
+ *     The `MAT_ID.VIEWMODEL` test that used to sit beside it is gone too. It was correct
+ *     in principle and unreachable in fact (`scene.js` renders the G-buffer over
+ *     LAYER.OPAQUE + LAYER.DEFAULT only, and the weapon is on LAYER.VIEWMODEL), and
+ *     `viewDepthTex` supersedes it: a dedicated attachment is a stronger signal than a
+ *     material id, and it works whether or not the viewmodel ever reaches the G-buffer.
+ *
+ *  2. **No G-buffer coverage** (`MRT1.a == 0`) — sky, or a hole. The sky is at infinity
  *     *uniformly*, so it is either entirely in or entirely out of focus and defocusing a
  *     smooth gradient is a no-op that only costs bandwidth. docs/TARGETS.md puts the sky
- *     at `lap_var` 253 and `spectral_slope` −2.95, the smoothest region in the frame;
+ *     at `lap_var` 253 and `spectral_slope` -2.95, the smoothest region in the frame;
  *     there is nothing there for a blur to do except lose score.
- *  2. **The viewmodel** — a *fixed* near CoC (dofViewmodelCoC), no depth lookup at all.
- *     It has to be fixed: scene.js draws the viewmodel from its own camera with a
- *     0.002-12 m frustum, so a fragment at 0.3 m writes a depth that decodes to ~12 m
- *     against the main camera's 0.06-12000 m near/far. linearZ() on it would be
- *     meaningless. The weapon sits at a fixed distance from the eye by construction, so a
- *     constant is not an approximation — it is the right model.
  *
- *     **MEASURED, ref_00120, complete scene: this branch is unreachable, and so is every
- *     other one. The pass is currently the exact identity.** Three captures settle it —
- *     dofDebug 4 (G-buffer coverage), dofDebug 3 (matId) and a byte comparison:
+ *  3. **Covered geometry, real depth** — `cocAt(linearZ(raw))`. This is the path that was
+ *     dead for four waves and is live now. `dofWorldDepthValid` still gates it (the
+ *     KNOWN_ISSUES 18 escape hatch) but now defaults to **true**, because the condition
+ *     the flag names — *'the day scene.js stops clearing the shared depth texture'* — is
+ *     met. See `reports/depth.md`. Setting it false is now only a diagnostic.
  *
- *       - `dofDebug 4` shows coverage = 1 over the whole world and 0 over the sky, with
- *         **no gun anywhere in it**. `scene.js` does not render LAYER.VIEWMODEL into the
- *         G-buffer, so at a gun pixel `g1.a` is the *terrain behind the gun*, not 0.
- *         The "wrote depth, no G-buffer coverage" fallback in `cocAtUv()` therefore can
- *         never fire — the assumption it rests on is false at exactly the pixels it was
- *         written for. `dofDebug 3` confirms no MAT_ID.VIEWMODEL is present either.
- *       - So a gun pixel takes the covered-geometry path. Its depth is the viewmodel's
- *         own (KNOWN_ISSUES 18 clears the shared depth and the viewmodel refills it), and
- *         decoding that 0.002-12 m depth against 0.06-12000 m puts the gun at **~12.4 m**
- *         — squarely inside `cocAt`'s in-focus band (near ends at 1.60 m, far starts at
- *         90 m), so `cocAt` returns exactly 0.
- *       - Every *world* pixel has coverage but reads `raw` = 1.0, because 18 cleared it,
- *         and hits the `raw >= 0.999999` refusal. Also exactly 0.
- *       - Consequence, verified with `cmp`: captures at `dofEnabled 0`, at the shipped
- *         `dofNearGain 2 / fade 0.2..1.1`, and at `dofViewmodelCoC 0` are **byte-identical
- *         to each other**. Not "similar" — identical. The pass ran a prefilter, a 21-tap
- *         gather and a full-res composite every frame to produce the input unchanged.
+ * ## Does the bokeh read at 1080p? No, and it cannot at these radii
  *
- *     `dofViewmodelCoC` therefore defaults to **0** and `dofWorldDepthValid` to **false**,
- *     which makes the CPU-side fast-out fire and skips the prefilter and gather. That
- *     changes the output by zero bytes, measured. `create()` prints a one-time
- *     `console.info` naming issue 18 so the flag cannot quietly outlive the bug.
- *
- *     **What to do the day 18 lands.** Set `dofWorldDepthValid: true`; the 90 m -> 700 m
- *     far field then switches on across the whole world for the first time and needs a
- *     look before it is trusted (`dofTestCoC 6` at `ref_00120` exercises the same gather
- *     against a horizontal CoC ramp and is the cheapest way to see the kernel — done, and
- *     it resolves cleanly: soft at both ends, sharp down the middle, no ring at either
- *     transition and no leak of the sharp centre into the blurred sides). Separately, the
- *     viewmodel needs a real signal: either `scene.js` renders LAYER.VIEWMODEL into the
- *     G-buffer with `MAT_ID.VIEWMODEL` (the contract this file already checks for) or the
- *     viewmodel gets its own depth buffer. Until one of those exists, no value of
- *     `dofViewmodelCoC` does anything at all.
- *
- *     The old header carried this table, at 1.2 px, from `diag_gun`:
- *
- *                        lap_var   local_contrast
- *         dofEnabled 0    543.36       0.2634
- *         dofEnabled 1    399.12       0.2632
- *         reference       489          0.178
- *
- *     with an instruction to re-measure it against 489 before trusting the default. Done,
- *     at `ref_00120` on the complete scene: the `weapon` ROI reads `lap_var` **817.6** and
- *     `local_contrast` **0.1238** and does **not move at all** between `dofEnabled 0`,
- *     the old defaults and the new ones, because of the above. The old table described a
- *     pose and a build in which the gun did reach the G-buffer; it is not reproducible
- *     here and has been removed rather than left to be believed.
- *  3. **Covered geometry sitting exactly on the far plane** — impossible for real
- *     geometry, and the signature of a depth buffer that was cleared after the pre-pass
- *     filled it. `scene.js` calls `renderer.clearDepth()` before the viewmodel draw while
- *     `sceneRT.depthTexture` *is* `pipe.depthTex`, so this is not hypothetical — it is
- *     KNOWN_ISSUES 18 and it is what case 2 above measures. Under that condition the pass
- *     degrades to a no-op instead of defocusing the entire world.
+ * Worth stating plainly because the kernel is a 20-tap Vogel spiral and that invites the
+ * assumption that bokeh *shape* is on screen somewhere. The largest CoC this pass can
+ * produce is `dofFarMaxCoC` = 1.5 full-res px, which is 0.75 px in the half-res gather,
+ * against a search radius of `0.75 + 1 = 1.75` half-res px. Twenty-one taps over a disc
+ * 1.5 half-res px across is enormously oversampled and has no resolvable structure: a
+ * defocus disc needs roughly 4+ px of radius before its edge reads as a disc rather than
+ * as a blur. So the spiral is doing sampling quality here, not aperture shape, and the
+ * tap count could be cut substantially before anything became visible. The Vogel set is
+ * still the right choice - it is what keeps the small kernel isotropic and free of the
+ * 6-point star a low-count ring would give - but nobody should look for bokeh in a frame.
  *
  * ## Structure
  *
@@ -144,13 +166,14 @@ import { Pass, fsMaterial, makeRT, FullScreenQuad } from '../RenderPipeline.js';
  *
  *   dofEnabled        bool     false = straight copy
  *   dofStrength       string   'off' | 'low' | 'medium' | 'high'   (default 'low')
- *   dofNearMaxCoC     number   px at 1080p, full-res, before the strength scale  (2.6)
+ *   dofNearMaxCoC     number   WORLD near CoC, px at 1080p, full-res, before the
+ *                              strength scale. **0** — see the measurement above. (0.0)
  *   dofFarMaxCoC      number   px at 1080p, full-res, before the strength scale  (1.5)
- *   dofViewmodelCoC   number   fixed near CoC for viewmodel pixels               (0.0)
- *   dofWorldDepthValid bool    false while KNOWN_ISSUES 18 is open: the shared depth
- *                              texture holds no world geometry, so the world CoC is
- *                              identically zero and the prefilter+gather are pure cost.
- *                              Set true the day scene.js stops clearing it.  (false)
+ *   dofViewmodelCoC   number   fixed near CoC for viewmodel pixels, delivered through
+ *                              the pipe.viewDepthTex mask                        (0.0)
+ *   dofWorldDepthValid bool    KNOWN_ISSUES 18 escape hatch. The condition it named is
+ *                              met (reports/depth.md), so this is now **true** and
+ *                              setting it false is a diagnostic, not a workaround.
  *   dofNearEnd        number   metres: full near blur at or below this   (0.28)
  *   dofNearStart      number   metres: near blur gone at or above this   (1.60)
  *   dofFarStart       number   metres: far blur begins                   (90)
@@ -220,6 +243,8 @@ const KERNEL_GLSL = `const vec2 KERN[${TAPS}] = vec2[${TAPS}](`
 
 const COC_LIB = /* glsl */`
 uniform sampler2D tDepth;
+uniform sampler2D tViewDepth;         // pipe.viewDepthTex - EXACT weapon mask, 1.0 = not the gun
+uniform float uHasViewDepth;          // 0 if the pipeline did not publish one
 uniform sampler2D tGbuf1;
 uniform vec2  uTexel;                 // full-res texel
 uniform float uNear, uFar;
@@ -230,7 +255,13 @@ uniform float uViewmodelCoC;          // fixed near CoC for the weapon
 uniform float uWorldValid;            // 0 = the depth buffer holds no world geometry
 uniform float uTestCoC;               // diagnostic; 0 in every real frame
 
-const float MATID_VIEWMODEL = 8.0;
+/* The weapon, exactly. 'pipe.viewDepthTex' is cleared to 1.0 and written by nothing but
+ * the viewmodel draw, so this is a mask and not a heuristic. It replaces the old
+ * 'depth written but no G-buffer coverage' test, which was exact only while
+ * KNOWN_ISSUES 18 was open and is now empty at every pose (measured: 0 px). */
+bool isViewmodelPx(vec2 uv){
+  return uHasViewDepth > 0.5 && texture(tViewDepth, uv).r < 1.0;
+}
 
 float linearZ(float d){
   float ndc = d * 2.0 - 1.0;
@@ -245,32 +276,27 @@ float cocAt(float z){
   return farC - nearC;
 }
 
-/* The only place depth is consulted. See the three refusal cases in the header. */
+/* The only place depth is consulted. Order matters: the weapon is in front of
+ * everything, so it is resolved first and never reaches the world curve. */
 float cocAtUv(vec2 uv){
   // Diagnostic override: a horizontal CoC ramp, near field on the left, in focus down
-  // the middle, far field on the right. It exists because the shipped CoC curve is
-  // deliberately zero over almost every depth in this scene, and because the depth
-  // buffer is currently cleared before post runs (case 3 below), so on a real frame
-  // every path underneath correctly refuses and the gather is unreachable — which makes
-  // it unverifiable too. This exercises the filter itself without weakening the
-  // defaults to do it. Zero in every real frame.
+  // the middle, far field on the right. The shipped CoC curve is deliberately zero over
+  // most of this scene's depth range, so without this the gather is hard to see at all.
+  // Zero in every real frame.
   if (uTestCoC != 0.0) return uTestCoC * (uv.x * 2.0 - 1.0);
+
+  // 1. The viewmodel, from its own depth attachment. Exact, not a heuristic.
+  if (isViewmodelPx(uv)) return -uViewmodelCoC;
 
   vec4 g1 = texture(tGbuf1, uv);
   float raw = texture(tDepth, uv).r;
 
-  if (g1.a <= 0.5) {
-    // Depth written but no G-buffer coverage means the pixel was drawn AFTER the
-    // pre-pass, and scene.js draws exactly one thing after the pre-pass: the viewmodel,
-    // from its own 0.002-12 m camera. Its depth is therefore not in the main camera's
-    // range and must not be run through linearZ() - it gets the fixed CoC instead.
-    // Cleared depth reads exactly 1.0, so the sky falls through to zero.
-    if (raw < 0.999999) return -uViewmodelCoC;
-    return 0.0;                                                   // sky / no coverage
-  }
-  if (abs(g1.b * 255.0 - MATID_VIEWMODEL) < 0.5) return -uViewmodelCoC;
-  if (raw >= 0.999999) return 0.0;                                // depth not valid here
-  if (uWorldValid < 0.5) return 0.0;                              // KNOWN_ISSUES 18 escape
+  // 2. Sky / no coverage. 'depthTex' is 1.0 there and there is nothing to defocus.
+  if (g1.a <= 0.5) return 0.0;
+  if (raw >= 0.999999) return 0.0;
+
+  // 3. Real world geometry at a real distance. Live since KNOWN_ISSUES 18 closed.
+  if (uWorldValid < 0.5) return 0.0;                              // diagnostic only
   return cocAt(linearZ(raw));
 }
 `;
@@ -439,14 +465,22 @@ const STRENGTH = { off: 0.0, low: 1.0, medium: 1.8, high: 3.0 };
 const DEFAULTS = {
   dofEnabled: true,
   dofStrength: 'low',
-  dofNearMaxCoC: 2.6,
+  // 0.0, not 2.6: measured, the world reaches 0.26 m in this scene and the old ramp put
+  // a visible near CoC on 44.2 % of ref_00000 for -8.15 score. See the header.
+  dofNearMaxCoC: 0.0,
   dofFarMaxCoC: 1.5,
+  // The weapon's fixed near CoC. It has an exact signal for the first time (viewDepthTex)
+  // but no reference measurement isolating the gun exists, our weapon ROI lap_var is
+  // already at the reference without it (500.6 vs 489.4 at ref_00000), and the reference
+  // weapon reads sharp — so it ships at 0 and is a one-line change for whoever gets a
+  // gun-only reference number. Note the composite's own floor: anything below
+  // `dofNearFadeLo` (0.50 px) is identically zero, so the useful range starts there.
   dofViewmodelCoC: 0.0,
   dofNearEnd: 0.28,
   dofNearStart: 1.60,
   dofFarStart: 90.0,
   dofFarEnd: 700.0,
-  dofWorldDepthValid: false,
+  dofWorldDepthValid: true,
   dofNearGain: 1.0,
   dofNearFadeLo: 0.50,      // full-res px of near CoC at which the gather starts to count
   dofNearFadeHi: 2.00,      // full-res px at which it is trusted completely
@@ -467,6 +501,8 @@ export function create(opts = {}) {
 
   const cocUniforms = () => ({
     tDepth: { value: null },
+    tViewDepth: { value: null },
+    uHasViewDepth: { value: 0 },
     tGbuf1: { value: null },
     uTexel: { value: new THREE.Vector2() },
     uNear: { value: 0.06 }, uFar: { value: 12000 },
@@ -537,12 +573,10 @@ export function create(opts = {}) {
      * the shipped 2.6/1.5 maxima could never fire under any viewmodel setting — so the
      * three-stage chain ran every frame to deliver a sub-pixel blur on a gun.
      *
-     * `dofWorldDepthValid` is the escape for KNOWN_ISSUES 18: while `scene.js` clears
-     * the shared depth texture before the viewmodel draw, every world pixel reads 1.0
-     * and `cocAtUv` already returns 0 for all of them — so the world maxima below are
-     * describing an effect that cannot happen, and they are the only reason this pass
-     * cannot bypass. Set it false to make that explicit and get the bypass; set it back
-     * to true (the default) the day 18 lands. It does not change the image today. */
+     * `dofWorldDepthValid` was the escape for KNOWN_ISSUES 18. 18 is closed and it now
+     * defaults to true; setting it false still forces every world pixel to CoC 0, which
+     * with `dofNearMaxCoC: 0` and `dofViewmodelCoC: 0` makes the whole pass bypass. That
+     * is the diagnostic arm of the A/B, not a workaround. */
     const worldValid = (c.dofWorldDepthValid ?? cfg.dofWorldDepthValid) !== false;
     const wNear = worldValid ? nearMax : 0;
     const wFar = worldValid ? farMax : 0;
@@ -550,20 +584,23 @@ export function create(opts = {}) {
     const bypass = !(c.dofEnabled ?? cfg.dofEnabled)
       || (testCoC === 0 && wFar <= 0.20 && Math.max(wNear, vmCoC) <= nearFloor);
 
-    // Self-announcing, once per session, so `dofWorldDepthValid: false` cannot quietly
-    // outlive the bug it exists for.
-    if (!worldValid && !announced) {
+    // Self-announcing, once per session. The KNOWN_ISSUES 18 announcement is gone — the
+    // world path is on. What is worth one line is the OTHER way of switching this pass
+    // off by accident: a pipeline that publishes no viewmodel depth, which silently
+    // returns the weapon to reading the CoC of the terrain behind it.
+    if (!announced && !pipe.viewDepthTex) {
       announced = true;
-      console.info('[dof] world path disabled: dofWorldDepthValid is false because '
-        + 'KNOWN_ISSUES 18 leaves pipe.depthTex holding no world geometry (measured: '
-        + 'every pixel returns CoC 0 and the pass is byte-identical to dofEnabled:false). '
-        + 'Set ctx.config.dofWorldDepthValid = true the day scene.js stops clearing the '
-        + 'shared depth texture, and re-derive dofViewmodelCoC once the viewmodel reaches '
-        + 'the G-buffer. See reports/postfx.md.');
+      console.info('[dof] pipe.viewDepthTex is absent, so the weapon has no mask and '
+        + 'takes the world CoC of whatever is behind it (measured at ref_00000: the full '
+        + '-2.6 px near CoC over 100% of the gun). See reports/depthfx.md.');
     }
 
     const pushCoc = (u) => {
       u.tDepth.value = pipe.depthTex;
+      // An unbound sampler reads as (0,0,0,1) in three, i.e. r = 0 < 1.0, which would
+      // classify the WHOLE FRAME as viewmodel. The flag is what makes that impossible.
+      u.tViewDepth.value = pipe.viewDepthTex || pipe.depthTex;
+      u.uHasViewDepth.value = pipe.viewDepthTex ? 1 : 0;
       u.tGbuf1.value = pipe.gbuffer ? pipe.gbuffer.textures[1] : null;
       u.uTexel.value.set(1 / pipe.w, 1 / pipe.h);
       u.uNear.value = cam.near; u.uFar.value = cam.far;

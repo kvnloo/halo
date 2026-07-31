@@ -11,10 +11,18 @@ import { createGBufferMaterial } from '../../gfx/GBufferMaterial.js';
  *   4. Opaque copy        — snapshot for refraction / SSR consumers
  *   5. Transparent        — water, glass
  *   6. Effects            — particles, tracers
- *   7. Viewmodel          — own camera and near plane, own depth range
+ *   7. Viewmodel          — own camera, own near plane, own DEPTH ATTACHMENT
  *
  * Steps 4-7 sit here rather than in the post chain because they need the depth
- * buffer that the pre-pass filled, and post passes run after depth is gone.
+ * buffer that the pre-pass filled.
+ *
+ * DEPTH INVARIANT (KNOWN_ISSUES #18, fixed here): `pipe.depthTex` is written exactly once
+ * per frame, by step 1, and is never cleared or overwritten again. Sky (step 2) and the
+ * transparent and effects layers (5, 6) all render with `depthWrite: false`; the viewmodel
+ * (7) renders into `pipe.viewDepthTex` instead. So from the end of step 1 onward the shared
+ * depth texture holds true opaque world depth, and the whole post chain can sample it.
+ * If you add a draw here, it must not write depth unless it is opaque world geometry that
+ * also went through step 1.
  */
 export function createScenePass() {
   const p = new Pass('scene');
@@ -104,15 +112,45 @@ export function createScenePass() {
     renderer.render(scene, cam);
 
     // ------------------------------------------------------- 7. viewmodel
+    //
+    // The weapon is drawn through its own camera (near 0.002 m, far 12 m) so a 5 cm-long
+    // gun model never intersects the beach. That needs a depth buffer with nothing of the
+    // world in it — but for four waves this pass got one by calling `renderer.clearDepth()`
+    // on `sceneRT`, whose depth attachment IS `pipe.depthTex`, the buffer the G-buffer
+    // pre-pass had just filled and the entire post chain is about to sample. The clear
+    // wiped the world and refilled it with the weapon, so `dof`, `motionBlur`, `taa`,
+    // `volumetricFog`, `ssao`, `ssr` and water refraction all ran against a depth buffer
+    // that read "sky at the far plane" for every world pixel (KNOWN_ISSUES #18). Measured
+    // at ref_00000: 10.1% of the frame carried depth (the gun), against a G-buffer opaque
+    // mask of 85.7%.
+    //
+    // So the weapon gets its OWN attachment. `pipe.viewDepthTex` is swapped onto `sceneRT`
+    // for this one draw and the world's is swapped back immediately after; three re-runs
+    // `setupDepthRenderbuffer` when a bound target's `depthTexture` changes identity, so
+    // this costs two `framebufferTexture2D` calls and no copies. The colour attachment is
+    // unchanged, so the weapon still composites over the world exactly as before, and it
+    // still cannot clip into it — it is depth-tested only against a freshly cleared buffer
+    // of its own. Verify both halves with `node tools/_depthprobe.mjs`.
     const vm = pipe.viewCamera;
     vm.position.copy(cam.position);
     vm.quaternion.copy(cam.quaternion);
     vm.updateMatrixWorld(true);
     vm.layers.disableAll();
     vm.layers.enable(LAYER.VIEWMODEL);
-    renderer.setRenderTarget(pipe.sceneRT);
-    renderer.clearDepth();
+    //
+    // `vmLegacyDepth=1` restores the old shared-buffer clear for a same-build A/B — the
+    // only honest way to compare, since a source-level A/B cannot be run simultaneously
+    // and `src/` is not quiescent during a wave (KNOWN_ISSUES #16, reports/screenspace.md
+    // §6). It is a diagnostic, not a mode: it reintroduces #18 in full.
+    const legacyDepth = !!ctx.config?.vmLegacyDepth;
+    if (!legacyDepth) pipe.sceneRT.depthTexture = pipe.viewDepthTex;
+    renderer.setRenderTarget(pipe.sceneRT);   // re-bind: this is what performs the swap
+    renderer.clearDepth();                    // clears viewDepthTex, NOT the world's depth
     renderer.render(scene, vm);
+    // Put the world's depth back before anything else can bind sceneRT. Leaving the
+    // viewmodel attachment on it would silently move the damage one frame later instead
+    // of removing it.
+    if (!legacyDepth) pipe.sceneRT.depthTexture = pipe.depthTex;
 
     cam.layers.enableAll();
     gbufMat.captureHistory(scene);

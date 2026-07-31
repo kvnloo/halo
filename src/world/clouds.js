@@ -1332,7 +1332,20 @@ export function create(opts = {}) {
       U.uHasGNorm.value = gReady ? 1 : 0;
       if (gReady) U.uInvGSize.value.set(1 / pipe.w, 1 / pipe.h);
       // ...and the depth texture for the viewmodel, which never enters the pre-pass.
-      const dTex = pipe && pipe.depthTex ? pipe.depthTex : null;
+      //
+      // ONE-LINE CONTRACT ADOPTION, made by the depth agent (KNOWN_ISSUES #18, wave H),
+      // not a retune — no constant in this file was touched. `pipe.depthTex` used to be
+      // the viewmodel-only buffer this line wanted, because `scene.js` cleared the shared
+      // depth before the weapon draw. It no longer does: `depthTex` is now true opaque
+      // WORLD depth and the weapon has its own attachment, `pipe.viewDepthTex` (cleared to
+      // 1.0, written only by the viewmodel, i.e. exactly the mask this line is asking for).
+      // Left pointing at `depthTex` this reads as "occluded wherever the world is", the
+      // gun stops being masked, and clouds paint straight through the weapon wherever it
+      // silhouettes against sky — measured at ref_00600, where 16.1% of weapon pixels have
+      // sky behind them; the weapon ROI moved by mean 3.34 / max 220 and the pose score
+      // fell 37.5 -> 34.2 until this line was changed. `pipe.viewDepthTex` has the same
+      // raw-non-linear convention, so the `< 0.999995` test below is unchanged.
+      const dTex = pipe && (pipe.viewDepthTex || pipe.depthTex) ? (pipe.viewDepthTex || pipe.depthTex) : null;
       const dReady = !!(dTex && ctx.clock.frame > 0 && dTex.image && dTex.image.width > 2);
       U.tDepth.value = dReady ? dTex : null;
       U.uHasDepth.value = dReady ? 1 : 0;

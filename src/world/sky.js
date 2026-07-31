@@ -501,7 +501,8 @@ uniform vec3  uHazeTint;
 uniform float uGrain;
 
 #define RING_N 2
-uniform vec3  uRingAxis[RING_N];   // horizontal, across the band's width
+uniform vec3  uRingAxis[RING_N];   // the ring plane's normal, across the band's width
+uniform vec3  uRingUp[RING_N];     // observer -> ring centre; unit, perpendicular to axis
 uniform vec3  uRingEast[RING_N];   // horizontal, along the circumference
 uniform float uRingRadiusKm[RING_N];
 uniform float uRingHalfWidthKm[RING_N];
@@ -512,7 +513,9 @@ uniform float uRingBright[RING_N];
 uniform float uRingOpacityA[RING_N];
 uniform float uRingSeedA[RING_N];
 uniform float uRingWidthOffset; // where the observer sits across the band, -1..1
+uniform float uRingWidthExp;    // measured flare law: angular width ~ sin(el)^(exp-1)
 uniform float uRingHazeK;
+uniform float uRingHazeExp;
 uniform float uRingHazeFloor;   // aerial perspective present even looking straight up
 uniform float uRingRail;
 uniform vec3  uRingRailColor;
@@ -629,12 +632,33 @@ float cirrusVeil(vec3 dir){
  * observer's own feet, so theta runs 0 at the horizon to pi at the zenith, and the
  * band's exact angular half-width is W/(4 R sin el).
  *
+ * MEASURED (Wave H). kf_00600 is the only reference frame in which the band is
+ * unobstructed, and 68 horizontal cuts through it at 10-px spacing say two things
+ * that decide this whole object:
+ *
+ *   1. The band's centre directions lie on a GREAT CIRCLE to an rms of 0.050 deg
+ *      (max 0.265 over el 13.8-65.0). That is the signature of a ring the observer
+ *      is standing ON — the ring's plane contains the eye, so it projects to a great
+ *      circle exactly — and it is invariant to the assumed camera pitch and fov
+ *      (rms stays 0.050 for pitch 22-30, fov 76-80). It is not a skybox card.
+ *      The fitted plane normal sits at elevation +1.55 deg, i.e. the ring's axis is
+ *      tilted 1.55 deg off horizontal, which is why the band leans 2.4 deg of azimuth
+ *      across the frame instead of standing vertical. 'ringTrace' therefore takes an
+ *      explicit 'uRingUp' (observer -> ring centre) rather than assuming +Y.
+ *
+ *   2. The band's true angular width (great-circle separation of its two edges, NOT
+ *      an azimuth difference — off-axis those differ by 1/cos(el), a factor of 2.2 at
+ *      the top of this frame) obeys
+ *          W(el) = 3.298 deg * sin(el)^-0.618       rms 0.26 deg over 68 cuts
+ *      running 3.03 deg at el 63.5 to 7.48 deg at el 13.8. Exact geometry is
+ *      sin(el)^-1; the reference is shallower than that but nothing like the flat
+ *      band the previous pass shipped. See uRingWidthExp.
+ *
  * Two independent segments are traced. One cylinder can only ever put its two legs
- * exactly 180 deg apart on the horizon, which cannot reproduce docs/WORLD.md's two
- * bands at 56 deg of separation in kf_00720; a second trace with its own axis, arc
- * extent and leg selection can. Each segment carries an arc-length window so the band
- * terminates in a feathered chevron the way kf_00450 does at x 596-634, instead of
- * running off the top of frame at constant width.
+ * exactly 180 deg apart on the horizon; a second trace with its own axis, arc
+ * extent and leg selection can sit anywhere. Each segment carries an arc-length
+ * window so the band feathers out near the zenith instead of both legs colliding
+ * on the singular point directly overhead.
  */
 struct RingHit { float t; float a; float theta; float hw; float term; vec3 n; bool hit; };
 
@@ -642,10 +666,14 @@ RingHit ringTrace(vec3 dir, int k){
   RingHit h;
   h.hit = false; h.t = 0.0; h.a = 0.0; h.theta = 0.0; h.hw = 1.0; h.term = 0.0;
   h.n = vec3(0.0,1.0,0.0);
-  float du = dir.y;                               // dot(dir, up)
-  if (du <= 1e-4) return h;
   vec3 A = uRingAxis[k];
+  vec3 U = uRingUp[k];
   vec3 E = uRingEast[k];
+  // cos of the incidence angle on the inner surface, and the chord parameter: the ray
+  // meets the cylinder at t = 2R (dir . U) / |dir - (dir.A)A|^2. With a tilted axis U
+  // is no longer +Y, which is the whole point of carrying it as a uniform.
+  float du = dot(dir, U);
+  if (du <= 1e-4) return h;
   float leg = uRingLeg[k];
   float sd = dot(dir, E);
   if (leg != 0.0 && sd*leg <= 0.0) return h;
@@ -659,14 +687,16 @@ RingHit ringTrace(vec3 dir, int k){
   h.t = t; h.a = a;
   float sinHalf = clamp(t/(2.0*R), 0.0, 1.0);
   h.theta = 2.0*asin(sinHalf);
-  vec3 up = vec3(0.0, 1.0, 0.0);
-  h.n = -(t*e - R*up) / R;
+  h.n = -(t*e - R*U) / R;
 
-  // Exact geometry trumpets as 1/sin(el) — 5x wider by 10 deg of elevation, which is
-  // the flare the reference never shows. kf_00600 measures 53 px at el 53 against 82 px
-  // at el 19: sin^-0.45, not sin^-1, because the ring's own limb haze eats the band's
-  // edges as the slant path through it grows. Compress the flare to the measured law.
-  float hw = uRingHalfWidthKm[k] * pow(clamp(du, 0.05, 1.0), 0.70);
+  // The angular half-width that falls out of |a| <= W/2 is W/(4 R sin el), i.e. an
+  // exact sin(el)^-1 flare. kf_00600 measures sin(el)^-0.618 (68 cuts, rms 0.26 deg),
+  // so the km half-width is scaled by sin(el)^uRingWidthExp with uRingWidthExp =
+  // 1 - 0.618 = 0.382 and the two laws compose to the measured one. The previous pass
+  // used 0.70, which leaves sin(el)^-0.30 — a band that is 3.0 deg wide at el 63 and
+  // 3.4 deg at el 20 where the reference is 3.0 and 6.4. That flat column is what four
+  // showcase cells read as a glass pillar rather than an arc (KNOWN_ISSUES 17.2).
+  float hw = uRingHalfWidthKm[k] * pow(clamp(du, 0.03, 1.0), uRingWidthExp);
 
   // arc-length window -> feathered chevron terminus
   float x = h.theta / max(uRingArc[k], 1e-3);
@@ -698,24 +728,28 @@ vec3 ringSurface(float s, float v, float hwKm, float seed, out float lum){
    * which is why the interior read as a flat wash however much contrast it was given.
    * kf_00600 shows 4-6 distinct features across the band width; CONT_KM is set to
    * deliver that. */
-  const float CONT_KM = 155.0;      // continental period across the band
+  const float CONT_KM = 205.0;      // continental period across the band
   const float ANISO   = 2.6;        // lengthwise stretch, screen-space compensated
   vec2 q = vec2(s/(CONT_KM*ANISO), (v*hwKm)/CONT_KM) + vec2(seed, seed*0.37);
 
   float cont = warpedFbm2(q, 4, 1.55);
-  float shelf = smoothstep(-0.035, 0.045, cont);
-  float land  = smoothstep(0.080, 0.155, cont);
-  float alt   = smoothstep(0.150, 0.310, cont);
+  // Wave H: the land fraction was far too high. In kf_00600 the band's clear sections
+  // measure (96,134,179) — a strongly blue-green ocean — while ours measured (142,155,
+  // 165), i.e. near-neutral, because 'land' opened at cont 0.080 and put beige over most
+  // of the strip. A Halo ring section is mostly sea with archipelagos in it.
+  float shelf = smoothstep(0.010, 0.120, cont);
+  float land  = smoothstep(0.150, 0.240, cont);
+  float alt   = smoothstep(0.235, 0.390, cont);
 
   // The band is seen through 10,000 km of the ring's own air, but that is what the
   // aerial-perspective mix in main() is for; the SURFACE keeps its own range. Deep
   // ocean genuinely is darker than the sky beside it in kf_00600 (interior minima
   // 62/89/141 against a sky of 45/79/132 in B but below it in luminance-weighted R).
-  vec3 deep    = vec3(0.055, 0.135, 0.235);
-  vec3 shallow = vec3(0.210, 0.395, 0.470);
-  vec3 grass   = vec3(0.215, 0.310, 0.240);
-  vec3 dry     = vec3(0.455, 0.415, 0.305);
-  vec3 rock    = vec3(0.505, 0.490, 0.455);
+  vec3 deep    = vec3(0.048, 0.130, 0.255);
+  vec3 shallow = vec3(0.210, 0.455, 0.575);
+  vec3 grass   = vec3(0.215, 0.300, 0.240);
+  vec3 dry     = vec3(0.410, 0.395, 0.330);
+  vec3 rock    = vec3(0.475, 0.478, 0.470);
 
   vec3 c = mix(deep, shallow, shelf);
   vec3 ground = mix(grass, dry, fbm2(q*2.6 + 11.0, 3)*0.5 + 0.5);
@@ -725,15 +759,19 @@ vec3 ringSurface(float s, float v, float hwKm, float seed, out float lum){
   // Coastlines and river systems. cont is warped fbm, so its level sets already
   // meander; a ridged field keyed off the SAME warp puts drainage inside the same
   // basins instead of scattering isotropic scratches over the whole band.
+  // Wave H: both of these were turned down. At CONT_KM 155 they were drawing a bright
+  // filament through the middle of every one of the many small islands, and the band
+  // read as leopard spots rather than as coastline. They are edge decoration on a
+  // continent, not a texture in their own right.
   float riv = 1.0 - smoothstep(0.0, 0.075, abs(ridged2(q*1.6 + 4.3, 3) - 0.58));
-  c = mix(c, shallow*0.9, riv*land*0.7);
+  c = mix(c, shallow*0.9, riv*land*0.34);
   // a hard shelf edge exactly on the coastline reads as a coast rather than a gradient
-  float coast = 1.0 - smoothstep(0.0, 0.030, abs(cont - 0.080));
-  c = mix(c, shallow*1.12, coast*0.55);
+  float coast = 1.0 - smoothstep(0.0, 0.038, abs(cont - 0.080));
+  c = mix(c, shallow*1.12, coast*0.22);
 
   // Cloud deck, sheared along the circumference into lengthwise filaments but at a
   // period the band is actually wide enough to resolve (~170 km, ~20 px).
-  vec2 cq = q * vec2(0.42, 0.62);
+  vec2 cq = q * vec2(0.30, 0.46);
   float cw = fbm2(cq*1.9 + 21.0, 3);
   float cb = fbm2(cq*1.7 + vec2(cw*1.6, cw*0.4) + 51.0, 4);
   float cd = fbm2(cq*2.4 + vec2(cw*0.8, 0.0) + 77.0, 3);
@@ -742,15 +780,37 @@ vec3 ringSurface(float s, float v, float hwKm, float seed, out float lum){
   // elevations. A 2.15-3.10 cloud albedo over a threshold this low put OUR peak at 198
   // at every elevation - a band of blown cloud with land showing through, rather than
   // land with weather on it.
-  float cm = smoothstep(0.235, 0.430, cb*0.78 + cd*0.55);
-  vec3 cloud = vec3(1.50, 1.66, 1.90);
+  //
+  // Wave H re-measure. That reasoning was right about the CAUSE and wrong about the
+  // remedy: it capped the cloud tops, and the reference's cloud tops CLIP. Over
+  // el 20-50 in kf_00600 the band's interior maximum is 240-251 in 33 of 34 cuts while
+  // its MEAN stays at 140-180 and its minimum at 90-120 — 8-bit std 25-45. Ours after
+  // the width fix measured std 5-14 with a maximum of 190: a flat wash with no
+  // highlight at all. The peak was never the problem; the cloud FRACTION was. So the
+  // albedo goes up by ~2x (peaks now reach the AgX shoulder) and the coverage
+  // threshold up with it, which puts blown tops on a third of the band instead of a
+  // grey haze over all of it.
+  // Synoptic scale. Without this the cloud fraction is the same everywhere and the band
+  // has a uniform stipple of weather along its whole length. kf_00600 alternates whole
+  // overcast sections (its top third is a solid deck) with sections of clear ocean over
+  // ~150-250 px, so the coverage THRESHOLD is what has to vary, not the albedo.
+  float synop = fbm2(q*vec2(0.22, 0.34) + 301.0, 3);
+  float thr0 = 0.145 - 0.235*clamp(synop*1.9, -1.0, 1.0);
+  // A narrow smoothstep on a single fbm gives blobs that are all the same size with the
+  // same hard edge — cotton wool. The extra octave keyed off the SAME warp ragged-edges
+  // them at a third of the scale without adding an independent stipple.
+  float cf = fbm2(cq*6.1 + vec2(cw*0.9, 0.0) + 131.0, 3);
+  float cm = smoothstep(thr0, thr0 + 0.235, cb*0.78 + cd*0.55 + cf*0.20);
+  vec3 cloud = vec3(3.60, 3.82, 4.15);
 
-  c = mix(c, cloud*0.30, smoothstep(-0.09, 0.30, cb) * 0.09);
+  c = mix(c, cloud*0.16, smoothstep(-0.09, 0.30, cb) * 0.11);
   c = mix(c, cloud, cm);
-  c = mix(c, cloud*1.12, cm * smoothstep(0.20, 0.52, cd) * 0.55);
+  c = mix(c, cloud*1.20, cm * smoothstep(0.20, 0.52, cd) * 0.60);
 
-  // lengthwise illumination banding — long, never blotchy
-  c *= 0.72 + 0.60*(fbm2(vec2(q.x*0.55, q.y*1.10) + 91.0, 3)*0.5 + 0.5);
+  // lengthwise illumination banding — long, never blotchy. The reference alternates
+  // bright weather systems and dark ocean over ~150 px of band length; +-30% was not
+  // enough amplitude to read as that at all.
+  c *= 0.52 + 0.98*(fbm2(vec2(q.x*0.55, q.y*1.10) + 91.0, 3)*0.5 + 0.5);
 
   c = mix(vec3(0.35, 0.45, 0.55), c, vec3(lessThan(c, vec3(1.0e6))));   // NaN guard
   lum = dot(c, vec3(0.30, 0.59, 0.11));
@@ -968,10 +1028,20 @@ void main(){
     float dissolve = smoothstep(0.010, 0.075, dir.y);   // merge into the horizon
     band *= dissolve;
 
-    // The view ray meets the inner surface at grazing incidence cos(i) = sin(elevation),
-    // so the path through the ring's own air is an airmass of 1/sin(el).
-    float am = 1.0 / max(dir.y, 0.010);
-    float hz = 1.0 - exp(-uRingHazeK * pow(max(am - 1.0, 0.0), 1.4));
+    // Aerial perspective along the CHORD, not an airmass. The previous term was
+    // am = 1/sin(el), i.e. hazier the closer to the horizon you look — and that is
+    // backwards for this object, which is the one place the intuition from a terrestrial
+    // sky fails. The hit point's distance is t = 2R sin(el): the zenith is the ANTIPODE
+    // at the full 10,000 km and the base of the band is only 3,000-4,000 km away. So the
+    // far end of the band is the high end, and kf_00600 agrees — measured interior
+    // 8-bit std runs 9.5 at el 60, 34.1 at el 47, 34.5 at el 37, i.e. the top of the band
+    // is the washed-out end. sd is the chord as a fraction of the ring's diameter.
+    //
+    // Our own atmosphere is NOT in here: 'col = space*Tview + inscatter*(...)' already
+    // folds the band through the transmittance to space and lifts it with the horizon's
+    // in-scatter, so putting an airmass term here as well applied it twice.
+    float sd = clamp(rh.t / (2.0*uRingRadiusKm[k]), 0.0, 1.0);
+    float hz = 1.0 - exp(-uRingHazeK * pow(sd, uRingHazeExp));
 
     if (band > 0.001){
       float s = uRingRadiusKm[k] * rh.theta * sign(dot(dir, uRingEast[k]));
@@ -999,9 +1069,16 @@ void main(){
       // one bright edge near the chevron tip. 1.35 with a 0.075-wide gaussian drew two
       // hard specular rails brighter than everything between them, which is the other
       // half of the tube.
-      float r1 = (av - 0.86)/0.150, r2 = (av - 0.45)/0.42;
-      float rail = exp(-r1*r1) + 0.30*exp(-r2*r2);
-      surf += uRingRailColor * rail * uRingRail * (1.0 - hz*0.40) * rh.term;
+      //
+      // Wave H: and the elevation dependence was inverted too. The rim is only
+      // separable from the interior where the interior has been hazed flat — the top
+      // of the band in kf_00600 has a visible thin bright edge, the clear lower half
+      // has none — so it scales WITH hz, not against it. (1.0 - hz*0.40) put the
+      // brightest rails exactly where the reference has no rails at all, which is the
+      // remaining half of KNOWN_ISSUES 17.2's "two thin white lines".
+      float r1 = (av - 0.90)/0.105, r2 = (av - 0.45)/0.42;
+      float rail = exp(-r1*r1) + 0.22*exp(-r2*r2);
+      surf += uRingRailColor * rail * uRingRail * (0.22 + 0.90*hz) * rh.term;
 
       float alpha = band * uRingOpacityA[k];
       space = mix(space, surf, alpha);
@@ -1012,7 +1089,7 @@ void main(){
     // stencilled; the reference lifts the sky for roughly half a band-width out.
     float outer = max(av - 1.0, 0.0);
     float glow = exp(-outer * 5.5) * (1.0 - band) * dissolve * rh.term;
-    space += uRingRailColor * glow * uRingRail * 0.26 * (1.0 - hz*0.8) * uRingOpacityA[k];
+    space += uRingRailColor * glow * uRingRail * 0.18 * (1.0 - hz*0.8) * uRingOpacityA[k];
   }
 
   /* -- sun disc --
@@ -1093,33 +1170,54 @@ void main(){
 export function create(opts = {}) {
   const S = {
     /* --- the Halo ring, one entry per visible segment --------------------------
-     * ringWidthRatio is W/R. The analytic zenith half-width is W/(4R).
+     * widthRatio is W/R. The analytic zenith angular width is W/(2R).
      *
-     * MEASURED, not guessed. kf_00600 shows the band clean above the cloud deck; a
-     * horizontal cut at y=150/200/250 puts it at x 847-898 / 841-892 / 832-888, i.e.
-     * 52 +- 2 px. Our own ref_00600 capture at widthRatio 0.040 measured 24 px at the
-     * same elevations. 0.040 x 52/24 = 0.087, i.e. 435 km on a 5000 km radius. That is
-     * 2.2x the 0.040 a previous pass narrowed it to (which left the object too thin to
-     * carry any surface at all — KNOWN_ISSUES §17.2 has it misread as a rendering
-     * artifact in four showcase cells) and within 17% of docs/WORLD.md's 520 km.
-     * arcDeg is the theta extent before the feathered chevron terminus; theta is 0 at
-     * the observer's own feet and 180 at the zenith. leg selects one side of the
-     * cylinder (0 = both), which is what lets two segments sit at an arbitrary
-     * separation instead of the 180 deg a single trace is stuck with. */
+     * ALL THREE OF azimuthDeg, tiltDeg AND widthRatio ARE SOLVED, NOT FITTED BY EYE.
+     * 68 horizontal cuts through the band in kf_00600 (the only frame where it is
+     * unobstructed) give edge pixel pairs; converting those to world directions at the
+     * ref_00600 pose and taking the smallest singular vector of the centre directions
+     * gives the ring plane to an rms of 0.050 deg:
+     *
+     *     plane normal   el +1.55 deg, az -103.84 deg camera-relative
+     *     -> band runs along camera-relative az -13.84, world az 16.16, tilt 1.55 deg
+     *     -> azimuthDeg = 180 - 16.16 = 163.84   (was 162.5, a 1.3 deg error)
+     *
+     * and a least-squares fit of the true great-circle angular width against sin(el)
+     * gives W(el) = 3.298 deg * sin(el)^-0.618, whose el=90 asymptote W/(2R) = 3.298
+     * deg fixes widthRatio = 0.1151, i.e. 576 km on a 5000 km radius. That is 32%
+     * wider than the 0.087 the last pass used, and the previous number was low for a
+     * specific reason: it was fitted from a single cut at y=150-250 (el 48-55) using
+     * PIXEL width, which conflates the band's angular width with the 1/cos(el)
+     * stretch of the perspective projection. At el 52 that factor is 1.63.
+     *
+     * docs/WORLD.md says "~0.6-1.2 deg wide". That is wrong by 3-6x; it was written
+     * from the faint slivers in kf_00720, which on inspection are Forerunner light
+     * conduits, not ring segments. See reports/ring.md.
+     *
+     * arcDeg is the theta extent before the feathered terminus; theta is 0 at the
+     * observer's own feet and 180 at the zenith. leg selects one side of the cylinder
+     * (0 = both). */
     rings: [
-      { azimuthDeg: 162.5, radiusKm: 5000, widthRatio: 0.087, arcDeg: 176,
-        brightness: 1.15, opacity: 0.94, tipFlare: 0.85, leg: 0, seed: 0.0 },
-      { azimuthDeg: 106.5, radiusKm: 5000, widthRatio: 0.065, arcDeg: 84,
-        brightness: 0.95, opacity: 0.40, tipFlare: 0.55, leg: 1, seed: 7.9 },
+      { azimuthDeg: 163.84, tiltDeg: 1.55, radiusKm: 5000, widthRatio: 0.1151,
+        arcDeg: 176, brightness: 3.20, opacity: 0.94, tipFlare: 0.10, leg: 0, seed: 0.0 },
+      { azimuthDeg: 106.5, tiltDeg: 0.0, radiusKm: 5000, widthRatio: 0.086, arcDeg: 84,
+        brightness: 0.95, opacity: 0.40, tipFlare: 0.20, leg: 1, seed: 7.9 },
     ],
     ringWidthOffset: 0.0,
-    ringHazeZenithOD: 0.085,  // optical depth of the ring's own air, straight down
+    /* 1 - 0.618: composes with the trace's own sin(el)^-1 to the measured
+     * sin(el)^-0.618. 0.70 (a flat sin^-0.30 band) was the shipped value. */
+    ringWidthExp: 0.382,
+    /* Aerial perspective along the chord, keyed on t/(2R) — see the note in main().
+     * K and the exponent are fitted to the reference's interior-std profile: 9.5 codes
+     * at el 60 (chord 0.87 of a diameter) against 34 at el 40-47 (chord 0.64-0.73). */
+    ringHazeK: 16.00,
+    ringHazeExp: 12.00,
     // kf_00600's band peaks in the MIDDLE and falls to both edges; kf_00450 shows one
     // bright edge near the chevron tip. 1.35 drew two hard specular rails brighter than
     // everything between them, i.e. a tube.
-    ringRail: 0.34,
-    // unconditional haze mix, before the 1/sin(el) airmass term. Was a hard 0.45.
-    ringHazeFloor: 0.16,
+    ringRail: 0.085,
+    // unconditional haze mix, before the chord term.
+    ringHazeFloor: 0.10,
 
     planetAzimuthDeg: 210.4,
     planetElevationDeg: 24.3,
@@ -1242,6 +1340,7 @@ export function create(opts = {}) {
     uGrain: { value: S.grain },
 
     uRingAxis: { value: [new THREE.Vector3(1, 0, 0), new THREE.Vector3(1, 0, 0)] },
+    uRingUp: { value: [new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 1, 0)] },
     uRingEast: { value: [new THREE.Vector3(0, 0, 1), new THREE.Vector3(0, 0, 1)] },
     uRingRadiusKm: { value: rings.map((r) => r.radiusKm) },
     uRingHalfWidthKm: { value: rings.map((r) => r.radiusKm * r.widthRatio * 0.5) },
@@ -1252,7 +1351,9 @@ export function create(opts = {}) {
     uRingOpacityA: { value: rings.map((r) => r.opacity) },
     uRingSeedA: { value: rings.map(() => 0) },
     uRingWidthOffset: { value: S.ringWidthOffset },
-    uRingHazeK: { value: S.ringHazeZenithOD },
+    uRingWidthExp: { value: S.ringWidthExp },
+    uRingHazeK: { value: S.ringHazeK },
+    uRingHazeExp: { value: S.ringHazeExp },
     uRingHazeFloor: { value: S.ringHazeFloor },
     uRingRail: { value: S.ringRail },
     uRingRailColor: { value: new THREE.Vector3(0.68, 0.94, 1.28) },
@@ -1773,8 +1874,18 @@ export function create(opts = {}) {
       for (let i = 0; i < RN; i++) {
         const r = rings[i];
         const azR = THREE.MathUtils.degToRad(r.azimuthDeg);
-        uniforms.uRingEast.value[i].set(Math.sin(azR), 0, Math.cos(azR)).normalize();
-        uniforms.uRingAxis.value[i].set(Math.cos(azR), 0, -Math.sin(azR)).normalize();
+        /* tiltDeg rotates the ring's axis out of horizontal ABOUT the east direction,
+         * so `east` is unchanged and `up` (observer -> ring centre) tips the other way
+         * by the same angle. Derivation: A = axis0 cos(phi) + Y sin(phi), and
+         * U = normalize(Y - A (A.Y)) = Y cos(phi) - axis0 sin(phi); both stay unit and
+         * mutually perpendicular, and A x U = axis0 x Y = east for any phi. The
+         * measured phi for the primary ring is +1.55 deg (great-circle fit, rms 0.05). */
+        const tR = THREE.MathUtils.degToRad(r.tiltDeg || 0);
+        const ca = Math.cos(azR), sa = Math.sin(azR);
+        const ct = Math.cos(tR), st = Math.sin(tR);
+        uniforms.uRingEast.value[i].set(sa, 0, ca).normalize();
+        uniforms.uRingAxis.value[i].set(ca * ct, st, -sa * ct).normalize();
+        uniforms.uRingUp.value[i].set(-ca * st, ct, sa * st).normalize();
         uniforms.uRingRadiusKm.value[i] = r.radiusKm;
         uniforms.uRingHalfWidthKm.value[i] = r.radiusKm * r.widthRatio * 0.5;
         uniforms.uRingArc.value[i] = THREE.MathUtils.degToRad(r.arcDeg);

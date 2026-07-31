@@ -1,300 +1,387 @@
 # screenspace — `src/render/passes/ssao.js`, `src/render/passes/ssr.js`
 
-Wave H. Owner of these two files only. Everything below was measured on this tree; where the
-tree moved under a measurement I say so.
+Wave I. Owner of these two files only (plus `tools/_ssprobe.mjs`). Wave H's report is
+superseded by this one; the parts of it that still stand are re-stated below with today's
+numbers, because the tree moved under every one of them.
 
 ---
 
 ## 0. Headline
 
-The critic's verdict was right and the proof reproduced: both passes exited at their first
-guard on every world pixel and rendered nothing. That is fixed, entirely inside these two
-files, and both passes now run against real geometry.
+Three things, in order of size:
 
-Two of the critic's items turned out to have different causes than stated, and I have the
-experiment for each:
+1. **The opaque-depth snapshot is deleted.** `reports/depth.md` §1 asked for it, proved it
+   bit-identical to `pipe.depthTex` at all 21 poses, and left the deletion to this owner. I
+   re-confirmed 0 differing pixels on today's tree before deleting. Both passes now read
+   `pipe.depthTex`. −8.3 MB, −1 full-screen R32F draw, −1 scene object, −2 dead config knobs.
+   No image change, by construction.
 
-* **P8 (captures are nondeterministic) is FALSE.** Two captures launched *simultaneously* are
-  **byte-identical**, with the passes on and with them off. The 11.31-mean delta the critic
-  measured was `src/` churn between two *sequential* captures — KNOWN_ISSUES §16, not a
-  renderer bug. Method below; this matters because it makes A/B measurement possible again.
-* **P1's "not one pebble has a contact shadow" is true, and it is not fixable here.** The
-  foreground beach is a geometric plane to within millimetres in the depth buffer. Measured,
-  not asserted. An AO pass cannot occlude an object that does not exist in depth.
+2. **`fi`, the indirect fraction the AO composite weights itself by, was missing the IBL.**
+   `env.js` owns `scene.environment` and puts `groundIrradiance = 0.549` on a flat piece of
+   beach; the analytic sky fill it was being compared against is `0.649`. So **46% of the
+   ambient in this scene was absent from the estimate**, `fi` on sunlit sand read 0.1415
+   instead of 0.2334, and the AO was applied at 61% of its correct weight everywhere. Fixed
+   by evaluating the probe's own published SH9 (`env.shArray`) per pixel — the same
+   expression `env.js:524` uses to produce the number `tonemap.keyedExposure()` already
+   trusts. Not a fitted constant.
 
----
+3. **The dual-radius GTAO collapsed into a single radius over the whole near field, and the
+   `min()` combine was therefore a downward-biased estimator rather than Lagarde's rule.**
+   Both passes shared one 96 px clamp; on the foreground beach (0.26–1.4 m) both saturate it,
+   so `min(aoL, aoS)` was `min()` of two noisy estimates of the *same* integral. Measured:
+   44% of the contact pass's near-field darkening was estimator bias, not geometry. The
+   contact pass now has its own clamp (24 px).
 
-## 1. The depth fix (critic P1) — root cause, and why it landed here
-
-`RenderPipeline.js:137-158` binds one `DepthTexture` to both `gbuffer` and `sceneRT`;
-`scene.js:114` calls `renderer.clearDepth()` on `sceneRT` before the viewmodel draw. By the
-time post runs, `pipe.depthTex` is 1.0 everywhere except the gun (KNOWN_ISSUES §18).
-`ssao.js:212` and `ssr.js:236/457` both test `d >= 1.0` meaning "sky, nothing to do", so every
-world pixel took the early-out.
-
-The clean fix is in `scene.js`, which this subsystem does not own — and `dof`, `motionBlur`,
-`taa`, `volumetricFog` and water refraction are all being measured against the broken buffer
-by other agents right now, so changing shared state mid-wave would move their numbers under
-them. So the fix here is **local and additive**: an opaque-depth snapshot that copies
-`pipe.depthTex` into an R32F target at the one moment in the frame when it still holds the
-world, read only by these two passes. `pipe.opaqueDepthTex` is published for anyone else to
-adopt; nothing is taken away.
-
-**The mid-frame hook.** The scene pass does steps 1-7 in one `render()` call, so there is no
-pass boundary between the opaque draw and the depth clear. The hook is an invisible degenerate
-mesh on `LAYER.TRANSPARENT` with `renderOrder = -1e6`, whose `onBeforeRender` fires at the
-start of scene.js step 5. **This is not a new trick** — `src/world/particles.js:1148` already
-uses exactly this pattern to get a mid-frame depth copy. The copy binds its own target first,
-so the depth texture is never sampled while attached to the bound FBO.
-
-The copy stores the **raw non-linear** depth, so every existing `linearDepth(...)` call site
-and every `>= 1.0` sky test stays byte-for-byte valid; only the bound texture changes.
-`--config aoLegacyDepth=1,ssrLegacyDepth=1` restores the old (inert) behaviour for an A/B in
-the same build — which is how the before/after in §5 was measured despite a churning tree.
-
-**Verification** (`node tools/_ssprobe.mjs --pose ref_00000`):
-
-```
-depth: { readOk: true, geoFrac: 0.8486, near: 0.06, far: 12000, reversed: false }
-```
-
-85% of the frame carries world depth. Before the fix that number was ~0 (gun only).
+And one negative result that matters more than any of them: **the correct amount of AO on
+this beach is very close to zero, and the reference agrees.** §3.
 
 ---
 
-## 2. THE EXPERIMENT: there are no pebbles in the depth buffer
+## 1. The deletion (KNOWN_ISSUES §18 follow-through)
 
-The critic's central image claim is "every pebble in our frame meets the sand at exactly the
-sand's brightness… that single difference is most of the −43% local_contrast." Before retuning
-anything I ran the experiment that separates *"the AO is too weak"* from *"there is nothing to
-occlude"*: read the opaque depth back off the GPU and measure the signal GTAO integrates —
-the out-of-plane deviation `|dot(P_neighbour − P_centre, N_centre)|`, in metres, bucketed by
-view distance (`tools/_ssprobe.mjs`, `relief`). At `ref_00000`:
+`reports/depth.md` fixed the root cause: `pipe.depthTex` now holds opaque world depth for the
+whole frame. Its §1 listed the pure deletion this file owed:
 
-| band | samples | 8 px p90 | 8 px p99 | 32 px p50 | 32 px p90 | 32 px p99 |
-|---|---:|---:|---:|---:|---:|---:|
-| **0-4 m (foreground beach)** | 49 105 | **1.2 mm** | **15 mm** | **1.5 mm** | **9.9 mm** | **56 mm** |
-| 4-10 m | 947 | 19 mm | 64 mm | 16 mm | 85 mm | 424 mm |
-| 10-25 m | 1 552 | 29 mm | 1.04 m | 10 mm | 0.71 m | 1.92 m |
-| 25-80 m | 24 228 | 0.33 m | 3.35 m | 0.14 m | 1.86 m | 20.7 m |
+* `ensureOpaqueDepth`, `opaqueDepthTexture`, `OPAQUE_DEPTH_FRAG`, the probe mesh and the
+  `_opaqueDepth` WeakMap — gone from `ssao.js`.
+* `ssr.js` no longer imports from `ssao.js` at all.
+* `aoLegacyDepth` / `ssrLegacyDepth` — gone. They selected between two byte-identical
+  textures.
+* `LAYER` is no longer imported by `ssao.js`.
 
-**The foreground beach is a plane to within millimetres.** Over a ~15 cm patch of near sand the
-surface deviates from flat by a median of 1.5 mm. The cobbles in `ref/detail/sand_4k.png` are,
-in our build, albedo and normal-map detail on a flat mesh — the G-buffer normal comes from
-`vViewNormal` (the geometric normal), not from a normal map, so SSAO never sees them either.
-
-Corroborated by the AO buffer itself:
+**Verified before deleting, not asserted.** `node tools/_depthprobe.mjs --pose ref_00000
+--settle 48` on today's tree:
 
 ```
-ao.byDepth   0-5m  mean 0.9936  min 0.66   (272k px)
-             5-15m mean 0.9979  min 0.68
-            15-40m mean 0.9881  min 0.03
-             40m+  mean 0.9640  min 0.00
+agree: { snapshotGeoFrac 0.85696, differingPx 0, maxAbsDiff 0, identical true }
 ```
 
-Where relief exists (rocks, cliffs, structures at 15 m+) this pass drives AO to zero. On the
-beach it returns 0.9936, which is **the correct answer for a plane**.
+**Verified after deleting.** `node tools/_ssprobe.mjs --pose ref_00000` reads `pipe.depthTex`
+directly now (through an RGBA32F resolve — a `DepthTexture` cannot be a colour attachment):
 
-**Conclusion, and it is a handover not an excuse:** the pebble-contact-shadow deficit is a
-`terrain.js` geometry item. Displace the cobbles into real geometry and this pass will darken
-them the same day with no change here. Any further "the AO is too weak" tuning against that
-symptom is fitting a constant to a bug in a different file — exactly the trap KNOWN_ISSUES
-§4/§6/§8 keep documenting.
+```
+depth: { readOk true, geoFrac 0.85682, zeroFrac 0, near 0.06, far 12000, reversed false }
+```
+
+0.85682 against the G-buffer opaque mask's 0.85696 — the same buffer, to four decimals.
+
+Two tool fixes went with it:
+
+* `tools/_ssprobe.mjs --config` **has never applied anything** — `depth.md` §7 found it, and
+  it was my bug: `H.setConfig` is `(key, value)` and the probe passed an object. Fixed, and
+  the probe now echoes `appliedConfig` back in its output so a silent no-op cannot recur.
+  Every `--config` number in Wave H's report §8 was a reading of the shipped build.
+* `_ssprobe` gained a `lighting` block that reports every term of the direct/indirect split
+  against `lighting.js` and `env.js`. That block is what found §2.
 
 ---
 
-## 3. What changed in `ssao.js`
+## 2. `fi` was missing the IBL — the AO was applied at 61% of its correct weight
 
-1. **Opaque depth** (§1). Without it nothing below runs at all.
-2. **Dual-radius GTAO with `min()` combine** (critic P3, research §2.5). Ambient pass
-   `aoRadius` **2.2 → 1.2 m**; new contact pass `aoRadiusSmall` **0.25 m**; combined per
-   Lagarde's rule as quoted by Filament. The small pass is not redundant: at the t² step
-   distribution the large pass's taps land at ~1.6, 12, 33, 64 px, so a 5-px occluder between
-   the first two taps is invisible to it; the small pass's taps at that depth land at
-   ~1.6, 7, 19 px. `maxRadiusPx` 84 → 96 (research: 64-96 at half res).
-3. **`aoAngleBias` 0.12 → 0.045.** 0.12 discards any occluder standing under 6.9° above the
-   tangent plane; a 0.15 m pebble at 1.2 m subtends 7.1°, i.e. the bias sat exactly on top of
-   the geometry it was pointed at. Research §2.4 caps the legitimate range at sin(5°)=0.087
-   once texel-centre snapping is in place, which it already was.
-4. **3 slices × 4 steps instead of 2 × 6** (research §0), same tap count. Slice-direction error
-   is what the denoiser and temporal pass remove; step error is not.
-5. **XeGTAO thin-occluder part 1 added** — the depth-axis stretch of the sample delta before
-   the falloff test (`XeGTAO.hlsli:481-490`). Only part 2 (the horizon lerp) was present.
-   *Correction to the research brief's appendix:* it suggests replacing
-   `(shc>h) ? shc : mix(h,shc,c)` with XeGTAO's `lerp(max(h,shc),shc,c)`. Those are
-   algebraically identical — when `shc > h` the max wins and the lerp is the identity. No-op.
-6. **Falloff radius now `min(worldRadius, radiusPx/pxPerMetre)`.** The search is pixel-clamped
-   near the camera but the falloff was spanning the full world radius, so the outermost tap
-   kept ~full weight — a hard cutoff at the radius, research §7's "ring at a fixed distance
-   from every object". `min()` is correct at both the near (pixel-clamped) and far (2.5 px
-   floor) ends.
-7. **Both bilaterals now weight by plane distance** (critic P4, research §4.1). Was
-   `exp2(-|Δz| / 0.02·z)` in the denoise and `0.03·z` in the upsample. On a beach seen from
-   1.74 m at ~4° the ground is grazing everywhere, so a raw `|Δz|` tolerance either refuses to
-   blur the largest surface in frame or bleeds across every silhouette. Now
-   `w = max(1 − |dot(P_s − P_c, N_c)| / phi, 0)` with `phi = 0.06 + 0.012·z` m, plus a normal
-   similarity term — the form three's own `PoissonDenoiseShader` uses. Same change applied to
-   `ssr.js`'s upsample.
-8. **`aoAmbientFloor` 0.25 → 0.0, replaced by a real shadow term** (critic P5, research §2.7).
-   The floor existed because the pass had no way to tell "facing the sun" from "lit by the
-   sun", so it applied a quarter of the occlusion to *direct sunlight everywhere* — the single
-   most recognisable bad-AO look, and it spent the frame's shadow budget on sunlit sand where
-   the reference has none. The direct term is now gated by a real CSM lookup taken from
-   `lighting.csm` exactly as `volumetricFog.js` does. Verified wired, not silently defaulting:
-   `_ssprobe` reports `csm { present: true, lights: 4, mapsReady: 4, uNumCasc: 4 }`, and
-   `--config aoDebug=7` renders `sunVis` (p01 23, shadow_frac 0.038 — it varies; there is
-   simply little cast shadow at noon). With the floor at 0 the composite is now algebraically
-   exact rather than a cheat: `src·(1−fi) + src·fi·occ ≡ src·mix(1, occ, fi)`.
-9. **`FinalValuePower` 1.6**, applied after the temporal average (research §2.5 says 1.4-1.8
-   outdoor; XeGTAO's 2.2 default is an interior value), plus XeGTAO's `max(0.03, ao)`.
-10. New debug/A-B knobs: `aoLegacyDepth`, `aoUseShadow`, `aoDebug=7` (sunVis),
-    `aoGtaoDbg=4` (contact-radius AO alone), `aoPower`, `aoDepthPhi`, `aoNormalPhi`.
+The apply pass cannot separate direct from indirect radiance (forward lighting), so it
+*estimates* the indirect share per pixel and attenuates only that. Research §2.7 is
+unambiguous that this is the rule ("the ambient occlusion term is only applied to indirect
+lighting"), and the estimate is the whole ballgame: if a term of `I` is missing, AO is
+silently under-applied everywhere and the pass *looks* well-behaved because it is barely
+doing anything.
 
-## 4. What changed in `ssr.js`
+`I` counted the `HemisphereLight` and the bounce `DirectionalLight`. It did not count
+`scene.environment`, which `env.js` owns and which puts IBL diffuse into every
+`MeshStandardMaterial` in the frame. Measured at `ref_00000`, `t = 12.0`:
 
-1. **Opaque depth** (§1).
-2. **Frostbite's grazing cone shrink** (critic P2, research §5.5, slide 85):
-   `coneTan *= mix(saturate(NoV*2), 1, sqrt(rough))`. It was missing entirely.
-3. **`ssrWetRoughClamp` 0.42 → 0.12.** The G-buffer measurably disagrees with the shading:
-   `_ssprobe --pose ref_01500` reports matId 2 (TERRAIN_WET) covering **43.9%** of the frame
-   with roughness **0.65-0.875, mean 0.703**, while `terrain.js:1650` shades the same pixel at
-   `mix(rough, 0.16, wetp*0.85)`. Research §6.3 puts wet sand at `mix(rough_dry, 0.05-0.15,
-   wetness)`. At 0.42 the cone footprint saturated the `clamp(...,0,4)` mip clamp for any
-   roughness above ≈0.115, so the sea-stack silhouettes were being read out of mipRT[4] =
-   60×33 px. **This clamp is a workaround for a `terrain.js` bug** and should be reverted to
-   ~0.42 the day terrain writes its shaded roughness into the G-buffer.
-4. **McGuire/Mara interval thickness test** (critic P7b, research §5.2). Was
-   `thick = max(uThickness, stepExtent*1.6)` — unbounded, tens of metres in the far field of a
-   90 m/24-step ray, which accepts almost any depth sample. Now each step's ray-depth range
-   `[zA,zB]` must overlap the surface's `[sz, sz+thick]`, with `thick` **capped** at
-   `ssrThickMax = 2.5 m`.
-5. **Pre-integrated EnvBRDF instead of raw Schlick** (critic P7a, research §5.8b). `DFGApprox`,
-   the same analytic fit three ships in `bsdfs.glsl.js`, applied after the temporal filter and
-   after the sky/SSR mix, identically to both branches (Frostbite slide 87). Worked example on
-   a wet-sand pixel at `rough` 0.12: at NoV 0.5 raw Schlick gives k≈0.63 and EnvBRDF gives
-   **k=0.080**; at NoV 0.07 (4° grazing) they give 0.63 and **0.60**. That is the whole point —
-   the geometric attenuation term collapses the weight everywhere *except* true grazing, so the
-   swash sheet mirrors and the rest of the beach does not.
-6. **Plane-distance upsample** (as §3.7).
-7. **The water contract, documented honestly** (critic P6). Nothing in `src/` reads
-   `ssrTexture` — and it is not a drop-in fix for the sea, because the rays in it were traced
-   from the **opaque surface under the water**, not the water surface. The header now says so,
-   points at research §6.2 option (2) (trace inside the ocean surface shader) as the right fix,
-   and notes that the opaque depth that option needs now exists as `pipe.opaqueDepthTex` —
-   which is a large part of why it was never wired up. `ocean.js` is owned by another agent
-   this wave; this is a handover, not a fix.
+| term | value | source |
+|---|---:|---|
+| `sunLum` (sun, ×`lum(sunColor)`) | 6.0032 | `lighting.js:75` — matches the pass exactly |
+| `skyLum` (hemisphere fill) | 0.6494 | `lighting.js:77` — matches the pass exactly |
+| `bounceLum` | 0.2370 | `lighting.js:79` — matches the pass exactly |
+| **`env.groundIrradiance`** | **0.5495** | `env.js:650`, **was not in the estimate at all** |
+
+The IBL is **85% the size of the hemisphere fill** and 46% of the total ambient on an
+up-facing surface. On flat, unshadowed, sunlit sand (N = +Y, sun altitude 0.656):
+
+```
+direct                       3.9385
+fi  analytic lights only     0.1415      <- what shipped
+fi  with the env IBL         0.2334      <- correct, +65%
+```
+
+**The fix is not a constant.** `env.js` publishes `shArray` (a `Float32Array(27)`, "flat rgb
+triples, ready for uniform upload") and evaluates exactly three's `shGetIrradianceAt`
+expression at `env.js:524` to produce `groundIrradiance` — the number
+`tonemap.keyedExposure()` already adds to the photographic key, in `lighting.js`'s own units.
+The apply pass now uploads the luminance projection of those nine coefficients (×
+`env.intensity`) and evaluates the same expression against **this pixel's** world normal
+instead of against +Y. Nine MADs, clamped at 0 for SH ringing.
+
+`--config aoUseEnv=0` restores the old behaviour for a same-build A/B.
+
+**Why this was invisible for three waves:** it makes AO weaker, and weaker AO on a beach
+looks *correct* — no dirt, no halos, nothing to report. It is the quiet half of research
+§2.7's failure pair. The loud half (AO on direct sun) is what everyone looks for.
 
 ---
 
-## 5. Before / after, measured
+## 3. THE EXPERIMENT: how much AO is right, and the reference's answer is "almost none"
 
-**Method.** Both arms launched *simultaneously* (see §6) so they see the same tree, and "old"
-is `--config aoLegacyDepth=1,ssrLegacyDepth=1`, i.e. the shipped inert behaviour reproduced in
-today's build. That removes source churn from the comparison entirely.
+Wave H measured that the foreground beach is a plane to within millimetres and concluded the
+pass correctly returns ~1 there. Terrain has since gained relief — the same measurement, same
+tool, today:
 
-`ref_01500`, ROI vs `kf_01500`:
+| 0–4 m band, out-of-plane deviation | wave H | today |
+|---|---:|---:|
+| 8 px p90 / p99 | 1.2 mm / 15 mm | 1.6 mm / 29 mm |
+| 32 px p50 / p90 / p99 | 1.5 mm / 9.9 mm / 56 mm | 1.8 mm / 17 mm / **117 mm** |
 
-| region / metric | OLD (inert) | NEW | REF |
+Relief roughly doubled, and the AO buffer followed it: the 0–5 m band's mean went 0.9936 →
+0.979, `min` 0.66 → 0.43. So the pass *is* now finding foreground geometry.
+
+**And it should still barely darken the image, because the reference is brighter and cleaner
+than we are.** `sand` ROI at `ref_00000`:
+
+```
+                lum_mean   p01   shadow_frac   sat_mean   lap_var
+ours (AO off)     102.19     22       0.0209      54.82    610.9
+ours (AO on)      101.72     20       0.0229      54.94    611.2
+REFERENCE         119.22     31     0.0110       86.58   1089.0
+```
+
+The reference sand is **17 code values brighter** and has **half our shadow fraction**. Our
+sand deficit is luminance (−17), saturation (−32) and detail (−478 lap_var). **None of those
+is an AO deficit — two of the three are the wrong sign for AO.** Any tuning that puts more
+darkening on this ROI is fitting a constant to make an already-too-dark region darker.
+
+So the honest statement of what this pass contributes, which is what the brief asked for:
+
+| | when it rendered zero pixels (`aoEnabled=0`) | now |
+|---|---:|---:|
+| `sand` lum_mean | 102.19 | 101.72 (**−0.47**, 0.46%) |
+| `sand` p01 | 22 | 20 |
+| `sand` shadow_frac | 0.0209 | 0.0229 (**+0.20 pp**) |
+| `rock` (ref_01500) lum_mean | 105.69 | 105.21 (−0.48) |
+| `rock` (ref_01500) lap_var | 542.3 | 546.3 (+0.7%) |
+| `rock` (ref_01500) edge_density | 0.0873 | 0.0878 (+0.6%) |
+| `rock` (ref_01500) local_contrast | 0.1297 | 0.1314 (+1.3%) |
+| whole-frame score ref_00000 / ref_01500 | 32.53 / 28.77 | 32.64 / 28.67 |
+
+All four arms of that table were launched **simultaneously** and are `--config` arms of one
+build, so no source churn is inside them. The score movement (±0.1) is an order of magnitude
+inside KNOWN_ISSUES §26's ±0.5 noise floor: **this subsystem does not move the score, and on
+the evidence above it should not.**
+
+**Do not compare any of these numbers with Wave H's.** Between my first and second capture
+batch this session — about thirty minutes — the `rock` ROI at `ref_00000` moved `lap_var`
+221 → 392 and `sat_mean` 56.0 → 68.8 with the AO/SSR arms all switched off. That is
+`rocks.js` landing under the measurement (KNOWN_ISSUES §16). Only within-batch rows above are
+comparable.
+
+### AO is NOT on direct sun — checked, with the number rather than the picture
+
+Research §2.7 describes the failure as grey rims on sunlit silhouettes, a doubled shadow
+terminator and collapsing highlight contrast. The composite here weights AO by `fi` and
+`fi` is computed from the engine's actual light intensities (§2 table — all three analytic
+terms verified line-for-line against `lighting.js`), gated by a real CSM lookup
+(`_ssprobe` reports `csm { present true, lights 4, mapsReady 4, uNumCasc 4 }`). On sunlit
+sand `fi = 0.233`, so a crease there receives 23% of the occlusion and 77% of the pixel is
+untouched. `aoAmbientFloor` remains 0, which makes `src·(1−fi) + src·fi·occ ≡ src·mix(1,
+occ, fi)` algebraically exact rather than a cheat. `highlight_frac` in the `sand` ROI is
+0.0000 in every arm and 0.0070 in the `rock` ROI in every arm — AO moves neither.
+
+---
+
+## 4. The dual-radius collapse — a `min()` that was not Lagarde's rule
+
+`radiusPxL = clamp(uRadius·pxPerMetre, 2.5, 96)` and
+`radiusPxS = clamp(uRadiusS·pxPerMetre, 1.8, 96)` — **the same clamp**.
+
+At `ref_00000` the foreground beach sits at p10 0.33 m, p50 1.15 m (`_depthprobe distM`).
+`pxPerMetre = 0.5·H_half/(tanY·z)` is 380–1550 there, so the ambient radius (1.2 m) wants
+460–1900 px and the contact radius (0.25 m) wants 95–390 px. **Both saturate 96 px.** The two
+searches then cover the identical 96-px disc and `min(aoL, aoS)` is `min()` of two
+independent noisy estimates of the *same* integral — which is not an estimator of that
+integral, it is biased low by ~0.5σ. Worse, the contact pass spends `STEPS_S = 3` taps on
+that disc against the ambient pass's 4, so it was also the *coarser* of the two: its taps
+land at ~2.7 / 24 / 66 px against the ambient pass's 1.6 / 13.5 / 37.5 / 73.5.
+
+Arithmetic: the contact clamp only stops biting past `z = 5.4 m` at 24 px and `z = 1.35 m` at
+96 px; the ambient clamp stops biting past `z = 6.5 m`. So the defect is confined to the near
+field — which is where the beach is.
+
+**Three-arm A/B inside one build** (`_ssprobe --pose ref_00000`, AO buffer read off the GPU,
+so nothing downstream of it can contaminate the number):
+
+| arm | AO mean | p01 | frac<0.90 | frac<0.70 | **0–5 m mean** | 0–5 m min | 15–40 m | 40 m+ |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| shipped (`aoMaxRadiusPxSmall=96`) | 0.9718 | 0.6909 | 0.0595 | 0.01064 | **0.9772** | 0.4158 | 0.985 | 0.964 |
+| fixed (`=24`, new default) | 0.9728 | 0.7202 | 0.0563 | 0.00812 | **0.9790** | 0.4316 | 0.985 | 0.964 |
+| no contact pass (`aoDualRadius=0`) | 0.9741 | 0.7329 | 0.0540 | 0.00727 | **0.9813** | 0.5186 | 0.9856 | 0.9641 |
+
+Read the 0–5 m column: the contact pass's near-field darkening was 0.0041 and is now 0.0023.
+**44% of it was estimator bias, not geometry.** The 15–40 m and 40 m+ bands are unchanged to
+four decimals in all three arms — exactly the prediction, since neither clamp binds there.
+That invariance is what makes this a clamp defect and not a retune.
+
+`min()` is still Lagarde's rule where the two scales are genuinely different, which is now
+everywhere. `aoDualRadius=0` and `aoMaxRadiusPxSmall` stay as A/B knobs.
+
+**What is NOT fixed, and is not a bug:** in the near field the ambient pass still reaches only
+`96 px / pxPerMetre` ≈ 0.21 m at 1.15 m and 0.06 m at 0.33 m, not its nominal 1.2 m. That is
+the GTAO paper's own pixel clamp doing its job ("clamped to a maximum radius in pixels to
+avoid too large gathering radiuses on objects very close to the near plane"). Raising it does
+not buy reach for free: the 4 taps are already 36 px apart at the outer end, and widening the
+disc widens the gaps occluders fall through. `aoMaxRadiusPx` is now a config knob if anyone
+wants to sweep it.
+
+---
+
+## 5. Constants re-derived against real geometry — what moved and what did not
+
+Every constant in these two files was fitted while the depth buffer contained a gun, or (Wave
+H) against a private snapshot. This is the audit.
+
+| constant | value | verdict |
+|---|---|---|
+| `aoRadius` 1.2 m | kept | Research §2.5 says 1.0–1.5 m for the main pass. Pixel-clamped in the near field regardless (§4). |
+| `aoRadiusSmall` 0.25 m | kept | §2.5's "second 0.2–0.3 m pass, combined with `min()`". Now actually distinct — **its clamp was the bug, not its value.** |
+| `maxRadiusPx` 96 | kept, now a knob | §2.5: 64–96 at half res. |
+| **`maxRadiusPxSmall`** | **NEW, 24** | §4. Was implicitly 96 and that deleted the pass. |
+| `aoAngleBias` 0.045 | kept | sin(2.6°). A 17 mm occluder (today's 0–4 m 32 px p90) at 0.1 m lateral subtends 9.6°, sin 0.167 — comfortably above the bias, so the foreground relief that now exists is *not* being erased by it. At the old 0.12 it would have been marginal. |
+| `aoThickness` 0.30 | kept | XeGTAO's 0.15–0.30 for vegetation, both parts implemented. |
+| `aoPower` 1.6 | kept | §2.5's 1.4–1.8 outdoor. XeGTAO's 2.2 is an interior value. |
+| `aoAmbientFloor` 0.0 | kept | Earns its 0 from the CSM lookup (§3). |
+| `aoDepthPhi` 0.06 + 0.012·z | kept | Plane-distance, not \|Δz\|. At 1.15 m → 0.074 m, at 60 m → 0.78 m. Both are above the surface's own curvature residual and below every silhouette in frame. |
+| `uSunLum` / `uSkyLum` / `uBounceLum` | kept, **verified** | Reproduce `lighting.js:75/77/79` term for term, including `sunScale`/`skyFill`/`bounceFill`. Checked this wave; they are not eyeballed. |
+| **env IBL in `indirect`** | **NEW** | §2. The one term that was missing. |
+| `ssrWetRoughClamp` 0.12 | kept, still a workaround | `ref_01500` G-buffer **still** reports matId 2 at roughness 0.65–0.875, mean **0.703**, over **42.7%** of the frame, while `terrain.js:1650` shades the same pixel at `mix(rough, 0.16, wetp·0.85)`. Unchanged since Wave H. Revert to ~0.42 the day terrain writes its shaded roughness. |
+| `ssrThickness` 0.55 / `ssrThickMax` 2.5 | kept | §6. |
+| `ssrMaxDist` 90 m | kept | §6. |
+| `ssrEdgeFade` 0.12 | kept | Research §5.7: the screen edge is the tell; 12% per axis, 2-D. |
+
+---
+
+## 6. SSR against real geometry
+
+`_ssprobe`, AO/SSR buffers read off the GPU:
+
+```
+ref_00000   hitFrac 0.0480   strongFrac 0.0319   confMeanOverHits 0.669
+ref_01500   hitFrac 0.0764   strongFrac 0.0525   confMeanOverHits 0.687
+```
+
+At `ref_01500`, wet sand (matId 2) covers **42.7%** of the frame but SSR returns a hit on
+7.6% of it. That is not a bug and it is worth stating plainly, because it looks like one: a
+ray leaving a beach at 2–10° above the horizontal travels up the screen and exits through the
+top long before it finds anything (research §5.7). The remaining 35% falls to the sky
+fallback, which is a real `sky.cubeTexture` sample in the correct reflected direction — which
+is why there is no screen-edge seam. The EnvBRDF weight is applied identically to both
+branches (Frostbite slide 87), so there is no brightness step at the fade either.
+
+The pass contributes `rock` lap_var +0.6% and `sat_mean` +0.11 at `ref_01500` (`n_off` →
+`n_aoonly` arms), against a 2.4× lap_var deficit. §7 item 2 says why.
+
+### The thickness heuristic sits exactly on its knee — swept, at `ref_01500`
+
+McGuire & Mara's interval test accepts a step when the ray-depth range `[zA, zB]` overlaps
+`[sz, sz + thick]`, with `thick = min(uThickness + (zB−zA)·0.25, uThickMax)`. Both constants
+were unvalidated at runtime. Sweeping them (same build, `--config`):
+
+| arm | hitFrac | strongFrac | confMeanOverHits |
 |---|---:|---:|---:|
-| rock lap_var | 81.56 | **98.27** (+20.5%) | 1295.5 |
-| rock edge_density | 0.0337 | **0.0364** (+8.0%) | 0.1621 |
-| rock sat_mean | 53.53 | **53.94** | 80.89 |
-| water lap_var | 305.50 | **319.98** (+4.7%) | 900.8 |
-| water sat_mean | 38.35 | **39.77** (+1.42) | 51.58 |
-| water local_contrast | 0.0817 | **0.0822** | 0.0983 |
-| shoreline sat_mean | 40.46 | **42.23** (+1.77) | 46.42 |
-| shoreline lum_mean | 105.59 | 106.01 | 70.35 |
-| sand lap_var | 295.03 | **283.05** (−4%, toward ref) | 194.97 |
+| `ssrThickness=0.15` | 0.0759 | 0.0513 | 0.676 |
+| **shipped: 0.55, `thickMax` 2.5** | **0.0764** | **0.0525** | **0.687** |
+| `ssrThickness=2.0, ssrThickMax=10` | 0.0842 | 0.0586 | 0.694 |
 
-`ref_00000` moves less (that pose is mostly flat beach — see §2): rock lum_mean 121.19 → 120.60,
-sand lap_var 462.03 → 462.52, shoreline essentially unchanged.
+Tightening by 3.7× moves `hitFrac` by **0.7%**; loosening by 4× moves it by **+10%**. That
+asymmetry is the signature of a threshold at the knee: below 0.55 there are no more real
+crossings to find, above it the extra acceptances are the false ones the interval test exists
+to reject — research §7's "duplicated silhouette offset downward". Keeping 0.55 / 2.5.
 
-Every axis that moved, moved toward the reference. The magnitudes are small, and §2 and §7 say
-why: the two things the reference has that we do not — geometric relief on the beach and on
-the sea stacks — are upstream of this subsystem. Reporting them as SSAO/SSR wins would be
-dishonest.
-
-**Cost.** `stats.ms` at `ref_01500`: 9.15 / 9.60 with both passes on, 9.18 with
-`aoEnabled=0,ssrEnabled=0`. The subsystem is **≈0.3 ms**, inside the run-to-run spread of the
-measurement itself (13 half-res draws total). Frame budget is 11 ms.
+`ssrMaxDist = 90 m` likewise: at 250 m `hitFrac` rises 28% (0.0764 → 0.0979) but
+`confMeanOverHits` **falls** 0.687 → 0.607. With `SSR_STEPS = 24` fixed, a 250 m ray steps
+10 m at a time, so `(zB−zA)·0.25` alone is 2.5 m and the interval test is pinned at
+`thickMax` for the whole march. The extra hits are low-confidence far-field acceptances that
+the length fade then throws most of away. Keeping 90 m.
 
 ---
 
-## 6. Determinism (critic P8) — the critic's diagnosis was wrong
+## 7. Cost
 
-The critic reported that two runs of the byte-identical capture command differ by mean 11.31 /
-max 209 / 1.53M px, and concluded the renderer is nondeterministic at `--settle 48`.
-
-**Experiment.** Run the two captures *simultaneously* instead of sequentially, so they cannot
-straddle a source edit. Both arms, twice:
+Priced the way `reports/depth.md` §6 prices things: **one page**, arms alternated in blocks of
+90 individually-timed frames with 20 discarded per block, two blocks per arm
+(`scratchpad/_sscost.mjs`). `ref_00000`, p50 ms:
 
 ```
-passes ON,  two simultaneous captures:  max 0  mean 0.00000  frac>=1 0.00000
-passes OFF, two simultaneous captures:  max 0  mean 0.00000  frac>=1 0.00000
+block 1   on 13.4    off 15.3
+block 2   off 14.7   on 11.5
 ```
 
-**Byte-identical.** Run the same pair *sequentially* while the tree is live and you get
-mean 5.66, and the delta concentrates in the region owned by whichever module was being saved
-(`sand` mean 14.19 while `sky` was 0.13 and `rock` 0.23).
+The **within-arm drift is 1.9 ms** (on: 13.4 vs 11.5) and the arm difference has the wrong
+sign in both blocks. **The subsystem's cost is not resolvable by this instrument**, which is
+the same conclusion Wave H reached (≈0.3 ms, inside the spread) and the same one `depth.md`
+reached for a change that was provably two GL calls. KNOWN_ISSUES §22's caveat applies:
+`performance.now()` around `step()` is CPU submit cost.
 
-So `--settle 48` converges and the capture path is deterministic. What the critic measured was
-KNOWN_ISSUES §16 — a non-quiescent `src/`. **Practical rule for anyone A/B-ing during a wave:
-launch both arms at the same instant.** A `--config` A/B (like `aoLegacyDepth=1`) is even
-better, because both arms are one build.
-
-`node tools/_imdiff.py a.png b.png` reproduces all of the above.
+What *is* countable: 14 full-screen draws (ssao 4 half-res + 1 full-res; ssr 5 mip + 2
+half-res + 1 full-res... plus the march), and this wave **removed** one full-res R32F draw,
+one 8.3 MB R32F target and one scene object with the snapshot. The two additions are a
+uniform branch (no divergence) and nine MADs in the apply shader.
 
 ---
 
-## 7. Weakest things left, in order
+## 8. Weakest things left, in order
 
-1. **The beach has no geometric relief** (§2). Until `terrain.js` displaces the cobbles, AO on
-   the foreground is correctly ~0.994 and there is nothing more to win there.
-2. **The sea stacks are an order of magnitude short of the reference on structure**: rock ROI
-   at `ref_01500` lap_var 98 vs 1296, edge_density 0.036 vs 0.162, local_contrast 0.101 vs
-   0.214, sat_mean 53.9 vs 80.9. That is `rocks.js` geometry and material, not screen space.
-3. **The sea still has no reflection path** (§4.7). Needs `ocean.js`; the enabling piece
-   (`pipe.opaqueDepthTex`) now exists.
-4. **`ssrWetRoughClamp = 0.12` is a workaround for a `terrain.js` G-buffer/shading mismatch**
-   (§4.3), measured at 0.703 written vs ~0.16 shaded. Revert it when terrain is fixed.
-5. **Everything else downstream is still reading the broken `pipe.depthTex`** — `dof`,
-   `motionBlur`, `taa`, `volumetricFog`, water refraction. `pipe.opaqueDepthTex` is published
-   and free to adopt (one line each), but the real fix is still the one KNOWN_ISSUES §18 asks
-   for, in `scene.js`.
-6. **No VNDF importance sampling / no ratio-estimator resolve in SSR** (research §5.3-5.4).
-   Single mirror-direction ray with roughness expressed purely as blur. That costs
-   contact-hardening. Next largest available SSR win after the ones above.
+1. **The `sand` and `rock` ROIs are short on luminance, saturation and detail, and this
+   subsystem cannot supply any of the three.** `sand` is 17 code values darker and 32
+   saturation points short of the reference; `rock` at `ref_01500` is 2.4× short on `lap_var`
+   and 1.8× on `edge_density`. Those are `terrain.js` and `rocks.js` items. AO's entire
+   authority over the image is ±0.5 code values, and the reference says even that is on the
+   wrong side.
+2. **The sea still has no reflection path.** Nothing in `src/` samples `ssrTexture`, and it
+   is not a drop-in: the rays in it were traced from the opaque surface *under* the water.
+   The right fix is research §6.2 option (2) — trace inside the ocean surface shader against
+   `pipe.depthTex`, which now actually contains the world. Owner: `ocean.js`.
+3. **`ssrWetRoughClamp = 0.12` is still a workaround for a `terrain.js` G-buffer/shading
+   mismatch** — 0.703 written vs ~0.16 shaded, measured again this wave, unchanged. It is
+   load-bearing: at 0.42 the cone footprint saturates the mip clamp and the sea-stack
+   silhouettes get read out of a 60-px image.
+4. **The apply pass's `indirect` still omits the hemisphere light's *ground* colour**
+   (`0x2a2a26`, lum ≈ 0.026 × intensity). Correct for up-facing normals, ~4% low for
+   down-facing ones. Not worth a uniform.
+5. **No VNDF importance sampling / no ratio-estimator resolve in SSR** (research §5.3–5.4).
+   One mirror ray, roughness expressed purely as blur. Costs contact-hardening.
+6. **The near-field ambient radius is pixel-limited to ~0.2 m** (§4). Sanctioned by the GTAO
+   paper, but it does mean the nominal 1.2 m is only achieved past ~6.5 m.
+7. **Measurement hygiene:** `rocks.js` moved the `rock` ROI's `lap_var` by 77% between two
+   capture batches thirty minutes apart in this session. Every cross-batch comparison in this
+   project is worth less than it looks. Same-build `--config` arms launched simultaneously are
+   the only kind that survived.
+8. **Not mine, but live right now:** the last capture of this session printed
+   `ReferenceError: aerialOrig is not defined` from `src/render/passes/volumetricFog.js:795`.
+   `parsecheck` is green (it is a runtime reference, not a parse error), so the module loads
+   and then throws per frame. Whoever owns that file should know; anyone measuring in this
+   window should check their capture output for it.
 
 ---
 
-## 8. Tools added
+## 9. Tools
 
-`tools/_ssprobe.mjs` — reads `ssao.aoTexture`, `ssr.ssrTexture`, the opaque depth snapshot and
-the G-buffer straight off the GPU, so nothing it reports depends on tonemap/grade/fog (all
-being edited by other agents). Reports: opaque-depth coverage, the depth-buffer relief table of
-§2, AO distribution bucketed by view distance, SSR hit/confidence fractions, per-matId G-buffer
-coverage and roughness, and CSM cascade wiring.
+* `tools/_ssprobe.mjs` — now reads `pipe.depthTex` through an RGBA32F resolve (a
+  `DepthTexture` cannot be a colour attachment), applies `--config` correctly and echoes
+  `appliedConfig`, and reports a `lighting` block: every term of the direct/indirect split
+  against `lighting.js` and `env.js`, plus `fi` with and without the IBL.
+* `scratchpad/_sscost.mjs` — interleaved same-page cost A/B (§7).
 
-```
-node tools/_ssprobe.mjs --pose ref_00000 --settle 48
-node tools/_ssprobe.mjs --pose ref_01500 --config aoRadius=0.6
-```
+## 10. Sources
 
-## 9. Sources relied on
-
-* Jimenez, Wu, Pesce, Jarabo, *Practical Realtime Strategies for Accurate Indirect Occlusion*
-  (GTAO), ATVI-TR-16-01 — arc integral eq. 7, bent normal, multibounce eq. 10.
-  <https://iryoku.com/downloads/Practical-Realtime-Strategies-for-Accurate-Indirect-Occlusion.pdf>
-* Intel XeGTAO, `XeGTAO.hlsli` — slice frame ~396-410, arc integral ~536-545, thin-occluder
-  481-503, edge weights 120-129, `FinalValuePower`/`max(0.03,·)` 556-558.
-  <https://github.com/GameTechDev/XeGTAO>
+* Jimenez et al., *Practical Realtime Strategies for Accurate Indirect Occlusion* (GTAO),
+  ATVI-TR-16-01 — arc integral eq. 7, bent normal, multibounce eq. 10, the pixel radius clamp.
+* Intel XeGTAO, `XeGTAO.hlsli` — thin-occluder 481–503, edge weights 120–129,
+  `FinalValuePower`/`max(0.03,·)` 556–558.
 * Filament, *Ambient occlusion* — "the ambient occlusion term is only applied to indirect
   lighting"; `gtaoMultiBounce`; Lagarde `computeSpecularAO`; Lagarde's `min(AO_medium,
-  AO_large)`. <https://google.github.io/filament/Filament.md.html>
-* three.js `PoissonDenoiseShader` — `depthDiff = abs(dot(viewPos − viewPosSample, viewNormal))`;
-  `DFGApprox` in `bsdfs.glsl.js`.
-* McGuire & Mara, *Efficient GPU Screen-Space Ray Tracing*, JCGT 2014 — perspective-correct DDA
-  and the `[zA,zB]` interval test. <https://jcgt.org/published/0003/04/04/>
-* Frostbite, *Stochastic Screen-Space Reflections* (SIGGRAPH 2015) — slide 84/85 grazing cone
-  shrink, slide 87 EnvBRDF after temporal.
-* `research/screenspace.md` §0, §2.4-2.7, §4.1, §5.2, §5.5, §5.8, §6.2-6.3, §7.
+  AO_large)`.
+* three.js `SphericalHarmonics3.getIrradianceAt` / `shGetIrradianceAt`, `DFGApprox` in
+  `bsdfs.glsl.js`, `PoissonDenoiseShader`.
+* McGuire & Mara, *Efficient GPU Screen-Space Ray Tracing*, JCGT 2014 — the `[zA,zB]` interval.
+* Frostbite, *Stochastic Screen-Space Reflections* (SIGGRAPH 2015) — slides 84/85, 87.
+* `research/screenspace.md` §0, §2.4–2.7, §4.1, §5.2, §5.5, §5.7–5.8, §6.2–6.3, §7.
+* `reports/depth.md` §1, §3, §4, §6, §7.

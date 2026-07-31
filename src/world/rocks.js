@@ -332,7 +332,7 @@ function makeStackField(spec, rnd) {
       const c = Math.cos(th - pl.phi);
       // Wide angular acceptance is free: p/cos blows up away from the plane's facing
       // direction, so the min simply does nothing there. Narrowing it to c > 0.26 only
-      // narrowed the PLANARITY mask, which is what left `rough` near 1 over most of
+      // narrowed the PLANARITY mask, which is what left 'rough' near 1 over most of
       // the perimeter and let the noise sand the faces back off.
       if (c <= 0.15) continue;
       const g = smoothstep(pl.y0 - pl.w, pl.y0 + pl.w, y) * (1 - smoothstep(pl.y1 - pl.w, pl.y1 + pl.w, y));
@@ -1095,8 +1095,9 @@ const ROCK_PARS = NOISE_GLSL + TRIPLANAR_GLSL + /* glsl */`
 uniform sampler2D uNH_A;
 uniform sampler2D uNH_B;
 uniform vec3  uColBase, uColBright, uColGrime, uColStain, uColDamp, uColAlgae, uColMoss, uColLichen, uColBleach;
+uniform vec3  uColBarnacle, uColLitzone, uColBounce;
 uniform float uRough, uAlgaeAmt, uMossAmt, uWetY, uDetailAmt, uAOAmt, uMacroAmt;
-uniform float uSpecF0, uSpecF90, uWetAmt, uSpecOccAmt, uHexAmt, uDbg;
+uniform float uSpecF0, uSpecF90, uWetAmt, uSpecOccAmt, uHexAmt, uFoamAmt, uBounceAmt, uSeaContact, uLegacy, uDbg;
 varying vec3 vWNrmRK;
 varying vec4 vRockRK;
 
@@ -1110,6 +1111,12 @@ float gRKSpecOcc = 1.0;
 /* Ambient occlusion, likewise applied to reflectedLight.indirectDiffuse and not to
  * the albedo, so it cannot darken direct sunlight. */
 float gRKAO = 1.0;
+/* Bounce radiance off the sea surface, ADDED to indirectDiffuse at
+ * <lights_fragment_end>. See the tide-zone block for why an occlusion-only ambient
+ * model renders the base of a sea stack black: AO can only ever remove light, and the
+ * waterline is the one band on the rock that has a large, bright, near-horizontal
+ * secondary source filling its lower hemisphere. */
+vec3 gRKBounce = vec3(0.0);
 
 /* ------------------------------------------------------------------ hex-tiling
  * Mikkelsen, "Practical Real-Time Hex-Tiling", JCGT 11(2) 2022,
@@ -1343,6 +1350,26 @@ alb *= 1.0 - 0.13 * bed - 0.08 * bed2;
 // weed-colonised band of roughly 0.10 linear against 0.36 dry — and the boundary is
 // what stops the stack reading as one pale monolith. The old mask topped out around
 // 0.19 of a mix, which is invisible; this one is a real band.
+//
+// MEASURED DEFECT THIS BLOCK EXISTS TO FIX (see reports/rocks.md, wave H). At
+// ref_01500 with both veils nulled, a ~28 px band at the foot of every sea stack
+// rendered rgb 0.4 / 0.6 / 0.4 — EXACT BLACK — against a reference stack base that
+// never drops below 44. A black skirt under a pale shaft does not read as wet rock,
+// it reads as the shadow gap under a floating object, which is why KNOWN_ISSUES 17.4
+// logged this as "the sea stacks float". They do not float: --skip ocean shows the
+// geometry running all the way down to the sand. The gap was black shading.
+//
+// Two independent multiplied causes, separated with --config probes:
+//   albedo   at the waterline measured 0.020 linear (rockDbg=2 ratio probe)
+//   ambient  occlusion measured 0.134x there (rockAO=0 A/B, 3.8 -> 25.6)
+// 0.020 * 0.134 is zero. research/terrain.md 5.3 puts SEA-SPLASHED ROCK at 0.09
+// linear against dry cliff rock at 0.20 — a factor of 0.45, not of 0.05.
+//
+// The zonation below is Stephenson & Stephenson's universal intertidal scheme: a
+// stack of horizontal bands, not one blob. Top down: black lichen (Verrucaria) in
+// the supralittoral, a pale barnacle belt, then fucoid algae, then permanently wet
+// rock. Their boundaries are near-horizontal but ragged at ~1 m, which is what makes
+// a waterline read as a waterline rather than as a texture.
 float yn = 0.62 * fbm3(P * vec3(0.16, 0.55, 0.16), 3) + 0.30 * fbm3(P * vec3(0.9, 2.2, 0.9), 2);
 float yw = P.y - uWetY + yn * 1.5;
 float wet = smoothstep(1.15, -0.35, yw) * uWetAmt;
@@ -1374,6 +1401,46 @@ algae *= 0.35 + 0.65 * smoothstep(-0.35, 0.35, fbm3(P * 0.42 + 31.0, 3));
 algae *= uAlgaeAmt;
 alb = mix(alb, uColAlgae, clamp(algae * 0.95, 0.0, 0.94));
 
+// ---- barnacle belt -----------------------------------------------------------
+// Between the algae and the dry rock sits the balanoid zone: a pale grey-white crust
+// of acorn barnacles at ~1 cm pitch. It is the one BRIGHT band in the intertidal and
+// it is what breaks a dark skirt into readable strata. Its lower edge is sharp (set
+// by the algae outcompeting it) and its upper edge diffuse (set by desiccation).
+float barnBand = smoothstep(-0.30, 0.55, yw) * (1.0 - smoothstep(1.9, 4.2, yw));
+// crust settles on exposed faces, not inside gullies, and not on up-facing plates
+// where it would be scoured; 1 cm pitch is far below a pixel at 90 m, so the visible
+// signal has to come from the ~40 cm patchiness of the settlement, not the animals.
+barnBand *= (0.30 + 0.70 * cvx) * (0.55 + 0.45 * (1.0 - smoothstep(0.25, 0.80, Ng.y)));
+float barnPatch = smoothstep(-0.18, 0.34, fbm3(P * vec3(1.9, 0.85, 1.9) + 137.0, 3));
+float barn = barnBand * barnPatch * (0.45 + 0.55 * h) * uAlgaeAmt;
+alb = mix(alb, uColBarnacle, clamp(barn * 0.58, 0.0, 0.62) * (1.0 - uLegacy));
+
+// ---- littoral fringe: black lichen ------------------------------------------
+// Verrucaria maura forms a genuinely black band right at the top of the splash zone.
+// It is thin, and it matters because it puts a DARK line ABOVE the bright barnacle
+// belt: dark-over-light-over-dark is what makes the zonation legible at 90 m, where
+// a single monotonic ramp just reads as dirt.
+float fringe = exp(-pow((yw - 4.3) / 1.5, 2.0)) * smoothstep(-0.15, 0.35, fbm3(P * vec3(0.8, 0.30, 0.8) + 211.0, 3));
+alb = mix(alb, uColLitzone, clamp(fringe * 0.42 * uAlgaeAmt, 0.0, 0.45) * (1.0 - uLegacy));
+
+// ---- foam / swash scum line --------------------------------------------------
+// Not the ocean's foam — this is the residue ON THE ROCK that the swash leaves: a
+// bright, ragged salt-and-foam line at the top of the run-up, plus a soft splash
+// veil above it on the seaward face. research/ocean.md 4.4: foam albedo is 0.6-0.8
+// linear and it is LIT, never a pure-white decal, so this is a mix toward a bright
+// warm-neutral and not an additive.
+// Vertical variation comes from a SECOND, much higher-frequency warp than 'yn', so
+// the line wanders at ~25 cm as well as at ~1.5 m; a single warp gives a smooth
+// sinuous curve, which reads as an airbrushed band.
+float fw = 0.42 * fbm3(P * vec3(1.35, 0.42, 1.35) + 83.0, 3);
+float ys = yw + fw;
+float scum = exp(-pow((ys - 0.55) / 0.42, 2.0));
+scum *= 0.35 + 0.65 * (1.0 - occ);                       // lodges in the hollows
+scum *= 0.40 + 0.60 * smoothstep(-0.10, 0.55, Ng.y);     // and on the up-facing ledges
+float splash = exp(-pow((ys - 1.7) / 1.5, 2.0)) * 0.42 * smoothstep(-0.25, 0.40, fbm3(P * 0.9 + 167.0, 3));
+float foam = clamp((scum * 0.85 + splash) * uFoamAmt, 0.0, 0.80) * (1.0 - uLegacy);
+alb = mix(alb, uColBleach, foam * 0.55);
+
 // salt-bleached supratidal band just above the algae. Bleached limestone is *pale
 // warm*, not grey: a neutral bleach colour here was quietly desaturating the brightest
 // and most visible band on every stack.
@@ -1394,9 +1461,38 @@ alb = mix(alb, uColLichen, clamp(lich * uMossAmt * 0.42, 0.0, 0.55));
 
 // under an overhang: dry, dusty, no growth, and genuinely darker
 alb = mix(alb, alb * vec3(0.66, 0.645, 0.635), shl * 0.72);
-// wet rock loses diffuse — but uColDamp has already taken the tone down, so this is
-// only the last bit of specular-dominated darkening, not a second full halving.
-alb *= mix(1.0, 0.66, wet);
+
+// ---- wet darkening: Lagarde's DoWetProcess, with a FLOOR --------------------
+// Lagarde 2013 part 3b, "Water drop 3b - physically based wet surfaces":
+//     factor = lerp(1, 0.2, Porosity);  Diffuse *= lerp(1.0, factor, WetLevel);
+// research/terrain.md 5.3 gives the endpoint pair for this exact surface — dry cliff
+// rock 0.20 linear, sea-splashed rock 0.09 — a ratio of 0.45, which is Lagarde's
+// factor at Porosity = 0.69. A microporous carbonate is at the high-porosity end, so
+// that is consistent rather than fitted.
+//
+// The previous chain was 'alb *= mix(1.0, 0.66, wet)' stacked ON TOP of a damp mix to
+// a 0.062 colour and an algae mix to 0.048, and the product measured 0.020 linear —
+// a fifth of what the brief says a sea-splashed rock reflects, and darker than fresh
+// asphalt. Multiplying three independent "wet is darker" terms is triple-counting one
+// physical effect. There is now ONE wet factor, and the damp/algae mixes are hue and
+// texture events whose value floor is enforced here.
+const float ROCK_POROSITY = 0.69;
+float wetFactor = mix(1.0, mix(1.0, 0.2, ROCK_POROSITY), wet);   // -> 0.45 at full wet
+// --config rockLegacyTide=1 restores the pre-fix wet/AO behaviour exactly, so the
+// before/after can be captured back to back on ONE tree. Half a dozen other modules
+// are being edited concurrently (KNOWN_ISSUES 16) and a baseline captured an hour
+// earlier is not a baseline.
+alb *= mix(wetFactor, mix(1.0, 0.66, wet), uLegacy);
+// Floor. Wet, weed-covered limestone is 0.06-0.10 linear; nothing on this rock is
+// allowed below 0.045, because a surface that dark has no recoverable detail left
+// once AO and a backlit N.L are applied to it, and that is exactly how the base
+// went to code value 0.
+// Gated to the tide zone. A floor is a claim about what WET, weed-covered limestone
+// reflects; it is not a claim about a dry crevice in shadow, which is entitled to be
+// as dark as it likes. Applied globally it clamped every dark pixel on every rock and
+// cost whole-frame lap_ratio on its own.
+float floorGate = clamp(max(damp, wet) * 1.15, 0.0, 1.0) * (1.0 - uLegacy);
+alb = max(alb, vec3(0.075, 0.071, 0.062) * (1.0 - 0.35 * shl) * floorGate);
 
 // ---- ambient occlusion --------------------------------------------------------
 // AO is an INDIRECT term and it is applied to reflectedLight.indirectDiffuse at
@@ -1406,10 +1502,62 @@ alb *= mix(1.0, 0.66, wet);
 // rgb 72/76/88 — B largest, R-B = -15, lab_b -7.5 — i.e. the surface is dominated by
 // a blue sky probe, and the term that should have been suppressing that was instead
 // being spent equally on the one warm, directional source in the scene.
-float ao = mix(1.0, 0.30 + 0.70 * occ, uAOAmt);
-ao *= mix(1.0, 0.40, shl * 0.9);
+//
+// Three multiplied terms with no floor bottom out at 0.30*0.40*0.622 = 0.075, and at
+// the foot of a sea stack they measured 0.134 (rockAO=0 A/B: grey-albedo rgb 3.8 ->
+// 25.6). That is a 7x suppression of the ONLY light reaching a backlit face — at
+// ref_01500 the sun is azimuth 118 / elevation 41 and the camera looks -Z, so the
+// hemisphere the stacks show the camera is in shadow and the sky probe is all it has.
+//
+// It is also the wrong sign there. A point on a stack's foot stands in open water:
+// its upper hemisphere is unobstructed sky except for the rock behind it, and its
+// LOWER hemisphere is filled by a bright, near-horizontal sea surface. The wave-cut
+// notch a metre or two above drives 'shl' high and the flare drives 'occ' low, so the
+// least-occluded band on the whole rock was being shaded as the most-occluded one.
+//
+// Fixed two ways: the product gets a floor, and the sky term is relaxed where there
+// is open water below rather than more rock.
+// uSeaContact is 0 on the cliff and 1 on anything that actually stands in water.
+// Without it this relaxation fires on the cliff foot too — it is keyed on world
+// HEIGHT, and the cliff base is also a few metres above sea level — which flattens
+// the cavity shading over a large part of the frame for no physical reason.
+// Measured cost of getting this wrong: whole-frame lap_ratio 0.856 -> 0.561 at
+// ref_01500, i.e. a third of the frame's high-frequency energy, in exchange for
+// fixing a band 0.45% of the frame wide.
+float openSea = smoothstep(5.5, 0.4, yw) * (1.0 - smoothstep(0.30, 0.78, Ng.y)) * uSeaContact;
+// Both baked masks are relaxed over open water, not just 'shl'. occ and shl are
+// computed from the stack's own radius grid (gridMasks) and therefore describe only
+// self-occlusion by the rock; they have no way to know that at the foot the mass
+// simply ENDS and everything outside it is open sea and open sky. Over water the
+// horizon is unobstructed across most of the azimuth, so the cavity term is remapped
+// to a much shallower range rather than being trusted at face value.
+float occOpen = mix(0.30 + 0.70 * occ, 0.62 + 0.38 * occ, openSea * (1.0 - uLegacy));
+float ao = mix(1.0, occOpen, uAOAmt);
+ao *= mix(1.0, 0.40, shl * 0.9 * (1.0 - 0.55 * openSea * (1.0 - uLegacy)));
 ao *= mix(1.0, 0.58 + 0.42 * smoothstep(0.02, 0.52, hC), 0.9);
-gRKAO = ao;
+// AO is a visibility fraction. A cosine-weighted hemisphere still sees ~20% of the
+// sky from inside a 1 m crevice on an otherwise convex 15 m mass; 0.075 is a value
+// only a fully enclosed cavity earns, and this mesh has none.
+// A global floor of 0.20 fixed the stack base and cost a third of the frame's
+// lap_var, because it also raised every crevice on every rock. The floor that the
+// waterline actually needed is the open-water one; 0.10 is just a guard against the
+// pathological 0.075 the three-term product can reach.
+gRKAO = max(ao, mix(mix(0.10, 0.42, openSea), 0.0, uLegacy));
+
+// ---- sea-surface bounce ------------------------------------------------------
+// The missing source. An occlusion-only ambient model can never brighten anything,
+// so the band with the largest secondary source in the scene rendered darkest. At
+// ref_01500 the sea reads ~155 sRGB (0.33 linear) and fills the lower hemisphere of
+// every point near the waterline; for a vertical wall that is roughly half the
+// cosine-weighted solid angle. Coloured by the water, not by the sky, so it reads as
+// upwelling green-cyan and not as more of the same blue probe that already dominates
+// this rock (reports/rocks.md 2: a neutral albedo here renders R-B = -15).
+// Falls off with height as the sea drops below the horizon of the surface point, and
+// dies below the waterline where the rock is inside the water rather than above it.
+float bounce = smoothstep(6.5, -0.2, yw) * smoothstep(-2.2, 0.5, yw) * uSeaContact;
+bounce *= (0.35 + 0.65 * (1.0 - max(Ng.y, 0.0)));    // walls catch it, up-faces do not
+bounce *= mix(0.35, 1.0, 1.0 - shl);                 // an overhang still blocks it
+float bounceAmt = bounce * uBounceAmt * (1.0 - uLegacy);
 
 diffuseColor.rgb = alb;
 diffuseColor.a = 1.0;
@@ -1420,9 +1568,20 @@ diffuseColor.a = 1.0;
 // own albedo being zero.
 if (uDbg > 0.5) diffuseColor.rgb = (uDbg < 1.5) ? vec3(0.0) : vec3(0.18);
 
+// Set AFTER the debug override so rockDbg=1/2 stay honest: a bounce term computed
+// from the real albedo would survive its own albedo being forced to zero, which is
+// precisely the trap the rockDbg probes exist to avoid.
+gRKBounce = diffuseColor.rgb * uColBounce * bounceAmt;
+
 // ---- roughness ---------------------------------------------------------------
 float rgh = uRough * (0.84 + 0.38 * (1.0 - h));
 rgh = mix(rgh, 0.55, algae * 0.55);
+// Barnacle crust is a rough, chalky, calcite shell — rougher than the rock it sits on
+// and the reason the belt reads matte-pale rather than as a wet highlight.
+rgh = mix(rgh, 0.88, barn * 0.45);
+// Foam residue is dry salt crystal: research/ocean.md 4.4 puts foam at roughness ~0.8
+// and notes that foam still mirroring the sky is the classic tell.
+rgh = mix(rgh, 0.80, foam * 0.55);
 rgh = mix(rgh, 0.78, bed * 0.30);
 // the tide line's height-blend weight drives roughness too, not only albedo — a crisp
 // colour edge over a soft lighting edge reads as a decal painted on the rock
@@ -1543,26 +1702,52 @@ function makeRockMaterial(ctx, texA, texB, o) {
     uWetAmt: { value: o.wetAmt ?? 1.0 },
     uSpecOccAmt: { value: o.specOcc ?? 1.0 },
     uHexAmt: { value: o.hex ?? 1.0 },
+    uFoamAmt: { value: o.foamAmt ?? 1.0 },
+    uColBarnacle: { value: o.barnacle ?? C(0.330, 0.312, 0.268) },
+    uColLitzone: { value: o.litzone ?? C(0.040, 0.038, 0.034) },
+    // Sea-surface bounce, as a coefficient on diffuseColor.
+    //   E_bounce = L_water * pi * 0.5    half-hemisphere, cosine-weighted, vertical wall
+    //   contrib  = E * BRDF_Lambert      = E * diffuseColor / pi = 0.5 * L_water * dC
+    // three's RE_IndirectDiffuse already carries the 1/pi inside BRDF_Lambert, so the
+    // coefficient to add is E/pi and NOT E/pi^2. The first pass divided by pi twice.
+    //
+    // L_water had to be CALIBRATED, not read off the frame, and the reason is worth
+    // recording: the sea measures 155 sRGB here, but this pipeline is AgX-tonemapped,
+    // so inverting the sRGB EOTF to get 0.33 linear is invalid — AgX puts scene-linear
+    // ~1.0-1.2 at that display value, roughly 3x higher. 0.62 corresponds to
+    // L_water ~ 1.25, which is a sunlit tropical sea carrying specular sheen, and it
+    // is the top of the range I am willing to call physical rather than fitted.
+    // Tint: research/ocean.md gives transmitted (0.686, 0.687, 0.615) at 0.10 m over
+    // pale sand — slightly green — pushed toward cyan for the reflected sky component.
+    //
+    // This does NOT close the gap to the reference on its own, and it should not be
+    // raised until it does: see reports/rocks.md, the residual is a sun:ambient ratio
+    // owned by env/lighting, and a bounce term large enough to hide it would be a
+    // second module's bug fitted into this one's material.
+    uColBounce: { value: o.bounce ?? new THREE.Color(0.560, 0.652, 0.634) },
+    uBounceAmt: { value: o.bounceAmt ?? 1.0 },
+    uSeaContact: { value: o.seaContact ?? 1.0 },
+    uLegacy: { value: 0 },
     uDbg: { value: 0 },
   };
   // ------------------------------------------------------------------ ordering
-  // `applyWorldMaterial` installs its onBeforeCompile and THEN calls
+  // 'applyWorldMaterial' installs its onBeforeCompile and THEN calls
   // lighting.registerMaterial() -> CSM.setupMaterial(), and CSM's setupMaterial does a
-  // bare `material.onBeforeCompile = function(shader){...}` — it does not chain. So the
+  // bare 'material.onBeforeCompile = function(shader){...}' — it does not chain. So the
   // world-material injection is silently thrown away and every surface renders with a
   // white MeshStandardMaterial. (Verified: first capture of this module came out
   // colourless with no shader error, because the shader that compiled was stock.)
   //
-  // Registering with CSM *first* and hiding `lighting` from applyWorldMaterial makes the
-  // chain run the right way round: applyWorldMaterial captures CSM's hook as `prev` and
+  // Registering with CSM *first* and hiding 'lighting' from applyWorldMaterial makes the
+  // chain run the right way round: applyWorldMaterial captures CSM's hook as 'prev' and
   // calls it before merging its own uniforms. Fixing this properly belongs in
   // src/gfx/materialCommon.js, which this module does not own — reported instead.
   ctx.get('lighting')?.registerMaterial?.(mat);
 
-  // Specular occlusion has to be applied to `reflectedLight`, which only exists after
+  // Specular occlusion has to be applied to 'reflectedLight', which only exists after
   // <lights_fragment_end>; the ROCK_FRAG injection point (<lights_fragment_begin>) is
   // too early. Chain a hook in front of applyWorldMaterial's so it captures this one
-  // as `prev` — same construction terrain.js uses for gTSpecOcc.
+  // as 'prev' — same construction terrain.js uses for gTSpecOcc.
   const prevOBC = mat.onBeforeCompile;
   mat.onBeforeCompile = (shader, renderer) => {
     prevOBC?.(shader, renderer);
@@ -1571,7 +1756,8 @@ function makeRockMaterial(ctx, texA, texB, o) {
       `#include <lights_fragment_end>
   reflectedLight.directSpecular   *= gRKSpecOcc;
   reflectedLight.indirectSpecular *= gRKSpecOcc;
-  reflectedLight.indirectDiffuse  *= gRKAO;`);
+  reflectedLight.indirectDiffuse  *= gRKAO;
+  reflectedLight.indirectDiffuse  += gRKBounce;`);
   };
 
   const noLighting = Object.create(ctx);
@@ -1589,6 +1775,7 @@ function makeRockMaterial(ctx, texA, texB, o) {
     },
   });
   mat.userData.rockUniforms = uniforms;
+  mat.userData.rockAlgaeBase = o.algaeAmt;
   return mat;
 }
 
@@ -1652,7 +1839,7 @@ export function create(opts = {}) {
       };
 
       /* ---------------- detail maps ---------------- */
-      // The Sobel gradient is per-texel, so `strength` must carry the texel-to-world
+      // The Sobel gradient is per-texel, so 'strength' must carry the texel-to-world
       // ratio: at 1024 px a one-texel difference is ~0.005 of the height range, and the
       // first pass shipped 2.6 here, which flattened every detail normal to within 1°
       // of the geometric normal. 16/13 puts strong features at 50-70°.
@@ -1729,7 +1916,7 @@ export function create(opts = {}) {
       // The wave-cut shelf is a half-buried horizontal slab seen at a grazing angle,
       // and at that angle the full detail-normal stack reads as crumpled foil rather
       // than as rock: measured lap_var 3247 / edge_density 0.295 against a reference
-      // face at 421 / 0.123. Nulling `uDetailAmt` on the shelf dropped lap_var to 24,
+      // face at 421 / 0.123. Nulling 'uDetailAmt' on the shelf dropped lap_var to 24,
       // so every bit of that energy is detail normals, not the mesh. Same palette,
       // two-thirds the normal amplitude, and the tide colours pushed up because the
       // whole slab is inside the splash zone.
@@ -1749,7 +1936,25 @@ export function create(opts = {}) {
         // turned a 56 x 14 m near-flat plate into chrome foil at grazing incidence.
         wetAmt: 0.35, specF0: 0.020, specF90: 0.16,
       });
-      materials.push(matRock, matBoulder, matFar, matShelf);
+      // The cliff wall is the same limestone as the stacks but it does NOT stand in
+      // water — its foot meets sand and talus — so it must not receive the open-water
+      // AO relaxation or the sea-surface bounce. Same palette, one flag different.
+      // Costs one extra program; the alternative is a per-vertex flag on five separate
+      // geometry builders, and the cliff is far too much of the frame to shade wrong.
+      const matCliff = makeRockMaterial(ctx, A.tex, B.tex, {
+        key: 'rock-cliff',
+        base: C(0.532, 0.426, 0.120),
+        bright: C(0.700, 0.596, 0.232),
+        grime: C(0.086, 0.060, 0.026),
+        stain: C(0.158, 0.082, 0.022),
+        damp: C(0.062, 0.049, 0.027),
+        algae: C(0.048, 0.056, 0.022),
+        moss: C(0.036, 0.068, 0.020),
+        lichen: C(0.300, 0.285, 0.105),
+        bleach: C(0.720, 0.545, 0.235),
+        rough: 0.76, algaeAmt: 1.0, mossAmt: 1.0, seaContact: 0.0,
+      });
+      materials.push(matRock, matBoulder, matFar, matShelf, matCliff);
 
       const addMesh = (geo, mat, name, castShadow = true) => {
         const m = new THREE.Mesh(geo, mat);
@@ -1796,7 +2001,7 @@ export function create(opts = {}) {
         cliffGroup.name = 'cliff_main';
         const grids = [];
         cliff.chunks.forEach((geo, i) => {
-          const m = addMesh(geo, matRock, `cliff_${i}`, true);
+          const m = addMesh(geo, matCliff, `cliff_${i}`, true);
           cliffGroup.add(m);
           disposables.push(geo);
           grids.push(Object.assign(cliff.grids[i], {
@@ -1871,26 +2076,78 @@ export function create(opts = {}) {
         const push = (i, m) => buckets[i].push(m);
         const M = new THREE.Matrix4(), Q = new THREE.Quaternion(), E = new THREE.Euler(), Sv = new THREE.Vector3(), Pv = new THREE.Vector3();
 
-        const place = (x, z, scale, sink, shapeIdx) => {
-          const y = heightAt(x, z);
+        // `absTop`, when given, positions the block so its highest point lands at that
+        // world y instead of sitting on the terrain. That is what a skerry needs: the
+        // seabed under a sea stack is 5-13 m down and irrelevant, because everything
+        // below the waterline is hidden by the ocean surface anyway. What matters is
+        // exactly where the block breaks the surface.
+        // The shape is a unit icosphere squashed by sq[1] in [0.42, 0.74] and pushed
+        // out by up to +0.42 of noise, so its local top sits near 0.70; multiplied by
+        // the instance's own y scale that is the offset from centre to crown.
+        const place = (x, z, scale, sink, shapeIdx, absTop) => {
           E.set(rnd.sym(0.30), rnd.range(0, TAU), rnd.sym(0.30));
           Q.setFromEuler(E);
           Sv.set(scale * rnd.range(0.82, 1.22), scale * rnd.range(0.72, 1.12), scale * rnd.range(0.82, 1.22));
-          Pv.set(x, y - Sv.y * sink, z);
+          const y = absTop !== undefined ? absTop - Sv.y * 0.70 : heightAt(x, z) - Sv.y * sink;
+          Pv.set(x, y, z);
           M.compose(Pv, Q, Sv);
           push(shapeIdx, M.clone());
+          return Pv.clone();
         };
 
-        // rubble skirt around every stack base: fallen blocks, half-buried
+        // ---- skerries: the reef that breaks a sea stack's waterline ---------------
+        //
+        // KNOWN_ISSUES 17.4 filed this as 'the sea stacks float'. They do not float —
+        // --skip ocean shows the geometry running down past the waterline to the
+        // seabed. What was missing is that the intersection was a CLEAN horizontal
+        // silhouette edge, and nothing in nature meets water along a clean edge.
+        //
+        // A rubble skirt already existed here and every block of it was invisible:
+        // `place()` sat each boulder on the TERRAIN, and the terrain under a stack at
+        // z = -92 is 5-13 m below sea level, so the whole skirt was on the seabed
+        // under several metres of water. Measured: zero skirt boulders broke the
+        // surface at any stack.
+        //
+        // kf_01500 shows the reference doing the opposite — a broken ring of dark,
+        // weed-covered blocks standing proud of the water all round each foot, with
+        // surf breaking over them. It is the strongest single cue that the rock is IN
+        // the water, and it reuses the three instanced boulder meshes that already
+        // exist, so it costs no new draw call.
         for (const spec of STACKS) {
-          if (spec.lod >= 2 && spec.id !== 'headland') continue;
-          const n = Math.round(10 + spec.radius * 0.85);
+          const footY = heightAt(spec.x, spec.z);
+          const overWater = footY < SEA_Y - 0.5;
+          // Far stacks used to be skipped entirely. They are pure silhouette work at
+          // 210-250 m, but a bare waterline is exactly as wrong there as up close —
+          // they just need fewer, larger blocks to register at all.
+          const dense = spec.lod < 2 || spec.id === 'headland';
+          const n = dense ? Math.round(10 + spec.radius * 0.85) : 7;
           for (let i = 0; i < n; i++) {
             const a = rnd.range(0, TAU);
             const rr = spec.radius * rnd.range(0.90, 1.75);
             const x = spec.x + Math.cos(a) * rr, z = spec.z + Math.sin(a) * rr;
-            const sc = spec.radius * rnd.range(0.035, 0.115);
-            place(x, z, sc, rnd.range(0.30, 0.62), rnd.int(0, 2));
+            const sc = spec.radius * (dense ? rnd.range(0.035, 0.115) : rnd.range(0.070, 0.150));
+            if (overWater) {
+              // Straddle the surface. A third sit just under it as dark shoals, the
+              // rest stand 0-1.6 m proud; a ring that all pokes out by the same amount
+              // reads as a string of beads, which is its own kind of procedural tell.
+              const u = rnd.next();
+              const top = SEA_Y + (u < 0.34 ? rnd.range(-0.9, -0.1) : rnd.range(0.05, 1.6));
+              place(x, z, sc, 0, rnd.int(0, 2), top);
+            } else {
+              place(x, z, sc, rnd.range(0.30, 0.62), rnd.int(0, 2));
+            }
+          }
+          // Where a stack meets SAND rather than water it needs a contact too, not an
+          // intersection line: a tighter apron of part-buried blocks and spalled chips
+          // right against the shaft, which is what a talus collar looks like.
+          if (!overWater) {
+            const m = Math.round(6 + spec.radius * 0.45);
+            for (let i = 0; i < m; i++) {
+              const a = rnd.range(0, TAU);
+              const rr = spec.radius * rnd.range(0.96, 1.20);
+              place(spec.x + Math.cos(a) * rr, spec.z + Math.sin(a) * rr,
+                spec.radius * rnd.range(0.018, 0.055), rnd.range(0.55, 0.82), rnd.int(0, 2));
+            }
           }
         }
         // shoreline and beach scatter
@@ -1961,6 +2218,12 @@ export function create(opts = {}) {
      *   rockSpecOcc      0 disables cavity specular occlusion
      *   rockHex          0 disables hex tile-breaking on the two coarse octaves
      *   rockDetail       global detail-normal amplitude
+     *   rockAO           0 disables the whole ambient-occlusion chain
+     *   rockAlgae        0 disables damp/algae/tide albedo (keeps the dry rock)
+     *   rockWet          0 disables the wet specular + diffuse-loss branch
+     *   rockFoam         waterline foam/scum strength (shipped 1)
+     *   rockBounce       sea-surface bounce radiance strength (shipped 1)
+     *   rockLegacyTide=1 restores the pre-wave-H tide/AO chain for a back-to-back A/B
      */
     update(dt, ctx) {
       const c = ctx?.config;
@@ -1973,6 +2236,12 @@ export function create(opts = {}) {
         if (c.rockSpecOcc !== undefined) u.uSpecOccAmt.value = +c.rockSpecOcc;
         if (c.rockHex !== undefined) u.uHexAmt.value = +c.rockHex;
         if (c.rockDetail !== undefined) u.uDetailAmt.value = +c.rockDetail;
+        if (c.rockAO !== undefined) u.uAOAmt.value = +c.rockAO;
+        if (c.rockAlgae !== undefined) u.uAlgaeAmt.value = +c.rockAlgae * (m.userData.rockAlgaeBase ?? 1);
+        if (c.rockWet !== undefined) u.uWetAmt.value = +c.rockWet;
+        if (c.rockFoam !== undefined) u.uFoamAmt.value = +c.rockFoam;
+        if (c.rockBounce !== undefined) u.uBounceAmt.value = +c.rockBounce;
+        u.uLegacy.value = +(c.rockLegacyTide ?? 0);
       }
     },
     prerender() {},

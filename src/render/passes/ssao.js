@@ -1,111 +1,31 @@
 import * as THREE from 'three';
-import { Pass, fsMaterial, makeRT, FullScreenQuad, LAYER } from '../RenderPipeline.js';
+import { Pass, fsMaterial, makeRT, FullScreenQuad } from '../RenderPipeline.js';
 
 /* ==========================================================================
- * OPAQUE DEPTH SNAPSHOT — the fix for KNOWN_ISSUES §18, scoped to this subsystem
+ * DEPTH — this pass reads `pipe.depthTex`, and that is now the right thing to read
  * ==========================================================================
  *
- * `RenderPipeline.js:137-158` binds ONE `DepthTexture` to both `gbuffer` and `sceneRT`,
- * and `scene.js` step 7 calls `renderer.clearDepth()` on `sceneRT` before drawing the
- * viewmodel. That wipes the world's depth and refills it with the weapon alone. By the
- * time the post chain runs, `pipe.depthTex` is 1.0 (far plane) everywhere except the gun.
+ * KNOWN_ISSUES §18 is CLOSED (`reports/depth.md`). `scene.js` gave the viewmodel its own
+ * depth attachment, so `pipe.depthTex` holds opaque WORLD depth for the whole frame and
+ * the whole post chain: raw non-linear, full res, NearestFilter, world camera projection
+ * (near 0.06 / far 12000), `1.0` == sky. `depth.geoFrac` at ref_00000 went 0.10094 →
+ * 0.85696 and now tracks the G-buffer's own opaque mask to five decimals at all 21 poses.
  *
- * Both passes in this subsystem guard on `d >= 1.0` meaning "sky, nothing to do", so
- * **every world pixel took the early-out and this entire subsystem rendered zero pixels.**
- * Measured before this fix: `--config aoDebug=1` at ref_00000 is a dead-flat field, and
- * disabling both passes changed the frame less than the capture's own noise floor.
+ * Wave G this file carried a private mid-frame R32F snapshot (`pipe.opaqueDepthTex`,
+ * taken by an invisible probe mesh) because the shared buffer contained nothing but the
+ * gun and both passes' `d >= 1.0` guard rejected every world pixel. That snapshot is now
+ * DELETED: it was proved bit-identical to `pipe.depthTex` at all 21 poses (0 differing
+ * pixels, `tools/_depthprobe.mjs --poses all`) and re-confirmed on this tree before the
+ * deletion, so it was 8.3 MB of R32F plus a full-screen draw reproducing a texture that
+ * already exists. The `aoLegacyDepth` / `ssrLegacyDepth` A/B knobs went with it — they
+ * selected between two byte-identical textures and meant nothing.
  *
- * The clean fix belongs in `scene.js` (give the viewmodel its own depth attachment). This
- * subsystem does not own `scene.js`, and every other depth consumer — `dof`, `motionBlur`,
- * `taa`, `volumetricFog`, water refraction — is being measured by other agents against the
- * broken buffer right now. Changing shared pipeline state mid-wave would move their numbers
- * under them. So the snapshot below is deliberately local: it copies `pipe.depthTex` into
- * an R32F colour target at the one moment in the frame when it still holds the world, and
- * only `ssao`/`ssr` read the copy. `pipe.opaqueDepthTex` is published so the other passes
- * can adopt it whenever their owners want to; nothing is taken away from them.
- *
- * HOW THE MID-FRAME HOOK WORKS. The scene pass does steps 1-7 in one `render()` call, so no
- * pass boundary exists between the opaque draw and the viewmodel's `clearDepth()`. The hook
- * is an invisible degenerate mesh on `LAYER.TRANSPARENT` with `renderOrder = -1e6`, whose
- * `onBeforeRender` runs at the very start of scene.js step 5 — after the opaque draw and
- * the `opaqueRT` snapshot, before the depth clear. This is the same trick `world/particles.js`
- * already uses to get a depth copy mid-frame; it is a proven path in this engine, not a new
- * one. The copy binds its own target first, so the depth texture is never sampled while it
- * is attached to the bound framebuffer (no feedback loop).
- *
- * The copy is the RAW non-linear depth value, not linearised. That keeps every existing
- * `linearDepth(texture(tDepth,uv).r, near, far)` call site and every `>= 1.0` sky test
- * byte-for-byte valid — the only thing that changes is which texture is bound.
+ * NOTE FOR ANYONE ADDING GEOMETRY: `depthTex` excludes the water surface, particles and
+ * the viewmodel by construction (they all draw with `depthWrite: false`, or into
+ * `pipe.viewDepthTex`). This pass depends on that — see the `cover` term in the apply
+ * shader, which exists precisely because a wet-sand G-buffer pixel may be hidden behind
+ * the water sheet by the time post runs.
  */
-
-const OPAQUE_DEPTH_FRAG = /* glsl */`
-in vec2 vUv;
-uniform sampler2D tDepth;
-out vec4 oCol;
-void main(){ oCol = vec4(texture(tDepth, vUv).r, 0.0, 0.0, 1.0); }
-`;
-
-/** One snapshot per RenderPipeline, shared by ssao and ssr. */
-const _opaqueDepth = new WeakMap();
-
-export function ensureOpaqueDepth(ctx, pipe) {
-  let s = _opaqueDepth.get(pipe);
-  if (s) return s;
-
-  const mat = fsMaterial(OPAQUE_DEPTH_FRAG, { tDepth: { value: null } });
-  mat.blending = THREE.NoBlending;
-  const quad = new FullScreenQuad(mat);
-  s = { rt: null, mat, quad, frame: -999, w: 0, h: 0, probe: null };
-
-  const probeMat = new THREE.RawShaderMaterial({
-    glslVersion: THREE.GLSL3,
-    vertexShader: 'precision highp float;\nin vec3 position;\nvoid main(){ gl_Position = vec4(2.0, 2.0, 2.0, 1.0); }',
-    fragmentShader: 'precision highp float;\nout vec4 oCol;\nvoid main(){ oCol = vec4(0.0); }',
-    depthTest: false, depthWrite: false, colorWrite: false,
-  });
-  const geom = new THREE.BufferGeometry();
-  geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(9), 3));
-  const probe = new THREE.Mesh(geom, probeMat);
-  probe.name = 'ssaoOpaqueDepthProbe';
-  probe.frustumCulled = false;
-  probe.renderOrder = -1000000;
-  probe.layers.set(LAYER.TRANSPARENT);
-  probe.onBeforeRender = (r) => {
-    if (!pipe.depthTex) return;
-    const w = pipe.w | 0, h = pipe.h | 0;
-    if (w < 2 || h < 2) return;
-    if (!s.rt || s.w !== w || s.h !== h) {
-      s.rt?.dispose();
-      s.rt = makeRT(w, h, {
-        type: THREE.FloatType, format: THREE.RedFormat,
-        minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
-      });
-      s.w = w; s.h = h;
-      pipe.opaqueDepthTex = s.rt.texture;
-    }
-    const prev = r.getRenderTarget();
-    mat.uniforms.tDepth.value = pipe.depthTex;
-    quad.material = mat;
-    r.setRenderTarget(s.rt);
-    quad.render(r);
-    r.setRenderTarget(prev);
-    s.frame = pipe.frameIndex;
-  };
-  ctx.scene.add(probe);
-  s.probe = probe;
-  /** Channel layout, published for anyone who wants to adopt it: `.r` is the raw
-   *  non-linear depth of the OPAQUE scene, full resolution, NearestFilter. */
-  pipe.opaqueDepthLayout = { depth: 'r', linear: false, scale: 1.0 };
-  _opaqueDepth.set(pipe, s);
-  return s;
-}
-
-/** The opaque depth for THIS frame, or `pipe.depthTex` if the probe has not run yet
- *  (first frame, or the transparent layer was never drawn). Never null. */
-export function opaqueDepthTexture(pipe) {
-  const s = _opaqueDepth.get(pipe);
-  return (s && s.rt && s.frame === pipe.frameIndex) ? s.rt.texture : pipe.depthTex;
-}
 
 /**
  * `ssao` — **GTAO** (ground-truth ambient occlusion), not random-sample SSAO.
@@ -289,7 +209,7 @@ export function opaqueDepthTexture(pipe) {
  *   aoAmbientFloor 0.0                aoPower 1.6           aoUseShadow 1
  *   aoAlpha 0.10 (temporal)           aoDepthTol 0.02       aoDepthPhi 0.06
  *   aoNormalPhi 8   aoCentreW 1.2     aoShadowBias 0.0012
- *   aoLegacyDepth 0 — read the broken shared `pipe.depthTex` again, for an A/B
+ *   aoMaxRadiusPx 96  aoMaxRadiusPxSmall 24   aoDualRadius 1   aoUseEnv 1
  *   aoDebug 0   1 = AO, 2 = bent normal, 3 = indirect weight, 4 = view normal,
  *               5 = linear depth, 6 = raw depth, 7 = sun visibility
  *   aoGtaoDbg 0 1 = tap coverage, 2 = max elevation, 3 = max sample weight,
@@ -386,7 +306,9 @@ uniform float uThickness;    // thin-occluder compensation, 0..1
 uniform float uFalloffStart; // fraction of the radius at which attenuation begins
 uniform float uAngleBias;    // sin of the minimum elevation above the tangent plane
 uniform float uFrame;
-uniform float uMaxRadiusPx;
+uniform float uMaxRadiusPx;   // pixel clamp for the AMBIENT pass
+uniform float uMaxRadiusPxS;  // ... and for the CONTACT pass. NOT the same number — see main()
+uniform float uDual;          // 0 = ambient pass only, for an A/B of the min() combine
 uniform float uDbg;
 out vec4 oCol;
 
@@ -515,9 +437,22 @@ void main(){
 
   // Screen radius of the world-space sampling sphere. Pixels are square, so one scale
   // (from the vertical FOV) is correct on both axes.
+  //
+  // THE TWO PASSES NEED DIFFERENT PIXEL CLAMPS, and giving them the same one silently
+  // deletes the contact pass over the whole near field. At ref_00000 the foreground beach
+  // sits at 0.26-1.4 m; pxPerMetre there is 380-1550, so uRadius (1.2 m) wants 460-1900 px
+  // and uRadiusS (0.25 m) wants 95-390 px. With one clamp at 96 px BOTH saturate it, the
+  // two searches cover the identical 96-px disc, and min(aoL, aoS) stops being Lagarde's
+  // medium/large combine and becomes min() of two noisy estimates of the SAME integral —
+  // which is not an estimator of that integral at all, it is biased low by ~0.5 sigma.
+  // Spurious darkening on flat sunlit sand, i.e. research 7's 'dirt in the sand', produced
+  // by a clamp rather than by geometry. Worse, the contact pass spends only STEPS_S=3 taps
+  // on that 96-px disc against the ambient pass's 4, so it is also the COARSER of the two.
+  // The contact clamp is therefore its own constant, small enough that the contact pass is
+  // always a genuinely tighter search than the ambient one.
   float pxPerMetre = 0.5 * uRes.y / max(uTanHalf.y * lz, 1e-5);
   float radiusPxL = clamp(uRadius  * pxPerMetre, 2.5, uMaxRadiusPx);
-  float radiusPxS = clamp(uRadiusS * pxPerMetre, 1.8, uMaxRadiusPx);
+  float radiusPxS = clamp(uRadiusS * pxPerMetre, 1.8, min(uMaxRadiusPxS, radiusPxL));
 
   // The falloff must span the radius the search can ACTUALLY reach, not the nominal world
   // radius. Near the camera radiusPx saturates at uMaxRadiusPx, so the taps only cover
@@ -566,7 +501,9 @@ void main(){
 
     vec3 bL, bS;
     visL += projLen * sliceArc(P, N, V, T, px, omega, n, sinN, radiusPxL, falloffRL, STEPS,  stepN,  bL);
-    visS += projLen * sliceArc(P, N, V, T, px, omega, n, sinN, radiusPxS, falloffRS, STEPS_S, stepN2, bS);
+    // Uniform branch — every invocation takes the same side, so no divergence cost.
+    if (uDual > 0.5)
+      visS += projLen * sliceArc(P, N, V, T, px, omega, n, sinN, radiusPxS, falloffRS, STEPS_S, stepN2, bS);
     bent += projLen * bL;
   }
 
@@ -590,7 +527,7 @@ void main(){
   // most of a beach. The clamp lives at the end of the temporal pass.
   float aoL = visL / float(SLICES);
   float aoS = visS / float(SLICES);
-  float ao = clamp(min(aoL, aoS), 0.0, 1.5);
+  float ao = clamp(uDual > 0.5 ? min(aoL, aoS) : aoL, 0.0, 1.5);
 
   if (uDbg > 4.5)      ao = clamp(lz / 60.0, 0.0, 1.0);
   else if (uDbg > 3.5) ao = clamp(aoS, 0.0, 1.5);
@@ -736,6 +673,11 @@ uniform vec3  uSunDirView;
 uniform vec3  uUpView;
 uniform vec3  uBounceDirView;
 uniform float uSunLum, uSkyLum, uBounceLum;
+// Luminance-projected SH9 of 'scene.environment', already multiplied by
+// 'scene.environmentIntensity'. See the note at 'indirect' below: leaving the IBL out of
+// the indirect estimate is not a small approximation, it is most of the ambient.
+uniform float uEnvSH[9];
+uniform float uHasEnv;
 uniform float uDebug;
 
 // --- sun shadow cascades, so the direct term this pass divides by is the REAL one ------
@@ -775,6 +717,21 @@ float sunVis(vec3 wp){
       return texture(uCasc3, vec3(s.xy, s.z - uShadowBias));
   }
   return 1.0;
+}
+
+/** Irradiance E(n) from the environment probe's SH9, luminance only, in three's own light
+ *  units — the same expression three evaluates in 'shGetIrradianceAt' and 'env.js' in
+ *  'irradianceAt()', so it is directly comparable with 'uSunLum * N.L'. Clamped at 0
+ *  because a 2-band SH fit of a sky with a sun in it rings negative near the anti-solar
+ *  direction. */
+float envIrradiance(vec3 nw){
+  float x = nw.x, y = nw.y, z = nw.z;
+  return max(0.0,
+      uEnvSH[0] * 0.886227
+    + uEnvSH[1] * 1.023328 * y + uEnvSH[2] * 1.023328 * z + uEnvSH[3] * 1.023328 * x
+    + uEnvSH[4] * 0.858086 * x * y + uEnvSH[5] * 0.858086 * y * z
+    + uEnvSH[6] * (0.743125 * z * z - 0.247708)
+    + uEnvSH[7] * 0.858086 * x * z + uEnvSH[8] * 0.429043 * (x * x - y * y));
 }
 
 /** Jimenez's multi-bounce fit: how much light an occluded cavity of this albedo actually
@@ -866,8 +823,25 @@ void main(){
   float sh = sunVis(wp);
   float ndl = max(dot(N, uSunDirView), 0.0);
   float direct   = uSunLum * ndl * sh;
+  // THE IBL IS PART OF THE INDIRECT TERM AND WAS MISSING FROM IT.
+  //
+  // 'env.js' owns 'scene.environment' (a PMREM probe of the sky + ground), so every
+  // MeshStandardMaterial in the frame receives IBL diffuse on top of the HemisphereLight
+  // and the bounce light. This estimate counted only the two analytic lights, so
+  // 'indirect' was short by the whole IBL, 'fi' was biased low, and the AO was applied at
+  // a fraction of its correct weight everywhere — the quiet version of the mistake, where
+  // the pass looks well-behaved because it is barely doing anything.
+  //
+  // The probe publishes its own SH9 ('env.shArray') and 'env.js:524' evaluates exactly the
+  // expression above to produce 'env.groundIrradiance', which 'tonemap.keyedExposure()'
+  // already trusts as "the ambient this probe puts on a flat piece of beach, in the same
+  // units the sun and the hemisphere fill are measured in". So the term is not a fitted
+  // constant: it is the same number the exposure control uses, evaluated per pixel against
+  // this pixel's normal instead of against +Y.
+  vec3 nw = mat3(uCamWorld) * N;
   float indirect = uSkyLum * (0.5 + 0.5 * dot(N, uUpView))
-                 + uBounceLum * max(dot(N, uBounceDirView), 0.0);
+                 + uBounceLum * max(dot(N, uBounceDirView), 0.0)
+                 + (uHasEnv > 0.5 ? envIrradiance(normalize(nw)) : 0.0);
   float fi = indirect / max(indirect + direct, 1e-4);
   float w = clamp(uAmbientFloor + (1.0 - uAmbientFloor) * fi, 0.0, 1.0) * uStrength;
 
@@ -932,7 +906,8 @@ export function create(opts = {}) {
     normalPhi: 8.0,
     centreW: 1.2,       // XeGTAO DenoiseBlurBeta
     shadowBias: 0.0012,
-    maxRadiusPx: 96,
+    maxRadiusPx: 96,       // ambient pass, research 2.5: 64-96 px at half res
+    maxRadiusPxSmall: 24,  // contact pass — see the note in the GTAO shader's main()
   }, opts.ssao || {});
 
   let prepRT = null, gtaoRT = null, blurRT = null, histA = null, histB = null;
@@ -947,6 +922,10 @@ export function create(opts = {}) {
   const _bounce = new THREE.Vector3();
   const cascMats = [new THREE.Matrix4(), new THREE.Matrix4(), new THREE.Matrix4(), new THREE.Matrix4()];
   const _identity = new THREE.Matrix4();
+  /** Luminance of `env.shArray`'s nine rgb coefficients, times `env.intensity`. Rebuilt
+   *  each frame — the probe re-captures whenever the sun moves and the coefficients change
+   *  with it, and nine multiply-adds is not worth a dirty flag. */
+  const envSH = new Float32Array(9);
 
   /** A 1×1 white texture so `pass.aoTexture` is never null for a consumer that reads it
    *  before the first frame, or while this pass is disabled. */
@@ -1000,6 +979,7 @@ export function create(opts = {}) {
       uThickness: { value: cfg.thickness },
       uFalloffStart: { value: cfg.falloffStart }, uFrame: { value: 0 },
       uAngleBias: { value: cfg.angleBias }, uMaxRadiusPx: { value: cfg.maxRadiusPx },
+      uMaxRadiusPxS: { value: cfg.maxRadiusPxSmall }, uDual: { value: 1 },
       uDbg: { value: 0 },
     }, D);
 
@@ -1031,6 +1011,7 @@ export function create(opts = {}) {
       uUpView: { value: new THREE.Vector3(0, 1, 0) },
       uBounceDirView: { value: new THREE.Vector3(0, -1, 0) },
       uSunLum: { value: 6.2 }, uSkyLum: { value: 1.2 }, uBounceLum: { value: 0.28 },
+      uEnvSH: { value: envSH }, uHasEnv: { value: 0 },
       uCamWorld: { value: new THREE.Matrix4() },
       uCascMat: { value: cascMats },
       uCasc0: { value: null }, uCasc1: { value: null },
@@ -1047,10 +1028,6 @@ export function create(opts = {}) {
 
     ctx.on?.('camera:teleport', () => { frames = 0; });
     ctx.on?.('engine:resize', () => { frames = 0; });
-
-    // See the header: without this every pixel below reads a depth buffer containing
-    // nothing but the viewmodel, and the whole pass is inert.
-    ensureOpaqueDepth(ctx, pipe);
 
     p.setSize(pipe.w > 2 ? pipe.w : ctx.size.w, pipe.h > 2 ? pipe.h : ctx.size.h, ctx);
   };
@@ -1094,7 +1071,9 @@ export function create(opts = {}) {
     const tanX = 1 / Math.max(Math.abs(pe[0]), 1e-6);
     const tanY = 1 / Math.max(Math.abs(pe[5]), 1e-6);
 
-    const depthTex = (c.aoLegacyDepth ? pipe.depthTex : opaqueDepthTexture(pipe));
+    // The canonical world depth. See the header: the private snapshot this used to read
+    // was proved bit-identical and has been deleted.
+    const depthTex = pipe.depthTex;
 
     /* ---------------------------------------------------------------- 1. prep */
     {
@@ -1123,7 +1102,9 @@ export function create(opts = {}) {
       u.uThickness.value = THREE.MathUtils.clamp(c.aoThickness ?? cfg.thickness, 0, 0.7);
       u.uFalloffStart.value = THREE.MathUtils.clamp(c.aoFalloffStart ?? cfg.falloffStart, 0, 0.95);
       u.uAngleBias.value = THREE.MathUtils.clamp(c.aoAngleBias ?? cfg.angleBias, 0.0, 0.9);
-      u.uMaxRadiusPx.value = cfg.maxRadiusPx;
+      u.uMaxRadiusPx.value = Math.max(4, c.aoMaxRadiusPx ?? cfg.maxRadiusPx);
+      u.uMaxRadiusPxS.value = Math.max(3, c.aoMaxRadiusPxSmall ?? cfg.maxRadiusPxSmall);
+      u.uDual.value = (c.aoDualRadius ?? 1) ? 1 : 0;
       // Animated from the pipeline's own frame counter, never a clock — two runs of the
       // same capture must produce the same slice rotations on every frame.
       u.uFrame.value = pipe.frameIndex % 64;
@@ -1215,6 +1196,22 @@ export function create(opts = {}) {
       // time module may not exist, and the defaults are then simply the noon values.
       const time = ctx.get?.('time');
       const lum = (col) => 0.2126 * col.r + 0.7152 * col.g + 0.0722 * col.b;
+
+      // IBL diffuse, from the probe's own SH9. `aoUseEnv=0` restores the pre-fix
+      // behaviour (analytic lights only) for an A/B inside one build.
+      const env = (c.aoUseEnv ?? 1) ? ctx.get?.('env') : null;
+      const sa = env?.shArray;
+      const ei = env?.intensity ?? 0;
+      if (sa && sa.length >= 27 && ei > 0 && ctx.scene.environment) {
+        for (let k = 0; k < 9; k++) {
+          envSH[k] = (0.2126 * sa[k * 3] + 0.7152 * sa[k * 3 + 1] + 0.0722 * sa[k * 3 + 2]) * ei;
+        }
+        u.uHasEnv.value = 1;
+        u.uEnvSH.value = envSH;
+      } else {
+        u.uHasEnv.value = 0;
+      }
+
       if (time) {
         const alt = Math.max(0.02, time.sunDir.y);
         u.uSunLum.value = time.state.sunIntensity * (c.sunScale ?? 1) * lum(time.sunColor);

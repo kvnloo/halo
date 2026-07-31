@@ -505,7 +505,19 @@ GL_INVALID_OPERATION: glDrawElements: Feedback loop formed between Framebuffer a
 
 ---
 
-## 17. Showcase sheet defects (visual, not integration)
+## 17. Showcase sheet defects (visual, not integration) — 2 of 5 FIXED, 2 PARTIAL, 1 OPEN
+
+> **Wave H (2026-07-30):** re-read cell by cell against a fresh sheet; full table in
+> `reports/integrationH.md` §4. Per-item status is inline below. **Not closeable —
+> 17.3 is untouched.**
+>
+> | item | status |
+> |---|---|
+> | 17.1 cameras under terrain | **FIXED**, and now gated by `tools/_posecheck.mjs` (28/28 ok) |
+> | 17.2 ring is two thin lines | **PARTIAL** — band + inner-surface texture render; still a column, not an arch |
+> | 17.3 characters in showcase | **OPEN** — still in cells 07 and 09 |
+> | 17.4 sea stacks float | **FIXED** — verified at the base of `shot_hero_stack` |
+> | 17.5 captions over-promise | **PARTIAL** — 03 fixed, 04/08 improved but still miss their headline effect, 12 is structurally impossible |
 
 From `shots/preview/preview.png`, full cell-by-cell in `reports/integration.md` §2.
 Highest-impact, in order:
@@ -525,7 +537,48 @@ Highest-impact, in order:
 
 ---
 
-## 18. The shared depth texture is cleared every frame — CRITICAL, ROOT CAUSE, still OPEN
+## 18. The shared depth texture is cleared every frame — **FIXED (Wave H), VERIFIED**
+
+> **Wave H (2026-07-30): CLOSED.** `scene.js` step 7 no longer clears the world's depth.
+> The viewmodel got its own attachment, `pipe.viewDepthTex`, swapped onto `sceneRT` for
+> that one draw and swapped back immediately after (two `framebufferTexture2D` calls, no
+> copies). `RenderPipeline.js` now carries the depth contract in a header comment, and
+> both attachments track size on resize. `ctx.config.vmLegacyDepth = 1` reintroduces the
+> bug in full for a same-build A/B.
+>
+> **Verified independently** with `node tools/_depthprobe.mjs --pose ref_00000 --settle 48`
+> — not by trusting the fixing agent's own numbers:
+>
+> ```
+> depth.geoFrac        0.85704     <- was 0.10094 (the gun alone)
+> gbufferGeoFrac       0.85704     <- INDEPENDENT witness: G-buffer MRT1.a,
+>                                     a different attachment written by a different
+>                                     pass. Agrees to five decimals.
+> depth.distM          p50 1.152 m   p90 57.87 m   p99 181.2 m
+>                                  <- real world distances. Before, every world pixel
+>                                     read as sky at the 460 m far plane.
+> viewmodel.frac       0.10098     <- exactly the OLD geoFrac. The gun rasterises
+>                                     identically; it just no longer does so into the
+>                                     world's buffer. Prediction confirmed.
+> viewmodel.overSkyFrac  0
+> ```
+>
+> **Downstream effects, all observed:**
+> - **§8 chroma moved for the first time in three waves.** `sat_mean` 55.66 → 61.66
+>   (reference 79.14). It had been going slightly *backwards*. The mechanism §18
+>   predicted — 460 m of achromatic in-scatter integrated in front of every world pixel —
+>   was real and is gone. Visible directly at `ref_00600` (sea stacks recover their
+>   albedo and vegetation) and `ref_02220` (the cliff stops being a flat white wall).
+> - **§21 closed as a side effect.** The `[dof] world path disabled: ...` line no longer
+>   appears in any capture. DoF is a shipped feature again.
+> - **Spectral slope is now essentially exact**: −2.533 against a reference −2.542, from
+>   −2.624.
+> - **Determinism re-verified bit-exact** afterwards — important, because `scene.js` now
+>   mutates `pipe.sceneRT.depthTexture` mid-frame and a missed restore would drift.
+> - **`ssao` and `ssr` render pixels for the first time in the project's history.** See
+>   the new §28 — this is not free, and it is why the composite score went *down*.
+
+### Original report, kept for the reasoning
 
 **This is the real cause of the near-field haze wash in issue 8, and it is not in
 `volumetricFog.js`.** Found by the fog agent in Wave E; full writeup in `reports/fog.md`.
@@ -1011,3 +1064,194 @@ a fresh daemon which served all 12 poses without incident.
 slow capture.** A wedged daemon blocks every agent on the machine and is indistinguishable
 from a busy one. `captured.mjs` needs a watchdog: a per-request deadline that releases the
 in-flight slot, and a `/health` field for "seconds since `served` last advanced".
+
+---
+
+# Wave H integration pass — 2026-07-30
+
+Depth fix + showcase repairs. Full working notes in `reports/integrationH.md`.
+Score **29.44** at `--settle 48`, **down 0.86** from Wave G's 30.30 — and the images
+improved substantially. §28 explains why both are true. **§29 is the most important
+thing in this pass.**
+
+## Status changes to existing sections
+
+- **§18 (shared depth texture): CLOSED AND VERIFIED.** See the section itself for the
+  `_depthprobe` before/after and the independent G-buffer witness. This was the
+  highest-priority open item in the project.
+- **§21 (DoF is a shipped no-op): CLOSED**, as a direct consequence of §18. The gating
+  console line is gone from every capture.
+- **§8 (desaturation): MOVED, for the first time in three waves.** `sat_mean`
+  55.66 → 61.66 against a reference 79.14. Still 22% short, but the direction reversed.
+  Wave F's redirection of the remaining gap to `tonemap`'s highlight roll-off is still
+  unacted-on; `highlight_frac` is 0.0039 against a reference 0.0088.
+- **§17 (showcase defects): 2 of 5 fixed, 2 partial, 1 open.** Table inline in §17.
+- **§1, §10, §11, §12, §13, §20: unchanged and still holding.** `parsecheck` green
+  (42 files); zero failed modules; zero malformed-collider warnings; determinism
+  bit-exact across two independent captures of `ref_00000`.
+- **§25 and §23 (frame time): SUSPECT — see §29.** Both were measured with a CPU
+  stopwatch on a machine at load average 24. Their conclusions may be artifacts.
+- **§26 (`--settle` is not converged) still governs everything above.** It sets a ±0.5
+  noise floor on the score, and this wave's −0.86 is only just outside it. Treat the
+  magnitude with suspicion; treat the per-axis *direction* (§28) as real, because it is
+  corroborated by raw statistics and by the pixels.
+
+---
+
+## 28. GTAO and SSR have never been validated against an image, and are over-strength
+
+`ssao` and `ssr` both guard on `d >= 1.0` meaning "sky, nothing to do". Under §18 that
+was true of every world pixel, so **both passes took the early-out everywhere and
+rendered nothing.** §18 is now fixed and they are live for the first time.
+
+Checked against git rather than taken on trust — the mid-frame snapshot that first gave
+these passes real depth exists in **no commit**:
+
+```
+$ for c in 865e972 76237b2 8ed94d7; do
+    git show $c:src/render/passes/ssao.js | grep -c "export function ensureOpaqueDepth"
+  done
+0    (Wave E)
+0    (Wave F)
+0    (Wave G)
+```
+
+It was written and deleted entirely inside the uncommitted Wave H tree. So every scored
+run through `waveG-mvfix` had both passes dead, and `aoStrength`, `aoRadius`, `aoPower`,
+`ssrStrength` and the rest **were all tuned against a pass that produced no output.**
+
+They are now live at those values and they are too strong:
+
+```
+                 edge_density   edge_ratio      lap_var    lap_ratio
+reference             0.0768         1.000       424.13        1.000
+waveE                 0.0684         0.891       418.0         0.986
+waveF                 0.0793         1.033       336.3         0.793
+waveG                 0.0770         1.058       318.32        0.841
+waveH                 0.0986         1.413       472.50        1.360
+```
+
+The render has swung from 16% *under* the reference's detail energy to 36% *over*, and
+from an essentially exact edge density to **41% over**. GTAO writes a dark contact
+gradient into every crevice and geometry junction; SSR adds high-frequency reflected
+detail to wet sand and water. Both inject exactly what Canny and the Laplacian measure.
+
+`geometry = band(|log(edge_ratio)|, 0.15, 1.2)` collapsed 90.04 → 80.81 as a result,
+which at weight 0.12 is **−1.108 of score — more than the entire −0.86 regression.**
+
+**The task is a downward tuning pass on AO and SSR intensity, with a live image behind it
+for the first time.** Target `edge_ratio` and `lap_ratio` back toward 1.0. The chroma and
+spectrum wins from §18 do not depend on AO strength and should survive it.
+
+### 28b. The composite score is currently anti-correlated with visible quality
+
+The two worst-scoring poses this wave are the two that improved most visibly:
+
+```
+pose         waveG   waveH        Δ   geomG  geomH
+ref_00600    37.55   22.18   -15.37    72.9   23.0
+ref_02220    32.68   23.69    -8.99    87.7   63.0
+```
+
+At `ref_00600` waveG renders the sea stacks as pale grey ghosts barely separable from the
+sky — no albedo, no vegetation, no crevice shading. waveH gives them warm-tan rock,
+visible moss and tree cover, and dark interior crevices. At `ref_02220` waveG renders the
+headland cliff as a **flat white wall**; waveH renders tan rock with strata and vegetation
+speckle. Both are large, obvious improvements. Both scored dramatically worse.
+
+The mechanism is precise: `edge_ratio` is a **ratio**, blind to sign. waveG scored 1.058
+by having a washed-out mush whose Canny density coincidentally landed near the
+reference's. Adding correct detail moved it away from 1.0 and was punished.
+
+This is **§4 (circular calibration) presenting in a new form.** Do not revert §18 to
+recover 0.86 points. And note the per-pose spread the mean hides — three poses gained
+4–12 points while three lost 6–15; the mean describes none of them.
+
+---
+
+## 29. Every frame-time number in this document was taken on a saturated machine
+
+**This calls §23 and §25 into question, and possibly §13.**
+
+`ref_00600` was measured four times on one identical build in a single session:
+
+| method | p50 |
+|---|---:|
+| `_perfprobe.mjs`, 21 poses sequential | 16.40 |
+| `_ssaocost.mjs` baseline | 18.80 |
+| `_ssaocost.mjs` "both off" | 11.60 |
+| interleaved A/B, mean of 6 reps, ssao+ssr ON | 10.23 |
+
+**A 1.84x spread with no source change.** The machine state at the time:
+
+```
+$ uptime
+ load average: 24.03, 20.28, 17.95
+$ free -g          ->  15 total, 14 used, 1 available
+$ ps aux | grep -c "[c]hrome"                    -> 22
+$ ps aux | grep -E "[c]apture|[v]ite" | wc -l    -> 17
+$ nvidia-smi --query-gpu=utilization.gpu ...     -> 27 %
+```
+
+**Load average 24, one gigabyte of RAM free — and the GPU 27% idle.**
+
+§22 already established the decisive fact and nobody applied it: `performance.now()`
+around `advance()` measures **CPU submit cost, not GPU frame time**. The instrument is a
+CPU stopwatch, and the CPU is oversubscribed 24-deep by a dozen concurrent agents while
+the GPU — the thing we want to measure — is mostly idle.
+
+This also explains **§25b's "~400 ms frame hitch"**. There are now 7–8 such frames per
+run, they land on *different poses each run*, and they survive 30–40 discarded warm-up
+frames. That is the signature of a scheduler stall on a swapping box, not of anything a
+renderer does. **§25b is probably not a rendering bug at all.**
+
+### What to do
+
+- **Record `uptime` and `free` alongside every frame-time table from now on.** A number
+  taken at load 24 is not comparable to one taken at load 3.
+- **Do not name a subsystem as "over 11 ms" from a CPU stopwatch on a busy box.** This
+  pass declined to, despite 9 of 21 poses breaching p50.
+- **Land `EXT_disjoint_timer_query_webgl2` GPU timer queries** (§22's own recommendation).
+  It is the only measurement immune to this, and three waves of perf conclusions are now
+  waiting on it.
+- **Triangle and draw counts remain trustworthy** — they are deterministic counters.
+  Use them.
+
+### 29b. The one perf fact that survives
+
+```
+                  triangles                draw calls
+§23 (Wave F)      29.6 M – 32.5 M          523 – 645
+waveH             30.7 M – 39.4 M          509 – 717
+```
+
+**Triangle count rose again, ~10–20%, ceiling 32.5 M → 39.4 M.** `shot_sky_ring` renders
+39.3 M triangles for a shot that is mostly empty sky. §23's culling/LOD hypothesis is
+untouched and stronger, it is the most likely real performance problem in the build, and
+it is measurable **without a stopwatch**. The `--skip rocks` / `--skip props` A/B has
+still not been run — fourth wave running. **Fix culling before pricing another post pass.**
+
+---
+
+## 30. New visual defects observed this wave
+
+Not regressions from a specific change; first clearly visible now that the haze wash has
+lifted. All from `shots/preview/preview.png`.
+
+1. **Stars are rendering in the daytime sky.** Dozens of them in `shot_sky_ring`,
+   alongside a bright sun and full cumulus. Owner: `src/world/sky.js`.
+2. **The headland cliff is a hard-edged blocky staircase** in `shot_cliff_vegetation` —
+   terrain quantisation terracing across the entire face, plus a near-black unlit region
+   at top-left that reads as a hole. Owner: `src/world/terrain.js`.
+3. **The water surface at `shot_water_edge` renders as jagged white triangular shards**
+   rather than foam, with a smooth turquoise lens in the centre. The cell reads as an
+   artifact. **No caustics are visible** despite the caption. Owner: `src/world/ocean.js`.
+4. **A bright cyan glowing blob** sits at left-centre of `shot_tide_pools` — unexplained
+   emissive or particle artifact. Owner: `src/world/particles.js` or `src/game/ai.js`.
+5. **The Forerunner bridge deck is an untextured mauve/purple banded slab** in every cell
+   it appears in (01, 03, 04, 07, 09, 10, 12). It is the second-most-visible structure in
+   the level. Owner: `src/world/structures.js`.
+6. **The viewmodel cannot be framed.** `scene.js` draws it through `pipe.viewCamera`, a
+   hard-coded 55° camera, so pose `fov` has no effect on it (207,311 px at fov 58 vs
+   207,503 px at fov 95 — 0.09%). `shot_weapon_detail` cannot show weapon detail until
+   `viewCamera`'s FOV becomes settable. Owner: `src/render/RenderPipeline.js`.

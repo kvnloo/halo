@@ -45,29 +45,51 @@ import { Pass, fsMaterial, makeRT, FullScreenQuad } from '../RenderPipeline.js';
  *
  * Suppression is applied in three places — the tile reduction (so the gun's own velocity
  * never dilates a neighbour's tile), the per-tap weight (so the gun cannot paint the
- * world and the world cannot paint the gun), and a whole-pixel bypass — and it uses
- * three tests, in decreasing order of principle and increasing order of whether they
- * currently fire:
+ * world and the world cannot paint the gun), and a whole-pixel bypass.
  *
- *  1. `MAT_ID.VIEWMODEL` (8) in `gbuffer.textures[1].b`. This is the contract in
- *     docs/ARCHITECTURE.md and `weapons.js` honours it — it calls `patchForGBuffer(root,
- *     { matId: MAT_ID.VIEWMODEL })`. It is nonetheless **unreachable today**, because
- *     `scene.js` renders the G-buffer pre-pass with only `LAYER.OPAQUE` and
- *     `LAYER.DEFAULT` enabled and the viewmodel is on `LAYER.VIEWMODEL`. Neither file is
- *     wrong on its own; the layer is simply never drawn into MRT1.
- *  2. `drawnAfterPrepass` — depth written, no G-buffer coverage. Verified by capture
- *     (`dofDebug 1` at `ref_01500`): the depth texture contains the weapon and nothing
- *     else, because `scene.js` step 7 calls `renderer.clearDepth()` on a target whose
- *     depth attachment *is* `pipe.depthTex`, then draws the viewmodel. So today this is
- *     an exact test, and it is exact for a structural reason rather than by luck: the
- *     viewmodel is the only thing in the engine drawn after the pre-pass. It goes vacuous
- *     the moment (1) starts working.
- *  3. `mbNearSuppressM`, a raw near-distance guard. Note that it does **not** catch the
- *     viewmodel today and is not expected to: the weapon is rasterised by a camera with a
- *     0.002-12 m frustum, so a fragment at 0.3 m writes a depth that reads as ~9 m when
- *     decoded with the main camera's 0.06-12000 m near/far. It is kept for a viewmodel
- *     that is one day drawn by the main camera, and its uselessness in the present
- *     configuration is recorded here so nobody mistakes it for the working guard.
+ * ## The guard changed this wave, and the one it replaces is EMPTY, not weak
+ *
+ * Until KNOWN_ISSUES 18 closed, the working test was `drawnAfterPrepass` — 'depth
+ * written, no G-buffer coverage'. That was exact **because** of the bug: `scene.js`
+ * cleared the shared depth texture and refilled it with the weapon, so the gun was the
+ * only thing in `pipe.depthTex` and it had no G-buffer coverage. With 18 closed the gun
+ * writes `pipe.viewDepthTex` instead and the shared buffer holds the WORLD BEHIND IT.
+ * Counted off the GPU at `ref_00000` (tools/_dfxprobe.mjs):
+ *
+ *     {depth written AND no coverage}   0 px          <- what the old guard caught
+ *     {coverage AND no depth}           0 px
+ *     {both}                            1 777 000 px
+ *
+ * Zero. The two masks are the identical set. So the old guard did not weaken, it emptied,
+ * and a gun pixel now reads the *velocity of the terrain behind the gun*. At rest that is
+ * still zero, so there is no image change today — but the moment the camera turns, the
+ * background behind the weapon carries the largest velocity in the frame and the gun
+ * would smear with it. That is the exact artefact this section exists to prevent.
+ *
+ * The guard is now `pipe.viewDepthTex`: its own depth attachment, cleared to 1.0, written
+ * by nothing but the weapon. `texture(tViewDepth, uv).r < 1.0` is a mask, not a heuristic,
+ * and it is independent of whether the viewmodel ever reaches the G-buffer.
+ *
+ * `MAT_ID.VIEWMODEL` (8) in `gbuffer.textures[1].b` is retired with it. It was the
+ * contract in docs/ARCHITECTURE.md and `weapons.js` honours it, but `scene.js` renders
+ * the G-buffer over LAYER.OPAQUE + LAYER.DEFAULT only and the weapon is on
+ * LAYER.VIEWMODEL, so it has never once fired. A dedicated attachment is a stronger
+ * signal than a material id; if the viewmodel does reach MRT1 later, this still works.
+ *
+ * `mbLegacyVmGuard` restores the old `drawnAfterPrepass` test for a same-build A/B.
+ *
+ * ## `mbNearSuppressM` was harmless and is now harmful — default 0
+ *
+ * The raw near-distance guard (`zX < uNearSuppress`, 0.35 m) never caught the viewmodel
+ * and never claimed to: the weapon is rasterised through a 0.002-12 m frustum, so a
+ * fragment at 0.3 m decoded with the world's 0.06-12000 m near/far reads as ~9 m. It was
+ * kept 'for a viewmodel one day drawn by the main camera'. What it catches NOW is real
+ * world geometry: measured, **11.4 % of `ref_00000` is world closer than 0.35 m** (the
+ * cobbles and sand at the camera's feet — the world in this scene starts at 0.26 m, not
+ * the 1.6 m the DoF header used to assume). Every one of those pixels takes the
+ * whole-pixel bypass, so on a camera turn the fastest-moving thing on screen — the
+ * foreground — would be the one thing NOT blurred. Exactly inverted. It defaults to 0
+ * (off); the weapon is masked properly now and the guard has no job left.
  *
  * ## Shutter
  *
@@ -105,12 +127,59 @@ import { Pass, fsMaterial, makeRT, FullScreenQuad } from '../RenderPipeline.js';
  *   mbShutter        number  open fraction of the frame, 0.5 = 180 deg
  *   mbSamples        int     taps along the neighbour-max line (default 11, odd)
  *   mbTileSize       int     K, and therefore the maximum blur half-extent in px (20)
- *   mbMinPx          number  velocities below this are treated as zero (0.60)
+ *   mbMinPx          number  HALF-EXTENTS below this are treated as zero (0.60)
  *   mbDepthTol       number  soft depth compare extent, fraction of depth (0.05)
- *   mbNearSuppressM  number  metres; closer than this is assumed viewmodel (0.35)
+ *   mbNearSuppressM  number  metres; closer than this is bypassed. **0 = off**, see above
+ *   mbLegacyVmGuard  bool    restore the pre-KNOWN_ISSUES-18 'drawn after pre-pass'
+ *                            viewmodel test, for a same-build A/B. It is empty now.
  *   mbDebug          int     0 off | 1 per-pixel velocity | 2 neighbour-max | 3 matId
  *   mbTestVelocity   [x,y]   px/frame injected uniformly, for validating the filter on
  *                            a static capture. Diagnostic only; 0 in every real frame.
+ *   mbTestVelX/Y     number  the same thing as two scalars, so it is reachable from
+ *                            `capture.mjs --config`, which only parses `k=v`.
+ *
+ * ## What the filter actually does on a scored still — MEASURED, wave I
+ *
+ * The captures are stills from a static camera, so the requirement is: near-zero at rest,
+ * non-zero on the moving AI. Read back off MRT1 with the tile reduction and the 3x3
+ * neighbour-max re-implemented on the CPU (`tools/_dfxprobe.mjs`), so the gate this pass
+ * applies is evaluated exactly rather than inferred:
+ *
+ *     pose        active tiles   frame blurred   max |vN| (half-extent px)   AI px   AI blurred
+ *     ref_00000     0 / 5184        0.000 %              0.46                   0        -
+ *     ref_00120     0 / 5184        0.000 %              0.41                   0        -
+ *     ref_00450     0 / 5184        0.000 %              0.43                   0        -
+ *     ref_00600     0 / 5184        0.000 %              0.33                   0        -
+ *     ref_00720     0 / 5184        0.000 %              0.59               2 627      0.0 %
+ *     ref_00840    51 / 5184        0.984 %              0.82              57 331     10.6 %
+ *     ref_01500    41 / 5184        0.791 %              0.64              35 427      7.5 %
+ *     ref_01800     0 / 5184        0.000 %              0.43              14 559      0.0 %
+ *     ref_02220     0 / 5184        0.000 %              0.36                   0        -
+ *
+ * At rest the blur is not 'small', it is **exactly zero** on seven of nine poses: every
+ * static surface writes an identically-zero velocity (KNOWN_ISSUES 1 is fixed at the
+ * source, so there is no jitter residue to clear), the tile max of zeros is zero, and the
+ * `lenVN < uMinPx` early-out is therefore uniform across whole tiles. The only non-zero
+ * pixels anywhere in a scored still are the animated AI and the two poses where their
+ * tiles clear the gate.
+ *
+ * And the AI blur is *correctly* marginal rather than broken. A marine walking ~2 m/s at
+ * 20-40 m subtends ~1-3 px of motion per 60 Hz frame; a 180 degree shutter halves that to
+ * a ~0.5-1.5 px total smear. `mbMinPx = 0.60` on the half-extent discards anything under
+ * a 1.2 px total smear, which is why 90 % of AI pixels are skipped. That threshold is
+ * 2.4x more conservative than McGuire's (the paper skips `||vmax|| <= 0.5` px, i.e. a
+ * 0.25 px half-extent). Lowering it would make more of the AI blur, at the cost of
+ * running an 11-tap gather to produce a sub-pixel smear; it was left alone because
+ * nothing in the reference set measures it and 'make the effect bigger' is not a finding.
+ *
+ * ## The depth-aware weighting was inert for four waves and is live now
+ *
+ * By construction, not by inspection: while KNOWN_ISSUES 18 was open every world pixel
+ * read `raw = 1.0`, and `linearZ(1.0)` is exactly `uFar` = 12000. So `softZ` was always
+ * `softZ(12000, 12000) = clamp(1 - 0/(0.05*12000)) = 1.0` in **both** directions — every
+ * tap fully accepted as both foreground and background, which is the same filter with no
+ * depth comparison at all. The relative epsilon that the header argues for so carefully
+ * had nothing to be relative to. It now sees 0.26 m to 3.5 km of real range.
  *
  *
  * ## Cost
@@ -151,6 +220,9 @@ import { Pass, fsMaterial, makeRT, FullScreenQuad } from '../RenderPipeline.js';
 const VELOCITY_LIB = /* glsl */`
 uniform sampler2D tGbuf1;
 uniform sampler2D tDepth;
+uniform sampler2D tViewDepth;   // pipe.viewDepthTex - EXACT weapon mask, 1.0 = not the gun
+uniform float uHasViewDepth;    // 0 if the pipeline did not publish one
+uniform float uLegacyVmGuard;   // 1 = restore the pre-issue-18 test, for a same-build A/B
 uniform vec2  uJitter;
 uniform float uMvLegacy;
 uniform mat4  uInvVPJit;
@@ -159,42 +231,35 @@ uniform mat4  uPrevVP;
 uniform vec2  uTestVel;      // px/frame, diagnostic injection
 uniform vec2  uRes;
 
-const float MATID_VIEWMODEL = 8.0;
-
-/* The contract test: MAT_ID.VIEWMODEL in MRT1.b. Correct, and currently unreachable —
- * see the header. */
-bool isViewmodel(vec4 g1){
-  return g1.a > 0.5 && abs(g1.b * 255.0 - MATID_VIEWMODEL) < 0.5;
-}
-
-/* The test that actually fires today: a pixel that carries a depth value but no G-buffer
- * coverage was drawn AFTER the pre-pass. In this engine exactly one thing is, and it is
- * structural rather than incidental — scene.js step 7 clears depth and draws
- * LAYER.VIEWMODEL from its own camera, and nothing else in the frame runs after that.
- * Sky writes no depth; transparent and effects draw before the clear, so whatever depth
- * they wrote is gone. Cleared depth reads exactly 1.0, so the sky is not caught.
+/* The weapon, exactly. 'pipe.viewDepthTex' is cleared to 1.0 and written by nothing but
+ * the viewmodel draw. This replaces BOTH of the old tests (see the header): the
+ * MAT_ID.VIEWMODEL contract, which has never fired because the weapon is not in the
+ * G-buffer, and 'drawn after the pre-pass', which was exact only while KNOWN_ISSUES 18
+ * was open and now matches 0 pixels at every pose.
  *
- * This becomes vacuous the moment scene.js renders LAYER.VIEWMODEL into the G-buffer
- * (everything with depth would then also have coverage) and isViewmodel takes over. It is
- * a bridge, and it is labelled as one. */
-bool drawnAfterPrepass(vec4 g1, float rawDepth){
-  return g1.a <= 0.5 && rawDepth < 0.999999;
+ * uLegacyVmGuard restores the old test so the two can be compared in one build. */
+bool isViewmodelPx(vec2 uv, vec4 g1, float rawDepth){
+  if (uLegacyVmGuard > 0.5) return g1.a <= 0.5 && rawDepth < 0.999999;
+  return uHasViewDepth > 0.5 && texture(tViewDepth, uv).r < 1.0;
 }
 
 vec2 velocityUV(vec2 uv, out vec4 g1, out float rawDepth){
   g1 = texture(tGbuf1, uv);
   rawDepth = texture(tDepth, uv).r;
+
+  // The viewmodel is rigidly attached to the eye: zero, always. Resolved before anything
+  // else and before uTestVel is added, so an injected camera-turn velocity does not reach
+  // the gun either. Excluded from the tile reduction too, so it cannot dilate a
+  // neighbour's tile.
+  if (isViewmodelPx(uv, g1, rawDepth)) return vec2(0.0);
+
   vec2 v;
   if (g1.a > 0.5) {
-    // The viewmodel is rigidly attached to the eye: zero, always, and it is excluded
-    // from the tile reduction as well so it cannot dilate a neighbour.
-    if (isViewmodel(g1)) return vec2(0.0);
     // KNOWN_ISSUES #1 is FIXED: MRT1.rg is now the difference of two un-jittered clip
     // positions and carries no jitter, so this compensation is dead and only re-applied
     // under the mvLegacyJitter A/B flag - exactly as taa.js does it.
     v = g1.rg + uMvLegacy * 0.5 * uJitter;
   } else {
-    if (drawnAfterPrepass(g1, rawDepth)) return vec2(0.0);        // viewmodel, as above
     // No coverage and no depth: sky. Camera-only velocity, reconstructed at the far
     // plane, which is pure rotational parallax — exactly what a sky should have.
     vec4 wp4 = uInvVPJit * vec4(uv * 2.0 - 1.0, rawDepth * 2.0 - 1.0, 1.0);
@@ -349,10 +414,11 @@ void main(){
 
   float lenVN = min(length(vN), uMaxPx);
   // The viewmodel is rigid in eye space; it must never smear, and it must never be
-  // smeared onto. Three tests, in order of how principled they are and inverse order of
-  // whether they currently fire: the material id (the contract), "drawn after the
-  // pre-pass" (structural, and the one that works today), and a raw near-distance guard.
-  bool vmX = isViewmodel(g1X) || drawnAfterPrepass(g1X, rawX) || (zX < uNearSuppress);
+  // smeared onto. One test now, and it is exact (see the header). uNearSuppress is a
+  // second, blunter guard that defaults to 0 = off, because with real world depth in the
+  // buffer it catches the beach at the camera's feet rather than the gun.
+  bool vmX = isViewmodelPx(vUv, g1X, rawX)
+          || (uNearSuppress > 0.0 && zX < uNearSuppress);
   if (lenVN < uMinPx || vmX) { oCol = vec4(src, 1.0); return; }
 
   vN = vN * (lenVN / max(length(vN), 1e-5));
@@ -376,7 +442,7 @@ void main(){
     vec4 g1Y; float rawY;
     vec2 vYuv = velocityUV(uvY, g1Y, rawY);
     // The gun does not paint the world, and the world does not paint the gun.
-    if (isViewmodel(g1Y) || drawnAfterPrepass(g1Y, rawY)) continue;
+    if (isViewmodelPx(uvY, g1Y, rawY)) continue;
 
     float zY = linearZ(rawY);
     float lenVY = min(length(vYuv * uRes * uHalfShutter), uMaxPx);
@@ -405,9 +471,15 @@ const DEFAULTS = {
   mbTileSize: 20,
   mbMinPx: 0.60,
   mbDepthTol: 0.05,
-  mbNearSuppressM: 0.35,
+  // 0, not 0.35: with real world depth in the buffer this caught 11.4 % of ref_00000 —
+  // the cobbles at the camera's feet — and bypassed motion blur on all of it. The weapon
+  // is masked by pipe.viewDepthTex now, so this guard has nothing left to do. See header.
+  mbNearSuppressM: 0.0,
+  mbLegacyVmGuard: false,
   mbDebug: 0,
   mbTestVelocity: [0, 0],
+  mbTestVelX: 0,
+  mbTestVelY: 0,
 };
 
 export function create(opts = {}) {
@@ -424,6 +496,9 @@ export function create(opts = {}) {
   const velUniforms = () => ({
     tGbuf1: { value: null },
     tDepth: { value: null },
+    tViewDepth: { value: null },
+    uHasViewDepth: { value: 0 },
+    uLegacyVmGuard: { value: 0 },
     uJitter: { value: new THREE.Vector2() },
     uMvLegacy: { value: 0 },
     uInvVPJit: { value: new THREE.Matrix4() },
@@ -499,7 +574,13 @@ export function create(opts = {}) {
     const debug = +(c.mbDebug ?? cfg.mbDebug) || 0;
     const enabled = (c.mbEnabled ?? cfg.mbEnabled) !== false;
     const shutter = Math.max(0, Math.min(1, c.mbShutter ?? cfg.mbShutter));
-    const tv = c.mbTestVelocity || cfg.mbTestVelocity || [0, 0];
+    // `capture.mjs --config` can only express `k=v`, so the array has scalar twins. A
+    // string "x,y" is accepted too - the config parser hands strings through unchanged.
+    let tv = c.mbTestVelocity || cfg.mbTestVelocity || [0, 0];
+    if (typeof tv === 'string') tv = tv.split(',').map(Number);
+    if (!Array.isArray(tv)) tv = [0, 0];
+    tv = [(+tv[0] || 0) + (+(c.mbTestVelX ?? cfg.mbTestVelX) || 0),
+      (+tv[1] || 0) + (+(c.mbTestVelY ?? cfg.mbTestVelY) || 0)];
 
     if (!enabled && !debug) { pipe.blit(pipe.read.texture, out); return; }
 
@@ -508,6 +589,12 @@ export function create(opts = {}) {
     const pushVel = (u) => {
       u.tGbuf1.value = pipe.gbuffer ? pipe.gbuffer.textures[1] : null;
       u.tDepth.value = pipe.depthTex;
+      // An unbound sampler reads as (0,0,0,1) in three, i.e. r = 0 < 1.0, which would
+      // classify the WHOLE FRAME as viewmodel and switch the pass off. The flag is what
+      // makes that impossible.
+      u.tViewDepth.value = pipe.viewDepthTex || pipe.depthTex;
+      u.uHasViewDepth.value = pipe.viewDepthTex ? 1 : 0;
+      u.uLegacyVmGuard.value = (c.mbLegacyVmGuard ?? cfg.mbLegacyVmGuard) ? 1 : 0;
       u.uJitter.value.copy(pipe.jitter);
       u.uMvLegacy.value = c.mvLegacyJitter ? 1 : 0;
       u.uInvVPJit.value.copy(invVPJit);

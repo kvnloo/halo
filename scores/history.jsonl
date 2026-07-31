@@ -7,3 +7,4 @@
 {"tag":"waveG","n":9,"score":30.3,"axes":{"structure":4.43,"grade":0,"perceptual":9.02,"detail":77.52,"geometry":90.04,"spectrum":85.93},"perf":{"fps":206,"ms":4.85,"drawCalls":670,"tris":34929413}}
 {"tag":"waveG-settle96","n":9,"score":29.78,"axes":{"structure":4.39,"grade":0,"perceptual":8.23,"detail":76.24,"geometry":89.94,"spectrum":84.15},"perf":{"fps":64,"ms":15.53,"drawCalls":672,"tris":34931413}}
 {"tag":"waveG-mvfix","n":9,"score":30.3,"axes":{"structure":4.43,"grade":0,"perceptual":9.02,"detail":77.51,"geometry":90.04,"spectrum":85.93},"perf":{"fps":177,"ms":5.65,"drawCalls":670,"tris":34929413}}
+{"tag":"waveH","n":9,"score":29.44,"axes":{"structure":3.42,"grade":1.4,"perceptual":7.51,"detail":76.86,"geometry":80.81,"spectrum":94.15},"perf":{"fps":187,"ms":5.36,"drawCalls":670,"tris":35121485}}

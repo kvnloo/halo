@@ -734,6 +734,16 @@ void main(){
     vec4 cl = texture(tCloudBuf, vUv);
     c = cl.rgb + c * cl.a;
   }
+  /* SANITISE BEFORE THE CHAIN IS BUILT. A single non-finite or wildly out-of-range texel
+   * here is averaged into every mip level above it, and the water samples those levels
+   * wherever the surface is rough — so one bad pixel becomes a black PATCH in the sea.
+   * Measured (reports/ocean.md 3): with the roughness cone left unclamped, 0.81 % of the
+   * water band came back pure black in hard jagged patches beside the sea stacks, and it
+   * was worth +10 of water lum_std and +0.04 of local_contrast that a reader would have
+   * scored as structure. NaN is not ordered, so clamp() cannot be trusted to remove it. */
+  bvec3 bad = bvec3(isnan(c.r) || isinf(c.r), isnan(c.g) || isinf(c.g), isnan(c.b) || isinf(c.b));
+  c = mix(c, vec3(0.0), vec3(bad));
+  c = clamp(c, vec3(0.0), vec3(64.0));
   oCol = vec4(c, 1.0);
 }
 `;
@@ -846,7 +856,10 @@ uniform sampler2D tRefl;     // half-res, mipped, cloud-composited copy of the f
 uniform float uReflMaxSlope; // slope beyond which a facet adds no more reflected excursion
 uniform float uUseSSR;       // below-horizon screen-space march on/off
 uniform float uReflBlur;     // scale on the roughness-cone mip selection
+uniform float uReflMaxLod;   // hard ceiling on the selected prefilter mip (guard, not a look knob)
 uniform float uRefrScale;    // artistic multiplier on the PHYSICAL refraction offset
+uniform float uDbgMode;      // diagnostic, see the DIAGNOSTIC block at the end of main()
+uniform float uDepthColumn;  // 1 = optical column from the depth buffer (measured worse, see below)
 
 uniform vec3 uExtinction;
 uniform vec3 uScatterCol;
@@ -1153,25 +1166,66 @@ void main(){
   float pathView;
   vec3 vd = (P - uCamPos) / max(viewDist, 1e-4);
   float cosViewW = oc_cosInWater(max(-vd.y, 0.0));
-  pathView = column / cosViewW;                     // <= 1.51 * column, no clamp needed
-  if (bgIsSky){
+  /* OFF BY DEFAULT (--config oceanDepthColumn=1), and this is a negative result worth
+   * keeping rather than a knob.
+   *
+   * 'column' is analytic: P.y - oc_seabedY(vFlat), the depth of water directly under
+   * this bit of surface, from a 768x768 resample of terrain.height() over 680 x 390 m
+   * (0.89 x 0.51 m cells). The depth buffer holds the true bed at full resolution and
+   * the shader already has it in bgPos, so taking the optical column from there looked
+   * free and strictly better - it would carry every cobble and rock the bathymetry grid
+   * smooths away. Measured with oceanDbg=6, the two disagree by more than 0.20 m over
+   * essentially the whole sea (61 % the real bed deeper, 39 % shallower, 0.07 % agreeing).
+   *
+   * IT IS THE WRONG NUMBER, and the reason is the tap, not the buffer. bgPos is read
+   * along the UNREFRACTED camera ray - 'roff' below corrects only the wave-tilt part of
+   * the offset, not the base air->water bend, which is what every real-time water shader
+   * does. At grazing incidence the camera ray travels ~11 m horizontally per metre of
+   * drop where the refracted ray travels 1.13 m, so the tapped bed is up to 10x further
+   * out and therefore much deeper than the column the Snell path is entitled to. The
+   * bottom term then dies and the water falls back to deep colour plus reflection.
+   *
+   * Isolated at shot_water_edge (the pose that puts the camera in the shallows), one
+   * window, water ROI, with uReflBlur held fixed in both arms:
+   *
+   *              analytic   depth-derived   SIGNATURE
+   *   sat_mean      57.42          44.97        69.72
+   *   lab_b        -7.643         -6.539       -7.875
+   *   lum_std       14.90          15.12        40.96
+   *
+   * 12.4 points of saturation and 1.1 of lab_b, both away from the signature, to buy
+   * +0.2 lum_std. At ref_01800 it was a small win (+1.05 sat); the pose that actually
+   * looks at shallow water says no.
+   *
+   * To make it work you would have to reconstruct the bed at the point the REFRACTED
+   * ray lands on, not the point the camera ray lands on - one Newton step against the
+   * bathymetry, or a short march. Until then the analytic column is the one that is
+   * consistent with the Snell path, because the refracted ray can only travel 1.13 x
+   * its depth horizontally and therefore does hit the bed nearly straight below. */
+  float columnOpt = column;
+  if (!bgIsSky && uDepthColumn > 0.5) columnOpt = clamp(P.y - bgPos.y, 0.0, 60.0);
+  pathView = columnOpt / cosViewW;                  // <= 1.51 * column, no clamp needed
+  if (bgIsSky || (uDbgMode > 1.5 && uDbgMode < 2.5)){
     // No seabed in the depth buffer (terrain has not landed, or we are looking past
     // the bathymetry rectangle). Synthesise one so the water still reads as water.
     bgPos = P + vd * min(pathView, 55.0);
     refr = oc_fallbackBottom(bgPos.xz, column) * Edn * 0.3183098;   // albedo -> radiance
   }
-  float sunPath = column / oc_cosInWater(clamp(uSunDir.y, 0.02, 1.0));
+  float sunPath = columnOpt / oc_cosInWater(clamp(uSunDir.y, 0.02, 1.0));
   /* Diffuse sky downwelling arrives from the whole hemisphere; averaged over the
    * refracted hemisphere its mean slant is ~1.19 * depth, near enough to 1.25. */
-  float skyPath = column * 1.25;
+  float skyPath = columnOpt * 1.25;
 
   vec3 Tview = exp(-uExtinction * pathView);
   vec3 Tdown = mix(exp(-uExtinction * sunPath), exp(-uExtinction * skyPath), 0.40);
 
   /* caustics ride on the seabed, so they belong on the refracted sample */
-  if (uCausticAmount > 0.001 && column < 9.0){
-    vec3 cst = caustics(bgPos.xz, uTime, column, rough);
-    refr *= mix(vec3(1.0), cst, smoothstep(9.0, 0.6, column) * clamp(uSunDir.y * 1.6, 0.0, 1.0));
+  if (uCausticAmount > 0.001 && columnOpt < 9.0){
+    // columnOpt, not column: every argument here is a property of the BED POINT bgPos —
+    // the refracted-sun offset from it, the lens focal length above it, the defocus with
+    // depth — and the depth above bgPos is columnOpt by construction.
+    vec3 cst = caustics(bgPos.xz, uTime, columnOpt, rough);
+    refr *= mix(vec3(1.0), cst, smoothstep(9.0, 0.6, columnOpt) * clamp(uSunDir.y * 1.6, 0.0, 1.0));
   }
 
   /* Optically-shallow-water form (Lyzenga 1978 / research 3.1, 3.4):
@@ -1252,7 +1306,7 @@ void main(){
          * radians; pxPerRad converts that to full-res pixels, and the prefiltered
          * copy is half res, so the texel radius is rough*pxPerRad. */
         float pxPerRad = projectionMatrix[1][1] * 0.5 / max(uInvRes.y, 1e-6);
-        float lod = log2(max(1.0, rough * pxPerRad * uReflBlur));
+        float lod = clamp(log2(max(1.0, rough * pxPerRad * uReflBlur)), 0.0, uReflMaxLod);
         refl = mix(refl, textureLod(tRefl, uc, lod).rgb, on);
       }
     }
@@ -1372,7 +1426,10 @@ void main(){
   sss *= smoothstep(0.0, 1.6, h);
 
   /* ---- compose the water -------------------------------------------------------- */
-  vec3 col = mix(body, refl, clamp(F, 0.0, 1.0)) + spec + sss;
+  float Fmix = clamp(F, 0.0, 1.0);
+  if (uDbgMode > 2.5 && uDbgMode < 3.5) Fmix = 0.0;      // body only
+  if (uDbgMode > 3.5 && uDbgMode < 4.5) Fmix = 1.0;      // mirror only
+  vec3 col = mix(body, refl, Fmix) + spec + sss;
 
   /* ---- foam --------------------------------------------------------------------
    * The simulation supplies the envelope; the structure is procedural. Three layers:
@@ -1449,6 +1506,33 @@ void main(){
   col = mix(col, wetCol, sheet * 0.75);
 
   col = wmAerial(col, P, uCamPos);
+
+  /* ---- DIAGNOSTIC ---------------------------------------------------------------
+   * '--config oceanDbg=N'. These exist because every question this shader raises is of
+   * the form "is that term wrong, or is that term not running at all?", and the only
+   * honest way to answer it is to switch one term off and re-measure.
+   *
+   *   1  seabed SOURCE map. MAGENTA = bgIsSky, i.e. tDepth held nothing behind this
+   *      water pixel and the refracted background is the SYNTHETIC oc_fallbackBottom();
+   *      GREEN = real opaque geometry, read out of tOpaque. Count the two and you have
+   *      the fraction of the sea that is not refracting the actual seabed.
+   *   2  force the synthetic seabed everywhere (isolates "the bottom is wrong" from
+   *      "the bottom is not what we are looking at").
+   *   3  body only   - Fresnel mirror forced off.
+   *   4  mirror only - Fresnel forced to 1.
+   *   5  Fresnel F itself, as greyscale.
+   *   6  columnOpt (depth-buffer) vs column (analytic bathymetry): GREEN agree within
+   *      0.20 m, RED the real bed is deeper than the bathymetry says, BLUE shallower,
+   *      YELLOW no geometry behind this pixel at all.
+   * See reports/ocean.md 1 and 3. */
+  if (uDbgMode > 0.5 && uDbgMode < 1.5) col = bgIsSky ? vec3(1.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
+  if (uDbgMode > 4.5 && uDbgMode < 5.5) col = vec3(clamp(F, 0.0, 1.0));
+  if (uDbgMode > 5.5 && uDbgMode < 6.5){
+    float dcol = columnOpt - column;
+    col = bgIsSky ? vec3(1.0, 1.0, 0.0)
+        : (dcol >  0.20 ? vec3(1.0, 0.0, 0.0)
+        : (dcol < -0.20 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0)));
+  }
 
   /* ---- coverage: soft edge instead of a polygon silhouette ---------------------
    * The waterline is where the DISPLACED surface crosses the bed, and P.y is a vertex
@@ -1884,8 +1968,43 @@ export function create(opts = {}) {
         uReflMaxSlope: { value: 0.22 },
         // OFF by default — measured broadband hash, see the note above the march.
         uUseSSR: { value: 0 },
-        uReflBlur: { value: 1.0 },
+        /* Scale on the roughness-cone mip selection. The analytic form
+         * lod = log2(rough * pxPerRad * uReflBlur) fixes the SHAPE of the level
+         * selection; it does not fix this constant, because "the lobe's rms angular
+         * width" and "a trilinear mip fetch's support" differ by a factor of two in
+         * each direction depending on which convention you pick. So it is measured.
+         *
+         * Swept at ref_01800, one window, AFTER the prefilter sanitisation above (the
+         * pre-sanitisation sweep was confounded: at 1.0 the roughness cone reached the
+         * poisoned mip levels and 0.81 % of the water band came back pure BLACK, which
+         * inflated lum_std by 10 and local_contrast by 0.04 of pure artefact).
+         *
+         *   uReflBlur       1.0     0.5    0.25     0.1   --skip ocean   kf_01800   SIG
+         *   lum_std       14.07   14.85   15.93   16.89       17.61       45.41   40.96
+         *   local_con     .0403   .0433   .0471   .0504       .0463       .1497    .142
+         *   lap_var       232.3   268.2   328.4   405.5       401.2        1376   676.6
+         *   edge_dens     .0373   .0436   .0534   .0707        .098       .1968    .109
+         *   sat_mean      40.52   41.54   41.57   42.00       58.32       60.62   69.72
+         *
+         * The whole triple (lap_var, local_contrast, lum_std) rises TOGETHER and lap_var
+         * stays well under the signature at every value, which is the signature of
+         * structure rather than of hash — contrast the SSR march below, which bought
+         * lap_var 408 -> 4802 for +0.002 local_contrast. The inherited 1.0 was blurring
+         * the reflected sky toward its own mean, and that is what made the water flat.
+         *
+         * 0.25 is a 4x reduction and lands the module roughly where it stops DESTROYING
+         * the region's detail (lap_var 328 against 401 for the empty scene, versus 232
+         * at 1.0). Lower still measures better on every static metric at both ref_01800
+         * and ref_00000 with no far-field aliasing penalty; I stopped here because a
+         * two-capture temporal probe 0.05 s apart put the lap_var of the frame-to-frame
+         * DELTA at 175 (blur 1.0) against 300 (blur 0.02), i.e. the change becomes
+         * high-frequency, and below ~0.1 the prefilter stops being a prefilter at all.
+         * Move it with data, not with taste. */
+        uReflBlur: { value: 0.25 },
+        uReflMaxLod: { value: 8.0 },
         uRefrScale: { value: 3.0 },
+        uDbgMode: { value: 0.0 },
+        uDepthColumn: { value: 0.0 },
 
         /* Pope & Fry (1997) pure-water absorption band-averaged over sRGB primaries is
          * (0.39, 0.045, 0.010) m^-1; a real lagoon carries CDOM and resuspended
@@ -1979,7 +2098,10 @@ export function create(opts = {}) {
         if (k === 'oceanCaustics') uniforms.uCausticAmount.value = v;
         if (k === 'oceanDetail') uniforms.uDetailAmount.value = v;
         if (k === 'oceanReflBlur') uniforms.uReflBlur.value = v;
+        if (k === 'oceanReflMaxLod') uniforms.uReflMaxLod.value = v;
         if (k === 'oceanRefrScale') uniforms.uRefrScale.value = v;
+        if (k === 'oceanDbg') uniforms.uDbgMode.value = +v;
+        if (k === 'oceanDepthColumn') uniforms.uDepthColumn.value = v ? 1 : 0;
         if (k === 'oceanReflSlope') uniforms.uReflMaxSlope.value = v;
         if (k === 'oceanSSR') uniforms.uUseSSR.value = v ? 1 : 0;
         if (k === 'oceanExtinction') uniforms.uExtinction.value.fromArray(v);

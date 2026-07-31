@@ -2,13 +2,13 @@
 /**
  * Screen-space subsystem probe.
  *
- * Reads `ssao.aoTexture`, `ssr.ssrTexture` and the opaque-depth snapshot straight off the
+ * Reads `ssao.aoTexture`, `ssr.ssrTexture` and `pipe.depthTex` straight off the
  * GPU, so every number below is independent of tonemap / grade / fog — all of which other
  * agents are editing while this runs, and all of which sit between the AO buffer and any
  * pixel a `metrics.py` run could see.
  *
  * It answers four questions that a PNG cannot:
- *   1. Does the opaque depth snapshot actually contain the world?  (`depth.geoFrac`)
+ *   1. Does the world depth buffer actually contain the world?    (`depth.geoFrac`)
  *   2. Is the AO buffer non-trivial?                               (`ao.std`, `ao.p01`)
  *   3. Where is the AO — near field or far field?                  (`ao.byDepth`)
  *   4. Is SSR finding anything?                                    (`ssr.confMean`, `hitFrac`)
@@ -79,13 +79,19 @@ const out = await page.evaluate(async (pose, settle, t, cfgStr) => {
   H.setSize(innerWidth, innerHeight);
   H.setPose(pose);
   H.setTime(Number(t));
+  // setConfig is (key, value), NOT (object). Passing an object silently sets
+  // config['[object Object]'] = undefined and every --config run measures the shipped
+  // build (reports/depth.md 7 found this). Echo the applied pairs back so it cannot
+  // happen again unnoticed.
+  const applied = {};
   if (cfgStr) {
-    const o = {};
     for (const kv of cfgStr.split(',')) {
       const [k, v] = kv.split('=');
-      o[k.trim()] = isNaN(Number(v)) ? v : Number(v);
+      const key = k.trim();
+      const val = isNaN(Number(v)) ? v : Number(v);
+      H.setConfig(key, val);
+      applied[key] = val;
     }
-    H.setConfig(o);
   }
   H.advance(settle);
 
@@ -120,7 +126,34 @@ const out = await page.evaluate(async (pose, settle, t, cfgStr) => {
     return { buf, ok, get: type === 'half' ? h2f : ((x) => x) };
   };
 
-  const res = { missingPasses: globalThis.__HALO_MISSING_PASSES__ || [], W: pipe.w, H: pipe.h };
+  /** `pipe.depthTex` is a DepthTexture and cannot be a colour attachment, so it cannot be
+   *  readPixels'd directly (reports/depth.md 4). Resolve it through an RGBA32F copy first.
+   *  Same shape as `read()` so every consumer below is unchanged. */
+  const RP = await import('/src/render/RenderPipeline.js');
+  const THREE = H.THREE;
+  let _resRT = null, _resMat = null, _resQuad = null;
+  const readDepth = () => {
+    const w = pipe.w, h = pipe.h;
+    if (!_resRT) {
+      _resRT = RP.makeRT(w, h, {
+        type: THREE.FloatType, format: THREE.RGBAFormat,
+        minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+      });
+      _resMat = RP.fsMaterial(
+        'in vec2 vUv; uniform sampler2D tSrc; out vec4 oCol;\n'
+        + 'void main(){ oCol = vec4(texture(tSrc, vUv).r, 0.0, 0.0, 1.0); }',
+        { tSrc: { value: null } });
+      _resMat.blending = THREE.NoBlending;
+      _resQuad = new RP.FullScreenQuad(_resMat);
+    }
+    _resMat.uniforms.tSrc.value = pipe.depthTex;
+    r.setRenderTarget(_resRT);
+    _resQuad.render(r);
+    r.setRenderTarget(null);
+    return read(_resRT.texture, w, h, 'float');
+  };
+
+  const res = { missingPasses: globalThis.__HALO_MISSING_PASSES__ || [], W: pipe.w, H: pipe.h, appliedConfig: applied };
   {
     const csm = eng.ctx.get('lighting')?.csm;
     res.csm = {
@@ -132,9 +165,9 @@ const out = await page.evaluate(async (pose, settle, t, cfgStr) => {
     if (ap && ap._applyMat) res.csm.uNumCasc = ap._applyMat.uniforms.uNumCasc.value;
   }
 
-  // ---- 1. opaque depth snapshot ------------------------------------------------
-  if (pipe.opaqueDepthTex) {
-    const d = read(pipe.opaqueDepthTex, pipe.w, pipe.h, 'float');
+  // ---- 1. world depth (pipe.depthTex, canonical since KNOWN_ISSUES 18 closed) -----
+  {
+    const d = readDepth();
     let geo = 0, n = pipe.w * pipe.h, sum = 0, zero = 0;
     const hist = new Array(12).fill(0);
     for (let i = 0; i < n; i++) {
@@ -150,7 +183,7 @@ const out = await page.evaluate(async (pose, settle, t, cfgStr) => {
       near: cam0.near, far: cam0.far, reversed: !!r.reversedDepth,
       hist12: hist.map((h2) => +(h2 / n).toFixed(4)),
     };
-  } else res.depth = { present: false };
+  }
 
   // ---- 1b. DOES THE DEPTH BUFFER CONTAIN ANY RELIEF AT AO SCALE? -----------------
   //
@@ -160,8 +193,8 @@ const out = await page.evaluate(async (pose, settle, t, cfgStr) => {
   // produce a contact shadow. So measure the signal GTAO actually integrates: the
   // out-of-plane deviation |dot(P_neighbour − P_centre, N_centre)| in metres, at several
   // pixel separations, over foreground pixels only.
-  if (pipe.opaqueDepthTex) {
-    const d = read(pipe.opaqueDepthTex, pipe.w, pipe.h, 'float');
+  {
+    const d = readDepth();
     const cam = eng.ctx.camera;
     const pe = pipe.unjitteredProj.elements;
     const tanX = 1 / Math.abs(pe[0]), tanY = 1 / Math.abs(pe[5]);
@@ -275,6 +308,39 @@ const out = await page.evaluate(async (pose, settle, t, cfgStr) => {
       })),
     };
   } else res.ao = { present: false };
+
+  // ---- 2b. the direct/indirect split the AO composite weights itself by -----------
+  // fi = I/(I+D) is the whole reason AO does or does not reach the image. If any term of
+  // I is missing, AO is silently under-applied everywhere. Report every term against
+  // `lighting.js` and `env.js` so the ssao pass's estimate can be checked, not trusted.
+  {
+    const time = eng.ctx.get('time');
+    const envm = eng.ctx.get('env');
+    const L = (c2) => 0.2126 * c2.r + 0.7152 * c2.g + 0.0722 * c2.b;
+    const cfg2 = eng.ctx.config || {};
+    if (time) {
+      const alt = Math.max(0.02, time.sunDir.y);
+      const sunLum = time.state.sunIntensity * (cfg2.sunScale ?? 1) * L(time.sunColor);
+      const skyLum = 1.35 * Math.pow(alt, 0.35) * (cfg2.skyFill ?? 1) * L(time.skyColor);
+      const bounceLum = 0.42 * alt * (cfg2.bounceFill ?? 1) * 0.86;
+      const envUp = envm && envm.groundIrradiance ? envm.groundIrradiance : 0;
+      // A flat, up-facing, unshadowed piece of beach: N = +Y.
+      const D = sunLum * Math.max(0, time.sunDir.y);
+      const Iold = skyLum * 1.0;
+      const Inew = Iold + envUp;
+      res.lighting = {
+        sunAlt: +alt.toFixed(4), sunLum: +sunLum.toFixed(4), skyLum: +skyLum.toFixed(4),
+        bounceLum: +bounceLum.toFixed(4), envGroundIrradiance: +envUp.toFixed(4),
+        envIntensity: envm ? envm.intensity : null,
+        sceneEnvironment: !!eng.ctx.scene.environment,
+        flatSunlitSand: {
+          direct: +D.toFixed(4),
+          fi_analyticOnly: +(Iold / Math.max(Iold + D, 1e-4)).toFixed(4),
+          fi_withEnvIBL: +(Inew / Math.max(Inew + D, 1e-4)).toFixed(4),
+        },
+      };
+    }
+  }
 
   // ---- 3. SSR --------------------------------------------------------------------
   const ssr = pipeMod.pass ? pipeMod.pass('ssr') : null;

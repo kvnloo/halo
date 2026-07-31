@@ -362,7 +362,7 @@ function makeVegMaterial(ctx, U, o) {
   const vegHook = (shader) => {
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>',
-        `#include <common>\n${WIND_GLSL}\n${PLACE_GLSL}\nuniform float uGBufPass;\nuniform mat4 uPrevViewProj;\nvarying vec4 vVegCur;\nvarying vec4 vVegPrev;\n`)
+        `#include <common>\n${WIND_GLSL}\n${PLACE_GLSL}\nuniform float uGBufPass;\nuniform mat4 uCurrViewProj;\nuniform mat4 uPrevViewProj;\nvarying vec4 vVegCur;\nvarying vec4 vVegPrev;\n`)
       .replace('#include <beginnormal_vertex>', `
         float vegAlive;
         float vegW = vegLod(vegAlive);
@@ -381,7 +381,16 @@ function makeVegMaterial(ctx, U, o) {
       `)
       .replace('#include <project_vertex>', `
         #include <project_vertex>
-        vVegCur = gl_Position;
+        // KNOWN_ISSUES 1 follow-up 1. gl_Position is built from the JITTERED
+        // projectionMatrix, but uPrevViewProj is un-jittered, so this varying used to
+        // pair a jittered current with an un-jittered previous - the exact mismatch
+        // scene.js was fixed for. Measured before this line changed, tools/_mvprobe.mjs
+        // at ref_01500 reported FOLIAGE (matId 5) meanY +1.570e-4 against a
+        // predicted-buggy -0.5*jitter.y of +1.5432e-4: the offset, in isolation, to 1.8%.
+        // "transformed" is the world position here (vegPlace returns world space and the
+        // group carries no transform), which is why uPrevViewProj can already consume it
+        // directly. Same convention as terrain.js; rasterisation stays jittered.
+        vVegCur = uCurrViewProj * vec4(transformed, 1.0);
         vec3 vegPrevW = transformed;
         if (uGBufPass > 0.5) {
           vec3 dummyN;
@@ -1495,6 +1504,7 @@ export function create(opts = {}) {
         uCamPos: { value: new THREE.Vector3() },
         uDensity: { value: 1.0 },
         uGBufPass: { value: 0 },
+        uCurrViewProj: { value: new THREE.Matrix4() },
         uPrevViewProj: { value: new THREE.Matrix4() },
         uSunDirV: { value: new THREE.Vector3(0, 1, 0) },
         uSunRad: { value: new THREE.Color(1, 1, 1) },
@@ -2166,11 +2176,14 @@ export function create(opts = {}) {
       U.uCamPos.value.copy(ctx.camera.position);
       U.uDensity.value = ctx.config.vegDensity ?? 1.0;
 
-      // Same convention scene.js uses: current = the jittered clip position the vertex
-      // shader already computed, previous = the un-jittered previous view-projection.
-      // taa.js compensates for exactly that pairing.
+      // Both matrices are UN-jittered, matching scene.js and terrain.js after the
+      // KNOWN_ISSUES 1 fix: velocity is the difference of two un-jittered clip positions.
+      // `prerender` runs before RenderPipeline._applyJitter, and the pipeline restores
+      // `camera.projectionMatrix` to `unjitteredProj` after every render, so the matrix
+      // read here is the un-jittered one on every frame including the first.
       U.uPrevViewProj.value.copy(prevVP);
       prevVP.multiplyMatrices(ctx.camera.projectionMatrix, ctx.camera.matrixWorldInverse);
+      U.uCurrViewProj.value.copy(prevVP);
     },
 
     resize() {},

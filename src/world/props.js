@@ -760,20 +760,59 @@ export function create(opts = {}) {
       };
       counts.terrainReal = ground(0, 10).real;
 
-      /* ---- rocks proximity ------------------------------------------------ */
+      /* ---- rocks proximity ------------------------------------------------
+       *
+       * THIS WAS THE BUG THAT MADE THE WHOLE MODULE INVISIBLE.
+       *
+       * `rocks.landmarks` is not a list of discrete obstacles. Alongside the six sea
+       * stacks (r 12-19) it publishes two AGGREGATES:
+       *
+       *     cliff_main    centre (20, 62)      radius  190
+       *     islet_field   centre (0, -1100)    radius 1400
+       *
+       * `nearRock()` treats `radius * 0.82` as a hard rejection disc, so `cliff_main`
+       * alone excludes a 156 m circle centred 59 m from the spawn and `islet_field`
+       * excludes a 1148 m circle that reaches to z = +48. Between them they cover the
+       * entire playable beach: with `rocks` loaded, **every scatter point in this module
+       * was rejected and props drew nothing at all**.
+       *
+       * Measured, `ref_00450`, props coverage via `propsDbg=1`:
+       *
+       *     --only ...,terrain,props,pipeline            12.05% of frame, 23.06% of lower 45%
+       *     --only ...,terrain,player,props,pipeline     12.05%          23.06%   (player is innocent)
+       *     --only ...,terrain,rocks,props,pipeline       0.91%           0.13%
+       *     full scene                                    0.00%  - byte-identical to --skip props
+       *
+       * A full-scene capture with props and one with `--skip props` are the same file,
+       * `cmp`-clean. That is critic item 7 in one line, and it is not a placement
+       * problem: nothing was ever placed. Any earlier judgement of this module's
+       * *content* was made on frames that contained none of it.
+       *
+       * The fix is here rather than in rocks.js: an exclusion disc only makes sense for
+       * a landmark that is actually a discrete solid. Anything larger than the beach is
+       * a region marker, and the cliff already has its own apron term (`nearCliff`).
+       */
+      const LM_MAX_R = 45;
       const landmarks = [];
+      const lmSkipped = [];
       try {
         const lm = rocks?.landmarks;
         if (lm && typeof lm.forEach === 'function') {
-          lm.forEach((v) => {
+          lm.forEach((v, k) => {
             const c = v?.center;
             if (c && Number.isFinite(c.x) && Number.isFinite(c.z) && Number.isFinite(v.radius)) {
+              if (v.radius > LM_MAX_R) { lmSkipped.push(`${k}(r=${v.radius})`); return; }
               landmarks.push({ x: c.x, z: c.z, r: v.radius });
             }
           });
         }
       } catch (err) { /* rocks half-built */ }
       counts.landmarksFromRocks = landmarks.length;
+      counts.landmarksSkippedAsRegions = lmSkipped.length;
+      if (lmSkipped.length) {
+        console.info('[props] ignoring region-scale rocks landmarks as exclusion discs: '
+          + lmSkipped.join(', ') + ' — see the note above nearRock()');
+      }
       if (!landmarks.length) {
         // docs/WORLD.md landmark table, so talus still lands in the right places
         // when `rocks` has not published yet.
@@ -954,12 +993,12 @@ export function create(opts = {}) {
           // sand multiplier cooler as well as darker.
           vec3 col = mix(dry, dry * vec3(0.30, 0.33, 0.40), wet);
           // damp sand and organic film trapped at the bedding line
-          col *= mix(0.55, 1.0, damp) * mix(0.35, 1.0, contact);
+          col *= mix(0.62, 1.0, damp) * mix(0.50, 1.0, contact);
           diffuseColor.rgb = col * vPropTint;
 
           // Contact occlusion — indirect only, so the sunlit crown keeps its value while
           // the bedding line goes black. This is what buys shadow_frac / local_contrast.
-          gPropAO = mix(0.03, 1.0, contact);
+          gPropAO = mix(0.10, 1.0, contact);
 
           // Wet stone is the specular event in a beach frame; dry stone is not matte
           // either. Old floor was 0.76-1.00 dry, which produced highlight_frac 0.0000.
@@ -998,7 +1037,7 @@ export function create(opts = {}) {
           if (nr < 0) return 0;
           return Math.min(1, 0.62 * (0.25 + bed(x, z)) + nr * 0.75 + nearCliff(x, z) * 0.55);
         };
-        const pts = scatterPoints2(rnd, 200000, bound, (x, z, g) => {
+        const pts = scatterPoints2(rnd, 115000, bound, (x, z, g) => {
           if (g.y < -2.6 || g.y > 11) return 0;
           if (g.slope > 0.62) return 0;
           const nr = nearRock(x, z);

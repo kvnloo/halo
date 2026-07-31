@@ -5,7 +5,14 @@ deliberately, not opportunistically.
 
 ---
 
-## 1. Motion vectors are computed against mismatched projections — FIXED
+## 1. Motion vectors are computed against mismatched projections — FIXED, ALL FOLLOW-UPS CLOSED
+
+> **Wave G (2026-07-30):** follow-ups 1 and 2 below are now **DONE** — see the two
+> paragraphs marked FIXED and `reports/integrationG.md` §7 for the before/after
+> `_mvprobe` tables. All three velocity producers (`scene.js`, `terrain.js`,
+> `vegetation.js`) now write the difference of two un-jittered clip positions, and all
+> three consumers (`taa.js`, `motionBlur.js`, and the G-buffer itself) flip together
+> under `ctx.config.mvLegacyJitter`. Determinism re-verified bit-exact afterwards.
 
 **Fixed** in `src/render/passes/scene.js` + `src/render/passes/taa.js`, one change, both
 files. `uCurrViewProj` is now `pipe.currViewProj` (un-jittered, matching `uPrevViewProj`)
@@ -20,11 +27,17 @@ Three things the original diagnosis below got wrong, all measured:
    their own G-buffer materials (they opt out of `scene.overrideMaterial` for vertex
    displacement). `terrain.js` was already *correct* — its `prerender` runs before
    `_applyJitter`, so it reads an un-jittered `projectionMatrix` despite a comment
-   claiming it mirrors scene.js. **`vegetation.js` is still wrong** and needs the same
-   one-line change (`vVegCur` comes from the jittered `gl_Position`).
-2. **`motionBlur.js:189` applies the same `+ 0.5 * uJitter` compensation** and now
-   over-corrects by ≤0.16 px of half-extent — provably below its own `mbMinPx = 0.60`
-   cutoff, so it is invisible, but the line should go.
+   claiming it mirrors scene.js. ~~**`vegetation.js` is still wrong**~~ — **FIXED in
+   Wave G.** `vVegCur` now comes from a `uCurrViewProj` uniform set in `prerender`,
+   mirroring `terrain.js`. Measured at `ref_01500` with jitter `[0, -3.086e-4]`, so a
+   predicted-buggy velocity of `[0, +1.5432e-4]`: FOLIAGE (matId 5) `meanY` was
+   **+1.570e-04** — the jitter offset in isolation to 1.8% — and is now **+3.587e-06**,
+   a 44x reduction leaving only genuine wind velocity. Every other matId byte-identical.
+2. ~~**`motionBlur.js:189` applies the same `+ 0.5 * uJitter` compensation**~~ — **FIXED
+   in Wave G.** It now reads `v = g1.rg + uMvLegacy * 0.5 * uJitter` with `uMvLegacy`
+   driven by `ctx.config.mvLegacyJitter`, so the A/B flag flips all three consumers
+   coherently. As predicted, no image change: the over-correction was ≤0.16 px of
+   half-extent against this pass's own `mbMinPx = 0.60` cutoff.
 3. **The claimed impact — "permanent, unrecoverable blur" — did not happen.** `taa.js`
    only consults the G-buffer velocity where it disagrees with the depth-derived one by
    >1.5 px, and the error was ≤0.707 px. Measured `gateFrac` on every static surface at
@@ -784,3 +797,217 @@ extreme reprojection vectors. And §1 follow-up 1 (`vegetation.js` still on the 
 jittered-current convention, confirmed still present) applies to the stack crowns in frame.
 
 Owner: whoever holds `scene.js` + `taa.js`. Fix §18 first and re-measure before anything else.
+
+---
+
+# Wave G integration pass — 2026-07-30
+
+Two waves landed into one tree concurrently. Full working notes in
+`reports/integrationG.md`. Score **30.30** at `--settle 48` (Wave F: 30.09).
+Sections 25–27 are new. **§26 is the most important thing in this pass.**
+
+## Status changes to existing sections
+
+- **§1 (motion vectors): FULLY CLOSED.** Follow-ups 1 (`vegetation.js`) and 2
+  (`motionBlur.js`) are fixed and measured; see the section itself. Follow-up 3 was
+  already an observation, not a task. Determinism re-verified bit-exact after both.
+
+- **§8 (desaturation): chroma half completely untouched, for the second wave running.**
+  `sat_mean` **55.72 -> 55.66** against a reference **79.14**. It has now moved slightly
+  *backwards* in two consecutive waves. `lum_std` is 38.04 vs a reference 52.36 and
+  `highlight_frac` 0.0035 vs 0.0088 — the render carries **40% of the reference's
+  specular highlight area**. Visually this is the dominant defect: everything past ~40 m
+  in the showcase sheet is washed to near-white with no rock albedo left. Wave F's
+  redirection of the diagnosis from `volumetricFog` to `tonemap`'s highlight roll-off
+  stands; nothing acted on it. **Do not attack it before §18 lands.**
+
+- **§12 (collider contract): still fixed.** Zero `[warn] [physics] ignoring malformed
+  collider` lines in any console capture this pass.
+
+- **§14 (`--settle 48` headroom): SUPERSEDED BY §26.** The claim "48 is roughly the
+  minimum that converges" was measured on `ref_00000` and does not generalise. It is
+  converged there and demonstrably *not* converged at `ref_01500`.
+
+- **§15 (`grade` axis): unchanged, dead.** 0.00 for the ninth run in a row while `hist`
+  moved 0.7934 -> 0.7876.
+
+- **§17 (showcase defects): 4 of 5 still open, 1 now looks fixed.**
+  - Item 1 (poses under the terrain): **unchanged.** Cells 01 and 10 still put the camera
+    below the ground plane — pebbles on a ceiling, vegetation hanging downward, ~25-42%
+    of frame flat lavender void. Two lines in `poses.js`; nobody owns it.
+  - Item 2 (the ring): **unchanged from Wave F's "partially fixed"** — textured and
+    striated, still reads as a vertical glass column rather than an arc.
+  - Item 3 (character models in showcase cells): **unchanged.** Cells 07, 08, 09; the
+    figure in 08 is the single most prominent object in a cell captioned "refraction +
+    caustics".
+  - Item 4 (sea stacks float): **appears FIXED.** Both stacks in cell 05 now show a
+    flared talus apron entering the water; no base gap visible in 05, 06 or 08.
+  - Item 5 (cells not showing what they promise): **unchanged.** Cell 08 shows neither
+    refraction nor caustics; cell 12 "MA5B viewmodel" frames the rifle exactly as all
+    eleven other cells do, half out of frame in the corner.
+
+- **§18 (shared depth texture): STILL OPEN, and it was assigned to this wave.**
+  `src/render/passes/scene.js:114` still calls `renderer.clearDepth()`. The section names
+  "the Wave G motion-vector agent" as the right owner; that agent fixed §1 and did not
+  fix this. It remains the highest-priority open item in the project.
+
+- **§21 (`dof` is a no-op): unchanged.** The gating console line prints verbatim on every
+  capture, still.
+
+- **§23 (triangle count): WORSE, see §25.**
+
+- **§24 (`taa` black corruption at `shot_sky_ring`): UNCHANGED, and now spreading.**
+  Re-measured on this wave's sheet: **7,934 exact-black pixels in the identical bounding
+  box `y902-1035 x357-956`** (Wave F: 7,978 and 7,977). The motion-vector wave did not
+  touch it. New this pass: `ref_00000` shows **17** exact-black px at `y629-640
+  x882-912` and `shot_shoreline` shows **6** at `y547-676 x1047-1616`. Wave F recorded
+  zero in every non-`sky_ring` frame, so it has leaked into two more poses.
+
+---
+
+## 25. Frame time regressed across the board — 19 of 21 poses now over 11 ms
+
+`node tools/_perfprobe.mjs --warm 40 --samples 90`, same method as §13 and §23.
+
+```
+                          waveF        waveG
+p50 range            8.30-14.10   8.40-16.40
+over 11 ms at p50        2 / 21      19 / 21
+over 11 ms at p95       20 / 21      21 / 21
+triangle range       29.6-32.5M   30.8-39.2M
+draw call range         523-645      533-730
+```
+
+`shot_sky_ring` — a shot that is mostly empty sky — renders **39,062,717 triangles**.
+`shot_overview` renders 30.8 M from 533 draw calls. **§23's culling hypothesis is
+strengthened, not weakened:** a 30 M triangle floor in every pose regardless of content
+is not a content problem.
+
+Draw calls moved +44 on the run average. The likeliest single contributor is this wave's
+`props` fix (`src/world/props.js`): it removed two region-scale `rocks.landmarks`
+exclusion discs (`cliff_main` r=190, `islet_field` r=1400) that had been rejecting
+**every** scatter point, so a module that previously drew literally nothing now draws its
+full population. That is a correct fix with a real and expected cost.
+
+**The `--skip rocks` / `--skip props` A/B still has not been run**, for the third wave
+running, because `src/` has never been quiescent during a measurement window. It is the
+single highest-value measurement nobody has taken.
+
+### 25b. A ~400 ms frame hitch, now on 11 of 21 poses
+
+§23 recorded one 525 ms outlier at `ref_00120` and called it secondary. It is not:
+
+```
+pose                     p50     max    ratio
+ref_00120               9.20  488.30     53x
+shot_sky_ring          15.70  419.30     27x
+ref_00840              16.10  411.90     26x
+ref_01500              16.10  408.10     25x
+shot_water_edge        14.60  407.50     28x
+ref_01800              15.80  401.00     25x
+ref_00720              15.50  399.50     26x
+shot_shoreline         15.20  386.60     25x
+shot_tide_pools        15.00  378.80     25x
+ref_02220              12.70  368.70     29x
+shot_cliff_vegetation  12.30  357.80     29x
+```
+
+**After 40 warm-up frames were already discarded**, so it is not shader compilation.
+Every affected pose has `mean > p95` — the signature of one or two enormous frames, not a
+broad slowdown. The other ten poses peak at 27.5–35.3 ms. Untriaged; instrument which
+frame index stalls.
+
+---
+
+## 26. `--settle 48` is not converged, and `--settle` is secretly a world-clock knob
+
+**This invalidates the precision of every score in `scores/history.jsonl`.**
+
+Same tree, same code, same seed, same poses, only `--settle` changed:
+
+```
+   7 waveG                    30.30      settle 48
+   8 waveG-settle96           29.78      settle 96, IDENTICAL CODE
+```
+
+**-0.52 points from a knob that is supposed to be a safety margin.** This entire wave —
+fourteen subsystems, two concurrent teams of research-led critic+refine — moved the score
+**+0.21**. The settle-count noise is **2.5x the measured gain**.
+
+Per pose it is far worse: `ref_01500` **17.14 -> 13.59 (-3.55)**, `ref_02220` -1.15,
+`ref_00600` **+0.80**. And `highlight_frac` **more than doubles**, 0.0035 -> 0.0082,
+landing almost exactly on the reference 0.0088. Anyone tuning specular response against
+the settle-48 number is fitting to a phase, not a material.
+
+### Two independent causes
+
+**1. `--settle` also advances the world clock, and this dominates.** `capture.mjs` calls
+`H.setTime(t)` **once** and then `H.advance(settle)` at `fixedDt = 1/60`. So `--settle
+48` renders the world at t+0.80 s and `--settle 96` at t+1.60 s: different wave crests,
+different foam, different sun glints. `--settle` is a convergence parameter welded to an
+animation parameter.
+
+**2. Genuine temporal residual, and it is pose-dependent.** Isolated with
+`tools/_convprobe.mjs`, which pins `freeze(true)` and re-applies `setTime(t)` before
+every frame so only the Halton jitter phase varies. Mean absolute 8-bit difference
+against a settle-144 reference:
+
+```
+ref_00000 (frozen)          full      rock       sky      sand    max(full)
+  settle  48 vs 144        0.683     0.719     0.717     0.662       21
+  settle  96 vs 144        0.653     0.658     0.649     0.661       15
+
+ref_01500 (frozen)          full      rock       sky      sand    max(full)
+  settle  48 vs 144        0.982     0.713     0.668     1.714       91
+  settle  64 vs 144        0.902     0.659     0.624     1.587       79
+  settle  96 vs 144        0.751     0.656     0.621     1.093       43
+```
+
+There is an irreducible **~0.65 mean floor** — film grain re-dithers on every frame
+index, so two different frame counts can never be identical. Relative to that floor:
+
+- **`ref_00000` IS converged at 48** (excess 0.030 codes, max 21 vs a floor of 15).
+  This is the pose §14 was measured on, which is why §14 concluded what it did.
+- **`ref_01500` is NOT converged at 48 and still is not at 96.** Its `sand` ROI — the
+  wet-sand/foam waterline — sits **1.714** against a 0.62 floor with a **max error of 91
+  code values**, and is still descending at 96 and 144. Something there has a temporal
+  time-constant much longer than TAA's.
+
+Note which pose fails: **`ref_01500` is the worst-scoring pose in the project (17.14,
+`detail` axis 10.75) and is also the one still crawling at settle 48.** Those two facts
+are probably connected.
+
+### What to do
+
+- **Do NOT just raise `--settle`.** It changes the world time of every capture and
+  invalidates all historical rows for a reason unrelated to convergence.
+- **Decouple the knobs.** `capture.mjs` should re-pin `setTime(t)` inside the settle loop
+  exactly as `_convprobe.mjs` already does, making `--settle` a pure convergence control
+  landing on a fixed world phase. This is a deliberate re-baseline — every number in
+  `scores/history.jsonl` moves — so it needs an owner and one clean re-baselining run.
+  **It was deliberately not done as a drive-by.**
+- **Until then, treat ±0.5 score points as noise.** A wave that moves the score by less
+  than that has not been shown to have moved it at all.
+
+---
+
+## 27. The shared capture daemon can deadlock, and looks identical to "busy"
+
+`tools/previewsheet.mjs` hung for 15 minutes. `/health` reported:
+
+```
+{"ok":true,"inflight":3,"queued":479,"served":183}
+```
+
+`served` did not advance by one over several minutes of polling, with 3 requests
+in-flight and 479 queued. The daemon had been up 6h13m. Also found running: two
+`tools/_pfxprof.mjs` processes at **2h45m** each, and a `node tools/capture.mjs --beauty
+--placement --chrome --label loop-r27` using four flags `capture.mjs` does not define.
+
+`kill` + `rm /tmp/halo-captured.port` fixed it — the next `capture.mjs` invocation started
+a fresh daemon which served all 12 poses without incident.
+
+**Check `curl localhost:$(cat /tmp/halo-captured.port)/health` twice before waiting on a
+slow capture.** A wedged daemon blocks every agent on the machine and is indistinguishable
+from a busy one. `captured.mjs` needs a watchdog: a per-request deadline that releases the
+in-flight slot, and a `/health` field for "seconds since `served` last advanced".

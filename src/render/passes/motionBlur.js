@@ -79,13 +79,16 @@ import { Pass, fsMaterial, makeRT, FullScreenQuad } from '../RenderPipeline.js';
  *
  * ## Jitter compensation
  *
- * MRT1.rg is built against a jittered current view-projection and an un-jittered
- * previous one (docs/KNOWN_ISSUES.md #1), so static geometry carries a +/-0.5 px
- * per-frame velocity. Adding `0.5 * uJitter` cancels it exactly. This is the same local
- * compensation `taa.js` applies and does **not** touch `scene.js` — a half pixel is
- * negligible for blur, but making static geometry read exactly zero is what lets the
- * whole-frame early-out fire on a locked-off camera, which is free performance and free
- * determinism.
+ * MRT1.rg *used to be* built against a jittered current view-projection and an
+ * un-jittered previous one (docs/KNOWN_ISSUES.md #1), so static geometry carried a
+ * +/-0.5 px per-frame velocity and this pass added `0.5 * uJitter` to cancel it.
+ * **That is fixed at the source now** — `scene.js`, `terrain.js` and `vegetation.js` all
+ * write the difference of two un-jittered clip positions — so the compensation would
+ * over-correct, and it is applied only under `ctx.config.mvLegacyJitter`, the same A/B
+ * flag `taa.js` reads. The over-correction was provably invisible here (<= 0.16 px of
+ * half-extent against this pass's own `mbMinPx = 0.60` cutoff); it is removed because
+ * making static geometry read exactly zero is what lets the whole-frame early-out fire
+ * on a locked-off camera, which is free performance and free determinism.
  *
  * ## Sky
  *
@@ -149,6 +152,7 @@ const VELOCITY_LIB = /* glsl */`
 uniform sampler2D tGbuf1;
 uniform sampler2D tDepth;
 uniform vec2  uJitter;
+uniform float uMvLegacy;
 uniform mat4  uInvVPJit;
 uniform mat4  uCurrVP;
 uniform mat4  uPrevVP;
@@ -185,8 +189,10 @@ vec2 velocityUV(vec2 uv, out vec4 g1, out float rawDepth){
     // The viewmodel is rigidly attached to the eye: zero, always, and it is excluded
     // from the tile reduction as well so it cannot dilate a neighbour.
     if (isViewmodel(g1)) return vec2(0.0);
-    // KNOWN_ISSUES #1: MRT1.rg carries the current jitter. Cancel it locally.
-    v = g1.rg + 0.5 * uJitter;
+    // KNOWN_ISSUES #1 is FIXED: MRT1.rg is now the difference of two un-jittered clip
+    // positions and carries no jitter, so this compensation is dead and only re-applied
+    // under the mvLegacyJitter A/B flag - exactly as taa.js does it.
+    v = g1.rg + uMvLegacy * 0.5 * uJitter;
   } else {
     if (drawnAfterPrepass(g1, rawDepth)) return vec2(0.0);        // viewmodel, as above
     // No coverage and no depth: sky. Camera-only velocity, reconstructed at the far
@@ -419,6 +425,7 @@ export function create(opts = {}) {
     tGbuf1: { value: null },
     tDepth: { value: null },
     uJitter: { value: new THREE.Vector2() },
+    uMvLegacy: { value: 0 },
     uInvVPJit: { value: new THREE.Matrix4() },
     uCurrVP: { value: new THREE.Matrix4() },
     uPrevVP: { value: new THREE.Matrix4() },
@@ -502,6 +509,7 @@ export function create(opts = {}) {
       u.tGbuf1.value = pipe.gbuffer ? pipe.gbuffer.textures[1] : null;
       u.tDepth.value = pipe.depthTex;
       u.uJitter.value.copy(pipe.jitter);
+      u.uMvLegacy.value = c.mvLegacyJitter ? 1 : 0;
       u.uInvVPJit.value.copy(invVPJit);
       u.uCurrVP.value.copy(pipe.currViewProj);
       u.uPrevVP.value.copy(pipe.prevViewProj);

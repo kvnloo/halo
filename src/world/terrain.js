@@ -227,9 +227,16 @@ vec3 tCell(vec2 p){
     vec2 g = vec2(float(i), float(j));
     vec2 c = n + g;
     vec2 o = hash22(c);
-    // squash cells slightly so stones are ellipsoids, not marbles
+    /* Squash cells so stones are ellipsoids, not marbles — but squash them in a
+     * PER-CELL random frame. Squashing along world Z for every cell made every stone
+     * on the beach an ellipse with the same major axis, and at a grazing view that
+     * reads as a combed field rather than as scattered cobbles. The frame comes from
+     * a normalised hash vector rather than a sincos: 9 cells x 2 trig calls x 2
+     * layers per pixel is not worth paying for a rotation nobody can measure. */
+    vec2 rv = normalize(hash22(c + 9.3) * 2.0 - 1.0 + 1e-4);
     vec2 dv = g + o - f;
-    float d = length(dv * vec2(1.0, 0.74 + 0.5 * hash12(c + 5.1)));
+    vec2 dr = vec2(dv.x * rv.x - dv.y * rv.y, dv.x * rv.y + dv.y * rv.x);
+    float d = length(dr * vec2(1.0, 0.66 + 0.52 * hash12(c + 5.1)));
     if (d < f1){ f2 = f1; f1 = d; best = c; } else if (d < f2){ f2 = d; }
   }
   return vec3(f1, f2, hash12(best + 3.7));
@@ -242,20 +249,30 @@ vec3 tCell(vec2 p){
  *  version it replaces cost two extra 9-cell Worley evaluations per pixel, and it
  *  differentiated F1 rather than the stone's height, so the "normal" was a cone that
  *  kept tilting outside the stone instead of going flat on the sand between them. */
-vec3 tCellG(vec2 p, out vec2 grad){
+vec3 tCellG(vec2 p, out vec2 grad, out float id2){
   vec2 n = floor(p), f = fract(p);
-  float f1 = 8.0, f2 = 8.0; vec2 best = n; vec2 bdv = vec2(0.0, 1.0); float bsy = 1.0;
+  float f1 = 8.0, f2 = 8.0; vec2 best = n; vec2 bdr = vec2(0.0, 1.0);
+  vec2 brv = vec2(1.0, 0.0); float bsy = 1.0;
   for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++){
     vec2 g = vec2(float(i), float(j));
     vec2 c = n + g;
     vec2 o = hash22(c);
-    float sy = 0.74 + 0.5 * hash12(c + 5.1);
+    vec2 rv = normalize(hash22(c + 9.3) * 2.0 - 1.0 + 1e-4);
+    float sy = 0.66 + 0.52 * hash12(c + 5.1);
     vec2 dv = g + o - f;
-    float d = length(dv * vec2(1.0, sy));
-    if (d < f1){ f2 = f1; f1 = d; best = c; bdv = dv; bsy = sy; } else if (d < f2){ f2 = d; }
+    vec2 dr = vec2(dv.x * rv.x - dv.y * rv.y, dv.x * rv.y + dv.y * rv.x);
+    float d = length(dr * vec2(1.0, sy));
+    if (d < f1){ f2 = f1; f1 = d; best = c; bdr = dr; brv = rv; bsy = sy; }
+    else if (d < f2){ f2 = d; }
   }
-  grad = -vec2(bdv.x, bsy * bsy * bdv.y) / max(f1, 1e-4);
-  return vec3(f1, f2, hash12(best + 3.7));
+  // dF1/dP in the cell's own frame, rotated back into P: R^T * (S^2 * (R dv)) / F1
+  vec2 sd = vec2(bdr.x, bsy * bsy * bdr.y);
+  grad = -vec2(sd.x * brv.x + sd.y * brv.y, -sd.x * brv.y + sd.y * brv.x) / max(f1, 1e-4);
+  float h = hash12(best + 3.7);
+  // a SECOND, decorrelated per-stone hash: value must not track size and burial, or
+  // every big stone is also the pale one and the field reads as one repeated object
+  id2 = fract(h * 97.13 + hash12(best + 27.1));
+  return vec3(f1, f2, h);
 }
 
 /** Ellipsoid cap of a stone whose radius is r cell units: 1 at the crown, 0 at the
@@ -336,6 +353,10 @@ float tHeight(vec2 P, int lod){
     float sl = exp(-pow((zp - TZW0 - 3.1) * 0.55, 2.0));
     y += sl * 0.055 * (0.5 + fbm2(P * vec2(0.35, 1.1) + 7.0, 2));
     // broad cobble mounds
+    /* Halved. The >32 px band of the sand ROI measured 16.1 against the reference's
+     * 13.45 with the pavement in, and terrainDbg=9's checker visibly drapes over this
+     * term's 1.25 m third octave. The reference beach is near-planar; its low-
+     * frequency energy is the wet/dry step and the drift lines, not humps. */
     float cm = smoothstep(0.10, 0.62, fbm2(P * 0.20 + 61.0, 3)) * sh.w;
     y += cm * 0.055;
   }
@@ -367,17 +388,22 @@ float tHeight(vec2 P, int lod){
      * pavement into vertex fizz). Amplitude is cut to 45% there and the shading takes
      * over — the fragment pavement below is footprint-filtered, so it keeps working
      * long after the geometry has given up. */
-    float amp = lod >= 3 ? 1.0 : 0.45;
-    vec3 w1 = tCell(P * 5.0 + 13.0);
-    float c1 = tStoneCap(w1.x, 0.40 + 0.16 * w1.z);
-    y += c1 * (0.034 + 0.042 * w1.z) * cob * uTDetail * amp;
+    /* The scale bar (terrainDbg=9, now a 10 cm checker) says the sand ROI at
+     * ref_00000 is ground from ~0.8 m to ~4 m, i.e. 1000 px/m in the foreground down
+     * to 250 px/m at the top of the crop. The reference's pebbles there are 30-90 px
+     * across, which is 3-9 cm — NOT the 16-22 cm this used to displace. A 6 cm stone
+     * cannot be carried by a 3 cm lattice (2 samples), so the pavement is now a
+     * SHADING feature and the vertex term only rounds the surface under it. */
+    float amp = lod >= 3 ? 1.0 : 0.40;
+    vec3 w1 = tCell(P * 11.0 + 13.0);
+    float c1 = tStoneCap(w1.x, 0.30 + 0.12 * w1.z);
+    y += c1 * (0.009 + 0.008 * w1.z) * cob * uTDetail * amp;
   }
 
   if (lod >= 3){
     // 7-11 cm shingle packed between the pavement stones
-    vec3 w2 = tCell(P * 12.0 + 41.0);
-    float c2 = tStoneCap(w2.x, 0.42 + 0.16 * w2.z);
-    y += c2 * (0.011 + 0.013 * w2.z) * cob * uTDetail;
+    // the 2-3 cm granule layer is shading only: 3 cm relief on a 3 cm lattice is
+     // not geometry, it is vertex noise
 
     // wind ripples: crests perpendicular to the wind, only on damp/dry sand, and
     // patchy — an unbroken corduroy across the whole beach is a desert, not a shore
@@ -696,12 +722,17 @@ vec2 tEnvBRDFAB(float rough, float NoV){
  *  the compensation adds Fms * Ems on top of the single-scatter term. */
 float tEnvBRDF(float F0, float rough, float NoV){
   vec2 ab = tEnvBRDFAB(rough, NoV);
-  float single = F0 * ab.x + ab.y;
-  float Ess = clamp(ab.x + ab.y, 0.0, 1.0);
+  float FssEss = F0 * ab.x + ab.y;          // the single-scattering term
+  float Ess = clamp(ab.x + ab.y, 0.0, 1.0); // directional albedo at F0 = 1
   float Ems = 1.0 - Ess;
   float Favg = F0 + (1.0 - F0) / 21.0;
-  float Fms = Ess * Favg / max(1.0 - Favg * Ems, 1e-4);
-  return single + Fms * Ems;
+  /* Fms is driven by FssEss, NOT by Ess. Using Ess here — which I did first — makes
+   * the compensation independent of F0, and on a roughness-0.94 F0-0.028 surface it
+   * adds 0.019 on top of a 0.012 single-scatter term: a 2.6x specular boost on DRY
+   * SAND, which arrives as a blue additive wash and costs saturation. Measured on the
+   * sand ROI at ref_00000 as a drop from R:B 2.78 in the albedo to 1.81 on screen. */
+  float Fms = FssEss * Favg / max(1.0 - Ems * Favg, 1e-4);
+  return FssEss + Fms * Ems;
 }
 `;
 
@@ -738,6 +769,12 @@ const SURFACE_FRAG = /* glsl */`
   // this texture, so anything strong here makes the shaded stones disagree with the
   // displaced ones. 0.55 + 1.0*mac.b swung it by 2.8x; this swings it by 1.7x.
   float cobD = clamp(tCobbleMask(P, sh.w, wp.y) * (0.74 + 0.52 * mac.b), 0.0, 1.25);
+  /* NOT here: a decimetre-scale drift modulation on cobD. The >32 px band of the sand
+   * crop is 7-70 cm of ground at this framing and sits at 8.8 against the reference's
+   * 13.45, so clumping the stones into hand-sized drifts looked like the obvious fix.
+   * Measured: 8.82 -> 8.85, i.e. nothing, for one 3-octave fbm per pixel. The height
+   * blend absorbs a slow change in burial depth almost completely. Whoever tries this
+   * next needs to modulate COVERAGE (the threshold), not density. */
   float shelf = smoothstep(-78.0, -66.0, P.x) * (1.0 - smoothstep(-24.0, -12.0, P.x))
               * smoothstep(-17.5, -13.0, P.y) * (1.0 - smoothstep(-4.0, 0.5, P.y));
   float rockW = clamp(shelf * 0.9 + smoothstep(0.42, 0.72, slope), 0.0, 1.0);
@@ -772,7 +809,14 @@ const SURFACE_FRAG = /* glsl */`
    * relief now produces more slope, not less. */
   vec2 dDet = tDecodeD(meso, 0.85)
             + tDecodeD(meso2, 0.55)
-            + tDecodeD(micro, 0.55 * (0.24 + 0.76 * mipFade));
+            /* The 0.32 m micro tile is 0.31 mm per texel; at 600 px/m in the
+              * foreground its finest content is under a pixel and NONE of it is
+              * information (research/terrain.md 0.1: nothing below ~5 mm is ever
+              * resolved here). At 0.55-0.80 it was painting a uniform, scale-
+              * invariant 6 px stipple over the entire beach — the "sandpaper printed
+              * on suede" read, and the reason spectral_slope sat at -0.89. It is a
+              * roughness/sparkle statistic, not a normal map. */
+            + tDecodeD(micro, 0.80 * (0.24 + 0.76 * mipFade));
 
   // gravel normal, faded in with cobble density and faded UP with distance so the
   // statistics do not fall off where the displaced geometry stops resolving stones
@@ -830,13 +874,18 @@ const SURFACE_FRAG = /* glsl */`
             * (0.78 + 0.56 * mesoA);
   // damp sand is darker AND cooler: the water film removes the warm multiple
   // scattering between grains that gives dry sand its yellow cast
-  vec3 damp = dry * vec3(0.50, 0.52, 0.585);
+  vec3 damp = dry * vec3(0.52, 0.52, 0.555);
   vec3 wetC = uTWetCol * tone * (0.88 + 0.24 * grainA);
 
   /* The wet/dry line is the strongest value contrast on the beach — a 3x step over a
    * few centimetres of run-up, not a slow gradient. Narrow ramps. */
+  /* The wetC ramp started at 0.44. terrainDbg=5 puts wet at ~0.5 across the ref_01500
+   * foreshore, so barely 10% of uTWetCol reached the patch that reads as a grey card —
+   * re-authoring uTWetCol moved it by 0.1 code values. The saturated end of a beach is
+   * wide, not a knife edge: the knife edge is the SHEEN, which is the separate 'sheet'
+   * term. */
   vec3 alb = mix(dry, damp, smoothstep(0.03, 0.28, wet));
-  alb = mix(alb, wetC, smoothstep(0.44, 0.76, wet));
+  alb = mix(alb, wetC, smoothstep(0.34, 0.70, wet));
 
   /* Damp patches on the dry berm: 3-9 m pools of retained moisture, well above the
    * swash limit, where the sand last held water. On a real beach these carry more
@@ -851,7 +900,7 @@ const SURFACE_FRAG = /* glsl */`
     // these are multiplicative on top of AO and the cobble shade; at 0.80/0.85 they
     // were most of the reason the berm crushed to black in shadow.
     alb = mix(alb, alb * vec3(0.64, 0.635, 0.665), dp * 0.70);
-    alb = mix(alb, alb * vec3(0.84, 0.835, 0.850), dp2 * 0.55);
+    alb = mix(alb, alb * vec3(0.80, 0.795, 0.815), dp2 * 0.75);
   }
 
   /* Stone tone at range, from the mip-filtered gravel bake. The analytic cell field
@@ -890,17 +939,32 @@ const SURFACE_FRAG = /* glsl */`
      * field carries no information, only aliasing, and gravFar's mip-filtered bake
      * takes the tone over. 0.030-0.075 m/px is ~45-95 m for layer A at this eye
      * height and ~20-40 m for the 8 cm shingle. */
-    float visA = 1.0 - smoothstep(0.030, 0.075, fp);
-    float visB = 1.0 - smoothstep(0.011, 0.030, fp);
-    float den  = clamp(cobD, 0.0, 1.25);
+    float visA = 1.0 - smoothstep(0.014, 0.034, fp);
+    float visB = 1.0 - smoothstep(0.006, 0.014, fp);
+    /* The swash buries a pavement in sand. Without this the intertidal at ref_01500
+      * rendered as unbroken bubble-wrap gravel where the reference has warm sand with
+      * sparse dark rock. */
+    float den  = clamp(cobD * (1.0 - 0.42 * smoothstep(0.35, 0.90, wet)), 0.0, 1.25);
 
     vec2 gA, gB;
-    vec3 cA = tCellG(P * 5.0  + 13.0, gA);
-    vec3 cB = tCellG(P * 12.0 + 41.0, gB);
+    float vA, vB;
+    vec3 cA = tCellG(P * 11.0 + 13.0, gA, vA);
+    vec3 cB = tCellG(P * 26.0 + 41.0, gB, vB);
 
-    // SAME radii as the vertex displacement, so shading tracks silhouette exactly
-    float rA = 0.40 + 0.16 * cA.z;
-    float rB = 0.42 + 0.16 * cB.z;
+    /* SAME frequencies and radii as the vertex displacement, so shading tracks
+     * silhouette exactly. Radius 0.30-0.42 of a 0.091 m cell is a 5.5-7.6 cm stone that
+     * does NOT touch its neighbours: at 0.40-0.56 of a 0.20 m cell the discs
+     * overlapped, every stone fused with the next and terrainDbg=10 came back as a
+     * continuous red carpet. Peak coverage is now pi*r^2 = 41%, which is a pavement
+     * with sand visible between the stones — which is what the reference crop is. */
+    /* Tried widening this to 0.18-0.46 (a 2.6x size spread instead of 1.4x) to break
+     * up the "one repeated object" read. It measured WORSE on every axis — lap_var
+     * 488 -> 468, edge_density 0.168 -> 0.158, sat_mean 53.2 -> 52.8 — because the
+     * height threshold culls the small end, so the spread costs coverage and buys
+     * nothing. Reverted; do not re-try without also lowering the threshold for small
+     * stones. */
+    float rA = 0.30 + 0.12 * cA.z;
+    float rB = 0.30 + 0.12 * cB.z;
     float dA = clamp(cA.x / rA, 0.0, 1.0);
     float dB = clamp(cB.x / rB, 0.0, 1.0);
 
@@ -915,8 +979,8 @@ const SURFACE_FRAG = /* glsl */`
      * what left terrainDbg=10 showing one red oval in a black frame instead of a
      * pavement. Put it in the height and low density means "most stones are swallowed
      * by the sand, the biggest still show" — which is what a thinning pavement is. */
-    float hA = pA * (0.34 + 0.44 * cA.z + 0.40 * den);
-    float hB = pB * (0.30 + 0.40 * cB.z + 0.38 * den);
+    float hA = pA * (0.42 + 0.44 * cA.z + 0.30 * den);
+    float hB = pB * (0.34 + 0.38 * cB.z + 0.26 * den);
     /* The sand's own relief, so stones bed INTO it rather than onto a plane. It MUST
      * be low-frequency relative to a stone: the first version of this used
      * 0.34 * mesoA + 0.14 * grainA, and grainA is the 0.32 m micro tile — millimetre
@@ -927,8 +991,13 @@ const SURFACE_FRAG = /* glsl */`
     float hS = 0.44 + 0.20 * mesoA;
 
     // weights go negative when a layer is invisible, which removes it from the max
-    float wA = -0.60 + 1.22 * visA;
-    float wB = -0.60 + 1.08 * visB;
+    /* Tuned for ~40% coverage for layer A and a sparse shingle in the gaps. The
+      * first values (1.22 / 1.08) put coverage near 100% — terrainDbg=10 came back
+      * solid red and green with no sand left between the stones, which cost 30 code
+      * values of lum_mean and 21 of sat_mean on the sand ROI. A pavement is stones
+      * AND the sand you can see between them. */
+    float wA = -0.60 + 1.20 * visA;
+    float wB = -0.60 + 1.14 * visB;
     const float wS = 0.50;
 
     // 0.085 is ~8 mm of ground at this profile's rim slope, i.e. a 3 px rim in the
@@ -944,8 +1013,8 @@ const SURFACE_FRAG = /* glsl */`
     /* Stones run from near-black basalt to pale quartz against ~0.22 sand: a 2-9x
      * value step at a hard edge. That step, repeated a few thousand times across the
      * frame, is the reference's lum_std and its 2-32 px band. */
-    vec3 colA = mix(vec3(0.0155, 0.0132, 0.0106), vec3(0.148, 0.120, 0.088), pow(cA.z, 1.15));
-    vec3 colB = mix(vec3(0.0180, 0.0154, 0.0124), vec3(0.126, 0.101, 0.074), pow(cB.z, 1.10));
+    vec3 colA = mix(vec3(0.0320, 0.0248, 0.0170), vec3(0.276, 0.208, 0.136), pow(vA, 1.25));
+    vec3 colB = mix(vec3(0.0350, 0.0270, 0.0190), vec3(0.240, 0.181, 0.119), pow(vB, 1.20));
     /* Do NOT desaturate stones with wetness. Wet stones are the highest-contrast thing
      * on a wet beach — they go DARK, and they keep their hue and their normal. */
     float wetK = mix(1.0, 0.55, smoothstep(0.45, 0.92, wet));
@@ -959,10 +1028,10 @@ const SURFACE_FRAG = /* glsl */`
      * this replaces differentiated the DISTANCE FIELD, not the stone, so it tilted
      * the sand between the stones as hard as the stones themselves; and at 0.085 it
      * understated a 22 cm stone standing 5 cm proud by about 3x. */
-    float ampA = 0.034 + 0.042 * cA.z;
-    float ampB = 0.011 + 0.013 * cB.z;
-    vec2 dStone = ampA * (dA * inversesqrt(max(1.0 - dA * dA, 0.03))) * gA * (5.0 / rA) * bA
-                + ampB * (dB * inversesqrt(max(1.0 - dB * dB, 0.03))) * gB * (12.0 / rB) * bB;
+    float ampA = 0.014 + 0.012 * cA.z;
+    float ampB = 0.005 + 0.005 * cB.z;
+    vec2 dStone = ampA * (dA * inversesqrt(max(1.0 - dA * dA, 0.03))) * gA * (11.0 / rA) * bA
+                + ampB * (dB * inversesqrt(max(1.0 - dB * dB, 0.03))) * gB * (26.0 / rB) * bB;
     dDet += clamp(dStone, vec2(-8.0), vec2(8.0));
 
     /* Contact shadow: the sand in the annulus just OUTSIDE a stone's rim, which is
@@ -974,13 +1043,13 @@ const SURFACE_FRAG = /* glsl */`
     stoneTop = bA + bB;
     // research F13: the SAME weights drive roughness. Wave-polished stone tops are
     // smoother than the powder around them; wet ones smoother still.
-    stoneRough = bA * mix(0.55, 0.30, smoothstep(0.4, 0.9, wet))
-               + bB * mix(0.62, 0.36, smoothstep(0.4, 0.9, wet));
+    stoneRough = bA * mix(0.72, 0.34, smoothstep(0.4, 0.9, wet))
+               + bB * mix(0.76, 0.40, smoothstep(0.4, 0.9, wet));
     gDbgSplat = vec2(bA, bB);
   }
   // contact shadow in the sand around each stone. 0.34 was a 21% maximum darkening;
   // the reference's stones sit in visible pockets of shade.
-  alb *= 1.0 - cobShade * 0.52;
+  alb *= 1.0 - cobShade * 0.26;
 
   // organic strandline: dark weed and shell wrack in a band above the swash
   {
@@ -1069,10 +1138,15 @@ const SURFACE_FRAG = /* glsl */`
                               1.0 - smoothstep(0.030, 0.075, fp),
                               clamp(fp * 10.0, 0.0, 1.0));
     }
+    /* 9 = scale bar on the ground: 10 cm checker, red every 1 m, blue every 10 m.
+     * The 1 m checker this replaces was too coarse to read anywhere in the sand ROI —
+     * one square filled the whole foreground crop, which is how two different
+     * estimates of "how many pixels is a metre" both survived for a whole pass. */
     if (uTDbg > 8.5 && uTDbg < 9.5) {
-      float ck = mod(floor(P.x) + floor(P.y), 2.0);
+      float ck = mod(floor(P.x * 10.0) + floor(P.y * 10.0), 2.0);
       diffuseColor.rgb = mix(vec3(0.05), vec3(0.5), ck);
-      if (mod(floor(P.x * 0.1) + floor(P.y * 0.1), 2.0) > 0.5) diffuseColor.rgb *= vec3(1.0, 0.35, 0.35);
+      if (mod(floor(P.x) + floor(P.y), 2.0) > 0.5) diffuseColor.rgb *= vec3(1.0, 0.35, 0.35);
+      if (mod(floor(P.x * 0.1) + floor(P.y * 0.1), 2.0) > 0.5) diffuseColor.rgb *= vec3(0.35, 0.55, 1.0);
     }
   }
   /* ---------------- world normal ---------------------------------------------
@@ -1159,7 +1233,15 @@ export function create(opts = {}) {
     // Saturated calcareous sand is dark but still WARM. At 0.072/0.060/0.048 the
     // surface was an essentially achromatic 0.06, so once wet > 0.76 there was no
     // chroma left in the intertidal for anything to modulate.
-    uTWetCol: { value: new THREE.Vector3(0.100, 0.085, 0.070) },
+    /* Darker and WARMER. At 0.100/0.085/0.070 the R:B ratio is 1.43 — essentially
+     * neutral — so once wet > 0.76 the intertidal had no hue left for anything to
+     * modulate and rendered as a matte grey card: measured at ref_01500 on the
+     * terrain-only patch, rgb 92.1/91.5/91.5, sat 20.5, lab_b +0.07, against the
+     * reference's 71.8/72.9/88.0, sat 49.5, lab_b -8.93. The reference's blue comes
+     * from a grazing SKY REFLECTION over warm sand, not from a grey albedo, so the
+     * albedo has to be both darker (it is 24% too bright) and warm enough that the
+     * sheen has something to sit on top of. */
+    uTWetCol: { value: new THREE.Vector3(0.0760, 0.0570, 0.0430) },
     // the tide-pool shelf is permanently damp and algae-stained, so it sits well
     // below dry limestone's 0.30-0.40
     uTRockCol: { value: new THREE.Vector3(0.150, 0.140, 0.122) },
@@ -1652,8 +1734,12 @@ export function create(opts = {}) {
             m4.compose(p3, q, s3);
             im.setMatrixAt(i, m4);
             const v = cr.next();
-            const base = 0.020 + Math.pow(v, 1.9) * 0.20;
-            col.setRGB(base * cr.range(0.92, 1.10), base * cr.range(0.88, 1.02), base * cr.range(0.78, 0.98));
+            /* Warmer and with a higher floor. At 0.020-0.22 with an R:B of only 1.2
+             * these read as neutral grey blobs and, being the largest objects in the
+             * foreground, they dragged the sand ROI's sat_mean and lab_b down with
+             * them. Beach cobbles are brown-grey over warm sand, not slate. */
+            const base = 0.045 + Math.pow(v, 1.9) * 0.20;
+            col.setRGB(base * cr.range(1.02, 1.22), base * cr.range(0.84, 0.98), base * cr.range(0.58, 0.76));
             im.setColorAt(i, col);
           }
           im.instanceMatrix.needsUpdate = true;

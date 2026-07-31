@@ -34,8 +34,31 @@ export function createScenePass() {
     const cam = camera;
 
     // ---------------------------------------------------- 1. G-buffer pre-pass
-    gbufMat.uniforms.uCurrViewProj.value
-      .multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
+    //
+    // Velocity is the difference of two UN-JITTERED clip positions. Both jitters enter
+    // the true expression and only as a difference, so pairing a jittered current
+    // matrix with an un-jittered previous one (which this used to do) is wrong by
+    // exactly the current jitter — see research/taa.md §1.2 and KNOWN_ISSUES #1.
+    // `pipe.currViewProj` / `pipe.prevViewProj` are both built from `unjitteredProj`
+    // before `_applyJitter` runs, which is the same pair three.js's own TRAANode feeds
+    // its VelocityNode, and it is what `terrain.js`'s G-buffer material already uses.
+    //
+    // This does NOT unjitter the rasterisation. `GBufferMaterial`'s `gl_Position` comes
+    // from three's `<project_vertex>` using the jittered `projectionMatrix` uniform;
+    // `vCurClip` is a separate varying built from `uCurrViewProj`. Depth, normals and
+    // colour stay jittered, as they must — only the value written to MRT1.rg moves.
+    // The invariant this buys: a static camera on static geometry writes a bit-exact
+    // ZERO motion vector, so TAA's Catmull-Rom history fetch lands on the texel centre
+    // and is the identity. Verify with `node tools/_mvprobe.mjs`.
+    //
+    // `mvLegacyJitter` restores the old pairing for a same-page-load A/B (taa.js reads
+    // the same flag and re-adds its compensation). It is a diagnostic, not a mode.
+    if (ctx.config?.mvLegacyJitter) {
+      gbufMat.uniforms.uCurrViewProj.value
+        .multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
+    } else {
+      gbufMat.uniforms.uCurrViewProj.value.copy(pipe.currViewProj);
+    }
     gbufMat.uniforms.uPrevViewProj.value.copy(pipe.prevViewProj);
 
     const prevOverride = scene.overrideMaterial;

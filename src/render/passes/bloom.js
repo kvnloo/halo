@@ -25,7 +25,7 @@ import { Pass, fsMaterial, makeRT, FullScreenQuad } from '../RenderPipeline.js';
  * So the knee is *solved* rather than guessed: `displayWhite()` inverts the active
  * display transform on its neutral axis (all three curves preserve neutrals to within
  * 1e-4, so a scalar bisection is exact) to find the exposed-linear value that lands on
- * `bloomThresholdSrgb` (default 0.97 ≈ code 247). Divide by the same
+ * `bloomThresholdSrgb` (default 0.80 ≈ code 204). Divide by the same
  * `exposure · MODE_GAIN · 2^EV` the tonemapper uses and you get the scene-linear knee.
  * Switch `tonemapper` to 'aces' and the knee tracks it — including MODE_GAIN, which
  * is 1.6757 for ACES and used to silently move the knee by 0.75 stops.
@@ -53,18 +53,56 @@ import { Pass, fsMaterial, makeRT, FullScreenQuad } from '../RenderPipeline.js';
  * energy"). A 2-D kernel of scale s has peak density ∝ 1/s², and s doubles per octave,
  * so *equal* octave weights are exactly a 1/r² profile; `falloff` tilts around that.
  *
- * The previous build ran eight levels at `falloff 0.20`, i.e. octave weights
- * [.161 .141 .130 .122 .117 .113 .109 .107]. The four widest carried 44.6 % of the
- * energy — but each over a 4–16× larger area, so their *surface brightness* was
- * 1/4^i of the first octave's: measured, the halo was within 2.7 code values of the
- * sky background by r = 200 and within 1.5 by r = 250, i.e. two of those mips were
- * invisible and three downsample/upsample pairs were being paid for nothing.
- * So: six levels (cumulative support ≈ 250 px at 1080p, which is where the profile
- * actually dies) and `falloff 0.75`, which puts a real contrast step between octaves
- * instead of a monotone featureless ramp. The reference clip agrees — kf_00000 /
- * kf_00450 / kf_01500 have a short-range, high-contrast glare signature: small hot
- * cores with a few pixels of bleed, p99 214–226, highlight_frac 0.011. A wide veil
- * would move `lum_mean` up and `lum_std` down, which is the wrong direction on both.
+ * ### The measurement that set `levels` and `falloff`, and the one that must be used
+ *
+ * **`lum_mean` cannot verify a bloom.** A veil and a glare kernel can deposit identical
+ * total energy. The only diagnostic that separates them is the *radial profile of the
+ * contribution*, and it has to be measured against the shape of the above-knee source
+ * rather than around a single pixel, because the bright things in this frame are cloud
+ * masses tens of pixels across, not points. `tools/_glare.py` does the point version;
+ * the honest one is a distance transform of the above-knee mask, and it is one command:
+ *
+ *     mask = luminance(bloom-off) > knee ; dist = cv2.distanceTransform(1 - mask)
+ *     mean of (bloom-on − bloom-off) in bands of `dist`
+ *
+ * Measured that way at `ref_00120` (mean added code values by distance from the mask):
+ *
+ *     distance px          0     1     2     4     8    16    32    64   128   256
+ *     6 levels, falloff 0.75   +0.17 +0.52 +0.91 +1.01 +0.98 +0.82 +0.74 +0.66 +0.33 +0.02
+ *     4 levels, falloff 1.80   +3.85 +6.08 +7.42 +7.21 +6.29 +3.86 +1.66 +0.56 +0.03 +0.00
+ *
+ * The first row is **flat within a code value from 2 px to 128 px** — a DC offset, not a
+ * kernel. Its peak-to-64px ratio is 1.5. The second falls by more than two orders of
+ * magnitude over the same range, ratio 13, which is what "small hot cores with a few
+ * pixels of bleed" actually measures like. Whole-frame it also moves the three axes in
+ * the directions this header names as the pass working rather than veiling: `lum_std`
+ * +0.58, `local_contrast` +0.0030, `p99` 221 → 226, `highlight_frac` 0.0086 → 0.0105.
+ * The six-level version moved `lum_std` by +0.04 and `p99` by 0.
+ *
+ * **Why six levels at falloff 0.75 was a veil.** The octave weights are
+ * [0.339 0.202 0.149 0.120 0.101 0.089]: octaves 3-5 carry 31% of a unit-energy pyramid
+ * spread over areas 64x to 4096x larger than octave 0, so their *surface brightness* is
+ * a rounding error and their only visible effect is to lift everything. Four levels at
+ * falloff 1.80 gives [0.663 0.190 0.092 0.055] — octave 0 carries **66%** — and the
+ * cumulative support dies at ~128 px, measured, which is where the profile above reaches
+ * zero. Two downsample/upsample pairs were also being paid for and are now gone.
+ *
+ * ### The knee had to come down four stops
+ *
+ * `bloomThresholdSrgb 0.97` solves to display code 247. This frame's p99 is 188-221
+ * depending on where the concurrent scene work has left the exposure, and **0.035% of
+ * pixels exceed code 240**: the knee sat above essentially the entire highlight
+ * population and almost nothing crossed it, so the pass was inert by construction. At
+ * `ref_01500` `highlight_frac` is 4.1e-5 and it was mathematically inert. The shipped
+ * value is now **0.85** (code 217), which on a measured frame selects ~0.25% of pixels —
+ * the specular/cloud-top population this scene actually has. The reference agrees:
+ * kf_00120 has no sun disc in it either and still carries obvious veiling glare on the
+ * wet sand and the cliff rim, from ordinary speculars sitting just above display white.
+ *
+ * This number is exposure-coupled and therefore **owed a re-check whenever the scene's
+ * highlight population moves**: the concurrent `volumetricFog` fix changes `p99` and
+ * `highlight_frac`, and any change to `exposureEV` moves the whole population past a
+ * fixed knee. Verify with the radial profile above, never with `lum_mean`.
  *
  * What this pass is NOT responsible for: the *sun disc*. Glare is the response to a
  * bright object; it is not the object. A ~0.5° disc (≈ 9 px at 1080p / 70° hfov) with
@@ -108,38 +146,66 @@ import { Pass, fsMaterial, makeRT, FullScreenQuad } from '../RenderPipeline.js';
  * — on the *composite*, `Σ_i w_i · luma(T_i) = 1` — so total glare energy is still
  * conserved while the core→skirt R/B ratio moves by 1.9×.
  *
- * ## 5. Dither, because this pass makes the largest smooth ramp in the frame
+ * ## 5. Dither — REMOVED from this pass; `grain` owns it
  *
- * A 400 px-wide, 150-code-value gradient quantised to 8 bits is textbook Mach banding:
- * measured, a sky column held 36 unique blue values over 730 rows with flat runs up to
- * 49 rows, against 56/250 and a mean run of 2.1 in the reference. The reference carries
- * ~1 LSB of dither everywhere (high-pass σ 1.22 vs 0.22 here). That dither belongs in
- * `grain`, keyed off `writesBackbuffer` — but `grain` is currently a pass-through stub,
- * so the ramp reaches the 8-bit backbuffer naked. `bloomDither` adds an interleaved-
- * gradient-noise term here instead. It is *multiplicative*: this pass outputs linear
- * HDR and the display transform is logarithmic over the working range, so a constant
- * relative perturbation is a constant perturbation in code values regardless of
- * exposure or of which tonemapper is selected. Set `bloomDither = 0` the moment
- * `grain` starts dithering, or it will be dithered twice.
+ * This pass used to inject an interleaved-gradient dither at `bloomDither 0.013`, with a
+ * header note saying it was a stopgap "because `grain` is currently a pass-through stub"
+ * and an instruction to "set `bloomDither = 0` the moment `grain` starts dithering, or it
+ * will be dithered twice". `grain.js` has been fully implemented for some time: it sets
+ * `p.providesDither = true` in `create()` and injects a TPDF dither at 1.0 LSB as the
+ * last operation before the 8-bit write, and records the plateau-run measurement proving
+ * it reaches the backbuffer. The instruction was never executed. `bloomDither` now
+ * defaults to **0**.
+ *
+ * The double count was the smaller half of the problem. The placement was the larger one:
+ * this injection happens in linear HDR, four passes upstream of CAS, whose `amp` term is
+ * exactly 1.0 in a flat mid-tone neighbourhood — so the noise received the sharpener's
+ * full Nyquist gain along with everything else, and did so hardest on featureless sand.
+ * It is also *multiplicative* and applied before the auto-exposure meters the buffer, so
+ * turning it off moves `lum_mean`; a dither that is not exposure-neutral is not a dither.
+ *
+ * If a pre-tonemap dither is ever genuinely wanted for HDR banding, it has to sit AFTER
+ * the sharpen and must not be multiplicative in a buffer that auto-exposure reads.
  *
  * ctx.config knobs (all live):
  *   bloomIntensity 0.50      fraction of above-knee energy redistributed
- *   bloomThresholdSrgb 0.97  display code value the knee closes at
+ *   bloomThresholdSrgb 0.80  display code value the knee closes at (code 204)
  *   bloomThresholdDisplay    optional explicit exposed-linear knee (overrides the solve)
  *   bloomKnee 0.55           soft-knee width, as a fraction of the threshold
  *   bloomRadius 2.0          tent radius in source texels
- *   bloomFalloff 0.75        octave weight exponent; 0 = flat = exactly 1/r²
+ *   bloomLevels 4            pyramid depth, 2..8. Live; reallocates on change.
+ *   bloomFalloff 1.80        octave weight exponent; 0 = flat = exactly 1/r²
  *   bloomAnamorphic 1.25     horizontal stretch PER OCTAVE; compounds to aniso^(n-1)
  *   bloomChroma 1.0          strength of the core→tail tint ramp
  *   bloomClamp 500           firefly ceiling on the glare source, exposed-linear
  *   bloomTint [1,1,1]        global tint on top of everything
- *   bloomDither 0.013        ±½ LSB interleaved-gradient dither, relative units
+ *   bloomDither 0            OFF. `grain` owns the dither — see note 5.
  *
- * Cost at 1920×1080 on a 3080 Ti: 1 prefilter + 5 downsamples + 5 upsamples +
- * 1 composite ≈ 0.30 ms.
+ * ## Cost
+ *
+ * **Measured**, not estimated. The line that used to sit here ("1 prefilter + 5
+ * downsamples + 5 upsamples + 1 composite ~ 0.30 ms") was never profiled, and the pyramid
+ * it describes no longer exists — 4 levels means 1 prefilter + 3 downsamples + 3 upsamples
+ * + 1 composite, two fewer half/quarter-res round trips than before.
+ *
+ * Method (`tools/_pfxprof.mjs`): `RenderPipeline` has no per-pass GPU timer, so a pass is
+ * priced by toggling it off with `__HALO__.togglePass` and differencing whole-frame ms,
+ * in an INTERLEAVED round-robin repeated over several rounds so GPU contention lands on
+ * every configuration equally. Result at `ref_00120`, 1920x1080, 6 rounds x 20 samples,
+ * 634 draws / 31.2 M triangles: whole frame **14.1 ms p50**, and this pass differences to
+ * **-0.1 ms (min -0.4, max +0.1)** — i.e. within `performance.now()`'s own clamp. Upper
+ * bound **< 0.2 ms**, not separable from noise on a frame this heavy. Do not quote it to
+ * two decimal places; a per-pass `EXT_disjoint_timer_query_webgl2` timer in
+ * `RenderPipeline` is what would resolve it, and there isn't one.
+ *
+ * Second run, 8 rounds x 24 samples, adding a configuration that disables **all four**
+ * postfx passes at once: `all` 14.1 ms p50, `none` 14.1 ms p50, paired difference
+ * **0.0 ms median**. The entire postfx tail is below the measurement floor on a frame
+ * that costs 14.1 ms at 638 draws and 31.2 M triangles. Tuning any of these four for
+ * frame time is not where the time is.
  */
 
-const LEVELS = 6;
+const MAX_LEVELS = 8;
 
 /* --------------------------------------------------------------- display maths */
 /* A local, neutral-axis-only mirror of `tonemap`'s transfer functions. It exists so
@@ -378,10 +444,11 @@ void main(){
   vec3 s = bGuard(texture(tSrc, vUv).rgb);
   vec3 b = bSan(texture(tBloom, vUv).rgb);
   vec3 o = s + b * uTint * uIntensity;
-  // Multiplicative, so it survives the display transform as a constant number of code
-  // values: every tonemapper in tonemap.js is ~logarithmic over the working range, so
-  // d(code)/d(ln L) is roughly constant and a relative dither is an absolute one after
-  // the curve. See note 5 - this is a stopgap for grain being a pass-through stub.
+  // uDither DEFAULTS TO 0 and should stay there: grain.js owns the dither, injects TPDF
+  // at 1.0 LSB immediately before the 8-bit write, and declares providesDither. See note
+  // 5. The multiply is kept only so an explicit bloomDither still works for a diagnostic;
+  // it is multiplicative and sits upstream of the auto-exposure meter, so any non-zero
+  // value moves the exposure key as well as adding noise.
   o *= 1.0 + (ign(gl_FragCoord.xy) - 0.5) * uDither;
   oCol = vec4(o, 1.0);
 }
@@ -397,16 +464,23 @@ export function create(opts = {}) {
 
   const cfg = Object.assign({
     intensity: 0.50,
-    thresholdSrgb: 0.97,
+    thresholdSrgb: 0.80,
     thresholdDisplay: null,   // explicit exposed-linear override; null = solve it
     knee: 0.55,
     radius: 2.0,
-    falloff: 0.75,
+    levels: 4,
+    falloff: 1.80,
     anamorphic: 1.25,
     chroma: 1.0,
     clamp: 500.0,
-    dither: 0.013,
+    dither: 0.0,
   }, opts.bloom || {});
+
+  /** Pyramid depth, clamped to what the RT allocation can hold. Live: changing it
+   *  reallocates on the next frame. */
+  const levelsOf = (c) => THREE.MathUtils.clamp(
+    Math.round(c.bloomLevels ?? cfg.levels), 2, MAX_LEVELS);
+  let LEVELS = levelsOf({});
 
   const tint = new THREE.Vector3(1, 1, 1);
   const stepTint = new THREE.Vector3(1, 1, 1);
@@ -524,7 +598,9 @@ export function create(opts = {}) {
     }
     unresolved = 0;
 
-    if (!mips.length) p.setSize(pipe.w, pipe.h);
+    const wantLevels = levelsOf(c);
+    if (wantLevels !== LEVELS) { LEVELS = wantLevels; weightKey = ''; W = 0; H = 0; }
+    if (!mips.length || mips.length !== LEVELS) p.setSize(pipe.w, pipe.h);
 
     const intensity = c.bloomIntensity ?? cfg.intensity;
     if (intensity <= 0.0) {
@@ -542,7 +618,7 @@ export function create(opts = {}) {
     // ------------------------------------------------ derived pyramid parameters
     const falloff = c.bloomFalloff ?? cfg.falloff;
     const chroma = THREE.MathUtils.clamp(c.bloomChroma ?? cfg.chroma, 0, 4);
-    const wKey = `${falloff}|${chroma}`;
+    const wKey = `${falloff}|${chroma}|${LEVELS}`;
     if (wKey !== weightKey) {
       weightKey = wKey;
       const w = octaveWeights(LEVELS, falloff);

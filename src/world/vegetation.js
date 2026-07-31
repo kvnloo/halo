@@ -130,7 +130,7 @@ const CFG = {
   grassTiles: 3,           // spatial split, so frustum culling can drop most of it
   scrubCount: 620,
   mossClumps: 5200,
-  ivyCards: 2600,
+  ivyCards: 3200,
   vineStrands: 1750,
   treeSites: 14,
 };
@@ -1178,8 +1178,13 @@ function buildTree(rand, P) {
    * guarantees the leaf shell covers the branch tips whatever the branching does. */
   const tipR = tips.map((t) => Math.hypot(t.p.x - cx, t.p.z - cz)).sort((a, b) => a - b);
   const measuredR = tipR[Math.min(tipR.length - 1, Math.floor(tipR.length * 0.88))] || P.canopyR;
-  const canopyR = Math.max(P.canopyR, measuredR * 1.10);
+  const canopyR = Math.max(P.canopyR, measuredR * 1.32);
   const canopyH = P.canopyH * (canopyR / P.canopyR);
+  // Sprig budget scales with the crown's *area*, not with a constant. Fixing the count
+  // while the radius is measured means a bigger crown is a thinner crown — and a crown
+  // you can see cloud through is the single most obvious "this is a game tree" tell.
+  // At the shipped 900 over a measured 7 m radius the hero crown showed sky in the mass.
+  const shellN = Math.round(P.shellSprigs * Math.pow(canopyR / P.canopyR, 2.0));
 
   // A lumpy radius field: without it the crown is a smooth ellipse, and a smooth ellipse
   // is the one thing a real tree never is. Six harmonics in azimuth, two in elevation.
@@ -1229,7 +1234,7 @@ function buildTree(rand, P) {
   // Shell fill on a squashed, lumpy spheroid. Density is biased to the upper surface —
   // the reference crown is dense and flat on top and thins out underneath, where the
   // branch structure shows through.
-  for (let i = 0; i < P.shellSprigs; i++) {
+  for (let i = 0; i < shellN; i++) {
     const a = rand.range(0, Math.PI * 2);
     // elevation biased upward: -0.15 .. 1 in sin(elev)
     const se = -0.15 + 1.15 * Math.pow(rand.next(), 0.55);
@@ -1569,7 +1574,7 @@ export function create(opts = {}) {
         // shelf is the *darkest and most saturated* foliage in the frame (mean sRGB
         // (70,70,36), sat 133), so this is a dark mass, not a mid-tone.
         key: 'scrub', map: leafTex, alphaTest: LEAF_ALPHA_REF, roughness: 0.74,
-        colA: lin(0.196, 0.235, 0.048), colB: lin(0.070, 0.088, 0.016),
+        colA: lin(0.150, 0.186, 0.033), colB: lin(0.052, 0.068, 0.011),
         transColor: lin(0.22, 0.31, 0.036), transScale: 2.4, transPower: 3.2,
         windAmp: 0.13, flutter: 1.1, segScale: 1.0, baseAO: 0.12, albedoAO: 0.34,
         specScale: 0.35,
@@ -1749,16 +1754,28 @@ export function create(opts = {}) {
       // on every stack head that is close enough to read, and one per stack.
       for (const c of visibleCrowns) {
         const heroic = c.px >= 55;
-        // Off-axis: the reference tree sits toward one side of the crown, not centred,
-        // so its trunk breaks the rock's silhouette instead of hiding inside it.
+        /* Near the axis, not on the lip.
+         *
+         * The first version put the tree at radial fraction 0.30-0.58 "so the trunk
+         * breaks the rock's silhouette". Measured, that is wrong at every scored pose:
+         * the cameras stand at y = 1.7 and the crowns are at y = 30-44, so we look at
+         * every stack *from below* and the near half of the cap is occluded by the rock
+         * itself. The tree base projected 38 px below the crown centre and the whole
+         * 12 m tree finished 3 px under the rock's silhouette — invisible. On the axis
+         * the base sits at the cap's high point and the full height clears the rim.
+         */
         const a = rand.range(0, Math.PI * 2);
-        const rr = 0.30 + 0.28 * rand.next();
+        const rr = 0.05 + 0.22 * rand.next();
         const cp = crownPoint(c.id, a / (Math.PI * 2), rr, c.L);
+        /* Scale from the stack, not from a constant. In kf_00720 the tree's crown is
+         * ~1.4x the width of the rock it stands on and clears the rim by ~40% of the
+         * rock's visible height; a fixed-size tree on a stack twice that wide reads as
+         * a shrub. */
         const s = heroic
-          ? THREE.MathUtils.clamp(c.r / 10.0, 0.72, 1.30)
+          ? THREE.MathUtils.clamp(c.r / 5.2, 0.90, 2.10)
           : 0.55 + 0.40 * rand.next();
         treeSites.push({
-          sp: heroic ? 0 : 1, x: cp.point.x, z: cp.point.z, y: cp.point.y - 0.6,
+          sp: heroic ? 0 : 1, x: cp.point.x, z: cp.point.z, y: cp.point.y - 0.4,
           s, id: c.id, px: c.px,
         });
       }
@@ -1824,10 +1841,31 @@ export function create(opts = {}) {
        * being spread over 48,000 m2 of mostly-invisible back-beach, and tuft radius is
        * small enough that neighbouring tufts merge into a mat rather than reading as
        * islands of dowels. */
-      const grassCells = cellsWhere((c) =>
-        c.d < 95 && c.wet < 0.32 && c.slope < 0.60 && c.y > 0.05);
-      const swardCells = cellsWhere((c) =>
-        c.d < 260 && c.wet < 0.32 && c.slope < 0.52 && c.y > 6);
+      /* The "is this the back beach" gate is a **quantile of the terrain's own visible
+       * height distribution**, not a number in metres.
+       *
+       * A fixed `s.y > 1.2` emptied this scatter the moment terrain.js re-profiled the
+       * beach; a fixed `s.y > 0.05` (its replacement) went the other way and carpeted
+       * the open swash-zone sand, where the reference has none. A quantile cannot do
+       * either: by construction the top 55% of visible dry ground always passes, wherever
+       * the height field happens to put it. */
+      const heightFloor = (list, q) => {
+        if (!list.length) return -1e9;
+        const ys = list.map((c) => c.y).sort((a, b) => a - b);
+        return ys[Math.floor(ys.length * q)];
+      };
+      // The quantile must be taken over the *same distance band* it gates. Taken over
+      // everything visible it reads 62 m — the cliff plateau dominates the cell count —
+      // and the beach empties again. Per band it reads the beach's own profile.
+      const nearDry = cellsWhere((c) => c.d < 95 && c.wet < 0.24 && c.slope < 0.60);
+      const midDry = cellsWhere((c) => c.d < 260 && c.wet < 0.24 && c.slope < 0.52);
+      const nearFloor = heightFloor(nearDry, 0.45);
+      const midFloor = heightFloor(midDry, 0.35);
+      const grassCells = nearDry.filter((c) => c.y > nearFloor);
+      const swardCells = midDry.filter((c) => c.y > midFloor);
+      console.log(`[vegetation] ground: ${cells.length} visible cells, floors `
+        + `near=${nearFloor.toFixed(2)} mid=${midFloor.toFixed(2)} -> `
+        + `${grassCells.length} near + ${swardCells.length} sward cells`);
 
       let placed = 0, tries = 0;
       const maxTries = CFG.grassBlades * 6;
@@ -1998,7 +2036,7 @@ export function create(opts = {}) {
       for (let t = 0; t < CFG.ivyCards * 14 && ivyPlaced < CFG.ivyCards; t++) {
         const id = drapeIds[Math.floor(ir.next() * drapeIds.length)];
         const u = ir.next();
-        const v = 1.0 - 0.32 * Math.pow(ir.next(), 1.5);
+        const v = 1.0 - 0.34 * Math.pow(ir.next(), 1.4);
         const sp = rocks?.surfacePoint?.(id, u, v);
         if (!sp || !sp.point || !Number.isFinite(sp.point.y)) continue;
         const p = sp.point;
@@ -2009,9 +2047,13 @@ export function create(opts = {}) {
         if (seenBy(views, p.x, p.y, p.z, 420).n === 0) continue;
         const yaw = Math.atan2(n.x / nl, n.z / nl);
         const sc = 0.55 + 0.45 * ir.next();
-        ivyInst.add(p.x + n.x * 0.30, p.y + 0.2, p.z + n.z * 0.30,
-          yaw + ir.sym(0.45), 1.30 + ir.sym(0.40),
-          sc * (0.70 + 0.40 * ir.next()), sc * (2.6 + 1.6 * ir.next()),
+        // A drape is long and narrow. The card's local +Y is rotated ~170 deg about X
+        // so it hangs *down* the face: aOri.z is then the fall length in metres and
+        // aOri.w the strand width. The first version had the two the wrong way round
+        // and produced 4 m wide, 0.6 m long cards — a shingle, not a runner.
+        ivyInst.add(p.x + n.x * 0.30, p.y + 0.15, p.z + n.z * 0.30,
+          yaw + ir.sym(0.45), 2.80 + ir.sym(0.30),
+          sc * (1.3 + 1.7 * ir.next()), sc * (0.55 + 0.55 * ir.next()),
           bakePhase(p.x, p.z, ir.next()), ir.next(), 1.0, 0.12);
         ivyPlaced++;
       }

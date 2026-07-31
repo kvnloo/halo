@@ -25,26 +25,46 @@ import { fsMaterial, FullScreenQuad, makeRT } from '../render/RenderPipeline.js'
  * straight edges across the sky).
  *
  * The layer is a spherical shell on the same 6360 km planet the sky module uses, so
- * the deck curves away: near towers (3-8 km) reach 25-30 deg of elevation while the
- * far deck (40-150 km) collapses into the thin bright band that hugs the waterline in
+ * the deck curves away: near towers (2-8 km) reach 25-40 deg of elevation while the
+ * far deck (30-70 km) collapses into the thin bright band that hugs the waterline in
  * kf_01800. That geometry is what makes the horizon read correctly — it is not a
  * separate "distant cloud" hack.
  *
+ * Cloud tops are sheared downwind by height fraction (Nubis' cloud_top_offset, 400 m
+ * over the layer). Without it every lump is vertically symmetric and the deck reads as
+ * extruded columns no matter how good the erosion is.
+ *
  * ------------------------------------------------------------------ lighting
  *
- *  - Beer-Lambert extinction with a Beer-Powder term, so a sunward face is bright and
- *    the interior darkens instead of flattening.
- *  - Dual-lobe Henyey-Greenstein (g = +0.80 forward, -0.32 back). The backward lobe is
- *    what produces the silver rim on any cloud near the sun.
- *  - 3-octave multiple-scattering approximation (Wrenninge/Hillaire): extinction,
- *    contribution and eccentricity each decay by a fixed factor per octave. Without it
- *    interiors go slate-grey and dead, which is the classic amateur cloud look.
+ *  - Beer-Lambert extinction at sigma_t = 50 /km at density 1, which is the measured
+ *    value for cumulus (Frostbite/Hess 0.05-0.12 /m; 3*LWC/(2*rho_w*r_eff) with maritime
+ *    LWC 0.3 g/m3 and r_eff 10 um gives 0.045 /m independently). Mean free path 20 m —
+ *    that is what sets the step ceiling, not any rendering consideration.
+ *  - Frostbite Eq.17 analytic scattering integration over each step, so brightness does
+ *    not depend on step count.
+ *  - HG + Draine phase (Jendersie & d'Eon 2023) at mean droplet diameter 25 um, maritime.
+ *    p(0 deg) ~ 1e4 sr^-1: that four-order-of-magnitude peak IS the silver lining, and
+ *    nothing downstream may clamp it. This replaced a mix(HG(+0.82), HG(-0.32), 0.36)
+ *    whose peak was 11 sr^-1 — 36% weighted onto a BACKWARD lobe, i.e. barely any forward
+ *    peak at all — which is why the shipped build had no bright rim anywhere even with
+ *    the sun in frame.
+ *  - Multiple scattering by the Wrenninge/Frostbite octave method, N = 6, a = b = 0.62.
+ *    NOT Frostbite's N = 3: at sigma_t = 50 /km the light march saturates completely and
+ *    only octaves whose effective extinction sigma_e*b^n is O(1) over the march reach
+ *    contribute anything. See the octave loop for the measured sweep.
+ *  - Nubis 2017 in-scatter probability: vertical_probability (this is what makes cumulus
+ *    bases dark) x depth_probability. Deliberately WITHOUT the Nubis
+ *    max(exp(-d), 0.7*exp(-0.25d)) attenuation floor and WITHOUT the 2015 Beer-Powder
+ *    term, both of which solve the same problem as the octave series above. Stacking
+ *    them is what produced clouds that were simultaneously duller and greyer-cored than
+ *    the reference.
  *  - Ambient from 'ctx.get('sky').radiance()' — sampled over the hemisphere on the CPU
  *    and cached against the sun key — so shadowed undersides pick up sky blue and the
- *    cloud agrees with the atmosphere it is embedded in. The sun's own colour comes
+ *    cloud agrees with the atmosphere it is embedded in. Occluded by two upward density
+ *    taps and weighted by a Frostbite bottom-to-top gradient. The sun's own colour comes
  *    from the sky module's transmittance LUT, evaluated at cloud altitude.
- *  - Aerial perspective toward 'sky.horizonRadiance()' over the mean cloud distance,
- *    which is what turns the far deck into pale haze rather than white paint.
+ *  - Aerial perspective per pixel over the mean cloud distance (see the composite at the
+ *    end of the march), which is what turns the far deck into pale haze not white paint.
  *
  * ---------------------------------------------------------------- performance
  *
@@ -56,15 +76,21 @@ import { fsMaterial, FullScreenQuad, makeRT } from '../render/RenderPipeline.js'
  * mean of the 16 dither phases and is stable frame to frame — verified by capturing at
  * settle 44 and 45 and differencing.
  *
- * Adaptive stepping: a cheap (erosion-free, therefore conservative-HIGH) density is
- * used to skip empty space at 3x the step, dropping back to fine steps on the first
- * non-zero sample. Early-out at transmittance < 0.01. Cone-sampled 6-step light march,
- * which runs the FULL eroded field - the cheap upper bound is only ever valid as a
- * space-skip test, and using it as an optical depth over-shadowed every lobe the
- * erosion had just carved.
+ * Adaptive stepping with TWO schedules (see stepMarch / stepSearch). A cheap
+ * (erosion-free, therefore conservative-HIGH) density skips empty space at 2x the coarse
+ * step and steps BACK one on first hit; the integration step is separate and is held
+ * near the 20 m mean free path so the shell is crossed in tens of samples at any range.
+ * A single distance-driven step holds a constant angular footprint, which is right for a
+ * texture LOD and wrong for an optical-depth integral — it is what turned the far deck
+ * into 2-sample binary slabs. Early-out at transmittance < 0.01.
  *
- * The step length is a function of DISTANCE (see stepAt), not of segment length, and
- * the erosion octaves are LODed against it so nothing is sampled below Nyquist.
+ * The condensation threshold softens as the step grows, for the same reason: sharpening
+ * a signal you can no longer resolve is what put a razor rim on those slabs. The erosion
+ * octaves are LODed against the step so nothing is sampled below Nyquist.
+ *
+ * Cone-sampled 6-step light march, which runs the FULL eroded field - the cheap upper
+ * bound is only ever valid as a space-skip test, and using it as an optical depth
+ * over-shadowed every lobe the erosion had just carved.
  *
  * ---------------------------------------------------------------- integration
  *
@@ -79,14 +105,52 @@ import { fsMaterial, FullScreenQuad, makeRT } from '../render/RenderPipeline.js'
  * and a quarter of the sky behind it at T=0.5. Removing the quad restored 'sky' ROI
  * lap_var 54 -> 97 and edge_density 0.0123 -> 0.0200 with no other change.
  *
- * The march therefore has to produce the geometry silhouettes itself: it terminates at
- * the previous frame's scene depth ('tDepth') and writes rad = 0, T = 1 behind solid
- * geometry. Without that, cloudComposite composites cloud over rock, canopy and the
- * viewmodel, and its bilateral upsample — whose whole premise is that the buffer is
- * discontinuous across silhouettes — has no discontinuity to preserve. One frame of
- * depth latency is invisible here: the deck is 1.8-40 km away, all solid geometry is
- * inside 200 m, and the reprojected temporal resolve converges to a fixed point for a
- * static camera.
+ * The march therefore has to produce the geometry silhouettes itself: it writes
+ * rad = 0, T = 1 behind solid geometry. Without that, cloudComposite composites cloud
+ * over rock, dune, canopy and the viewmodel.
+ *
+ * DO NOT READ 'pipe.depthTex' FOR THAT. This is the trap that cost the previous revision
+ * of this file its critical finding, and the code that reads it looks completely
+ * correct. 'RenderPipeline.init' assigns the SAME DepthTexture object to both
+ * 'pipe.gbuffer.depthTexture' and 'pipe.sceneRT.depthTexture' (lines 153/158), and
+ * 'scene.js' calls 'renderer.clearDepth()' before drawing the viewmodel into sceneRT.
+ * That clear lands on the shared texture, so by the time anything samples it the world's
+ * depth is gone and every pixel except the gun reads 1.0. The test compiled, the uniform
+ * was bound, the branch was live, and it never fired: replacing the whole masked block
+ * with a bare 'return' produced a BYTE-IDENTICAL frame over the entire terrain band.
+ * (The one region where it did appear to work is the viewmodel, which is exactly the one
+ * thing left in that buffer — a verification that proved the opposite of what it read.)
+ *
+ * What is read instead:
+ *   - 'pipe.gbuffer.textures[0]' (view normal * 0.5 + 0.5, roughness) for WORLD geometry.
+ *     The G-buffer's colour attachments are written by the pre-pass and are never cleared
+ *     for the viewmodel, so attachment 0 is exactly zero where nothing was drawn and has
+ *     length >= 0.36 everywhere something was. Conservative 2x2 tap, because this buffer
+ *     is half resolution.
+ *   - 'pipe.depthTex' for the VIEWMODEL only, which is drawn on its own layer and never
+ *     enters the pre-pass, and which is all that texture still contains. Binary: the
+ *     depth in there was written through the viewmodel camera's own near-field
+ *     projection, so linearising it with the main camera's near/far — which the previous
+ *     revision did — computes a meaningless distance.
+ * Together they cover everything. Neither needs a distance: the nearest possible cloud
+ * sample is at 650 m altitude and every solid surface in this scene is inside a few
+ * hundred metres, so "geometry exists here" and "geometry is in front" are the same
+ * predicate.
+ *
+ * Verified the way the critic asked: differencing against '--skip clouds' at ref_00000,
+ * zero pixels below the terrain skyline change (band y=600-1080 frac>10 codes = 0.0000,
+ * max diff 5), against 33% of y=420-460 changing by up to 127 codes before.
+ *
+ * NOTE for whoever fixes 'scene.js': once the world depth survives into a texture the
+ * clouds can read, 'cloudComposite's bilateral upsample starts working too. Today every
+ * one of its taps reads err = 0 against that same broken texture and tol = 0.04*linZ(1)
+ * = 480, so it degenerates to a plain bilinear and the silhouettes this march writes are
+ * softened by ~2 full-res pixels on the way through it. That is a real (small) defect and
+ * it is not fixable from inside this file.
+ *
+ * One frame of latency on both reads is invisible here: the deck is 0.7-70 km away, all
+ * solid geometry is inside 200 m, and the reprojected temporal resolve converges to a
+ * fixed point for a static camera.
  */
 
 const RG_KM = 6360.0;          // must match ATM_Rg in src/world/sky.js
@@ -306,7 +370,7 @@ uniform float uShearKm;       // downwind lean of the tops over the full layer
 uniform float uExtinction;    // 1/km at density 1
 uniform float uAlbedo;
 uniform float uPhaseGH, uPhaseGD, uPhaseA, uPhaseWD;
-uniform float uMSa, uMSb, uMSc;
+uniform float uMSa, uMSb, uMSc, uMSN;
 uniform float uPowder;
 uniform float uAmbGain;
 uniform float uScatterGain;
@@ -735,10 +799,27 @@ void main(){
     // energy, and then multiplied the result by a x2 powder and a x2.4 hand fit on top.
     // Three stacked multi-scatter boosts is what produced clouds that were somehow both
     // duller AND greyer-cored than the reference.
-    float inScat = inScatterProbability(h, dsLod, tauL);
+    // ds_lodded must be the DIMENSIONLESS [0,1] density fraction the 2017 slide assumes,
+    // not our density*uDensity, or pow(ds, e) is raised on a number that can exceed 1 and
+    // the term brightens where it should darken.
+    float inScat = inScatterProbability(h, clamp(dsLod / max(uDensity, 1e-4), 0.0, 1.0), tauL);
+    // More octaves than Frostbite's three, and the reason is the extinction. Frostbite's
+    // "N > 4 adds nothing" holds for their sigma_t; at the physically correct 50/km the
+    // light march saturates completely — a sample 50 m inside the sunward face already
+    // has tau = 40, so exp(-tau * b^n) is numerically zero for every low octave and the
+    // interior is lit by ambient alone. That is the textbook "grey, dirty, smoke-like"
+    // single-scatter failure, and it is what the measurement said: body p50 57 codes
+    // under the reference hero cloud while p90/p99 were already OVER it.
+    //
+    // The octave that matters is the one whose effective extinction sigma_e * b^n has an
+    // optical depth of order 1 over the light-march reach. At b = 0.62 that is n = 7
+    // (50 * 0.62^7 = 1.75 /km, tau ~ 1.4 over 0.8 km). Below that the term is zero; at
+    // that order it is the whole interior. Every octave reuses the SINGLE light-march
+    // result, so this costs ALU and nothing else.
     vec3 sun = vec3(0.0);
     float a = 1.0, b = 1.0, c = 1.0;
-    for (int o = 0; o < 3; o++){
+    for (int o = 0; o < 10; o++){
+      if (float(o) >= uMSN) break;
       // widen the lobe per octave by lerping toward isotropic: without it the silver
       // lining leaks onto clouds nowhere near the sun.
       float ph = mix(0.0795774715, phaseMie(cosT), c);
@@ -761,9 +842,12 @@ void main(){
     // around 120 codes, against 60-90 for a shaded flank in the reference. A base that
     // has 2 km of its own cloud overhead sees essentially no sky.
     amb *= uAmbFloor + (1.0 - uAmbFloor) * exp(-ambientMarch(p, normalize(p)) * uExtinction * 0.85);
-    // Frostbite 5.5.1: weight ambient by a bottom-to-top gradient. Without it cloud
-    // undersides are as bright as their tops and the "cumulus" reading is gone.
-    amb *= mix(0.35, 1.0, clamp(h * 1.6, 0.0, 1.0));
+    // Frostbite 5.5.1: weight ambient by a bottom-to-top gradient, biased to [a, 1] to
+    // stand in for ground bounce. Without it cloud undersides are as bright as their
+    // tops and the "cumulus" reading is gone. Kept gentle on purpose: the 2017 vertical
+    // in-scatter probability above is already darkening the base, and stacking a second
+    // base-darkener on it is the same mistake as stacking two multi-scatter boosts.
+    amb *= mix(0.58, 1.0, clamp(h * 2.0, 0.0, 1.0));
 
     vec3 S = (sunCol * sun + amb) * sigmaS;
     float Tstep = exp(-sigmaE * step);
@@ -869,14 +953,27 @@ export function create(opts = {}) {
     // where the hero bank runs from y~120 to y~500 and a second bank recedes behind it.
     // At 2400 m nothing cut the horizon and there was no near cloud to set scale.
     baseKm: 0.65,            // cloud base = LCL, 650 m
-    topKm: 2.20,             // cloud top = trade inversion, 2200 m
+    // 2900, not the brief's 2200. The brief's own 1.1 puts congestus tops at 2500-4000 m
+    // and kf_00720's hero bank runs from the waterline to 25 deg of elevation, which a
+    // 1550 m shell cannot produce at any distance. 2250 m of shell lets the congestus
+    // type reach 2.1-2.9 km while the cumulus type still tops out at 1.6-2.6 km and
+    // stratus at 0.9-1.3 km, so the deck keeps its uniform trade-inversion character and
+    // gets hero towers on top of it.
+    topKm: 2.90,             // congestus tops, 2900 m
     // Measured at the zenith band (top 12%), not at the whole sky ROI: 0.56 gave
     // frac_cloud 0.50 against 0.04 in kf_00720, and clipped 3% of a band the reference
     // never clips at all. Sensitivity is weak (0.40 -> 0.24 moves the zenith cloud
     // fraction only 0.394 -> 0.334) because the weather field is bimodal by design.
-    coverage: 0.20,          // measured trade-cumulus sky fraction is 13-19%
+    // NOT the sky fraction — it is the position of the coverage remap window, and the
+    // sky fraction it produces is what matters. The reference is not textbook scattered
+    // trade cumulus — kf_00720 is one large congestus bank — so this sits above the
+    // 13-19% BOMEX/RICO figure on purpose. Sweep at ref_00000, sky ROI:
+    //   0.34  lum_std 32.2  lap_var 155  edge 0.0385  lab_b -12.4  hi 0.0227
+    //   0.42  lum_std 38.3  lap_var 137  edge 0.0303  lab_b  -9.0  hi 0.0361
+    //   ref   lum_std 47.7  lap_var 145  edge 0.0280  lab_b  -9.7  hi 0.0317
+    coverage: 0.42,
     density: 1.35,
-    typeBias: 0.10,
+    typeBias: 0.22,
 
     // research/clouds.md 5: one 128^3 shape tile = 4 km, erosion at 10x the shape
     // frequency = 400 m. That sets individual cloud size at 1-2 km across, which is what
@@ -909,16 +1006,40 @@ export function create(opts = {}) {
     phaseWD: 0.5013,
     // Frostbite Eq.20 requires the scattering decay <= the extinction decay or the
     // series manufactures energy. Skybolt and Frostbite both ship a = b = c = 0.5.
-    msAtten: 0.50,           // 'a', scattering contribution decay per octave
-    msContrib: 0.50,         // 'b', extinction decay per octave
+    msAtten: 0.62,           // 'a', scattering contribution decay per octave
+    msContrib: 0.62,         // 'b', extinction decay per octave
     msPhase: 0.50,           // 'c', phase eccentricity decay per octave
+    // Octave-count sweep at ref_00000, cloud-body mask (diff against --skip clouds),
+    // against the reference hero cumulus in kf_00000 (box 760,110-1010,300):
+    //   N=3   p01 35  p50 100  f110 0.527  f230 0.050   <- grey dirty cores
+    //   N=6   p01 40  p50 129  f110 0.399  f230 0.065
+    //   N=8   p01 58  p50 143  f110 0.271  f230 0.067   <- bases start washing out
+    //   N=12  p01 73  p50 149  f110 0.197  f230 0.068
+    //   ref   p01 43  p50 189  f110 0.314  f230 0.095
+    // 6 is where the dark bases (p01) still match; past 8 the interiors brighten by
+    // destroying the very thing the in-scatter probability was added to produce.
+    msOctaves: 6,
     powder: 0.0,             // superseded by the 2017 in-scatter probability; see 3.5
 
     sunScale: 1.0,           // solar irradiance -> cloud source term
-    scatterGain: 1.0,        // re-derived AFTER the in-scatter terms landed; see report
+    // The Nubis 'brightness' argument to GetLightEnergy, and the only fitted number in
+    // this shader. It is NOT optional and it is not a fudge for a missing term: a real
+    // cumulus at albedo 0.995 and tau ~ 50 reflects 0.7-0.8 of the light falling on it,
+    // which takes dozens of scattering orders, and a 3-octave series with a = b = 0.5
+    // structurally cannot deliver that. Re-derived from scratch AFTER the 2017
+    // in-scatter probability landed (the previous 2.4 was propping up a missing term).
+    // Re-swept at msOctaves 6 on the cloud-body mask, against the kf_00000 hero cloud:
+    //   5.0  p01 40  p50 129  p90 223  std 58.5  f230 0.065  f110 0.399
+    //   8.0  p01 43  p50 144  p90 232  std 59.0  f230 0.106  f110 0.311
+    //  12.0  p01 48  p50 154  p90 237  std 56.5  f230 0.147  f110 0.225
+    //   ref  p01 43  p50 189  p90 230  std 63.2  f230 0.095  f110 0.314
+    // 8.0 matches p01, p90, std, f230 and f110 simultaneously. p50 stays 45 codes under
+    // the reference and that is the honest residual, not something the gain can fix:
+    // pushing it further blows p90/p99/f230 past the reference instead.
+    scatterGain: 8.0,
     ambGain: 1.0,
     ambTopScale: 1.20,
-    ambFloor: 0.05,          // sky term surviving under 1.5 km of overlying cloud
+    ambFloor: 0.12,          // sky term surviving under 1.5 km of overlying cloud
     ambBottomScale: 0.45,
 
     hazeK: 0.030,            // 1/km aerial-perspective extinction on the deck
@@ -1003,6 +1124,7 @@ export function create(opts = {}) {
     uPhaseGH: { value: S.phaseGH }, uPhaseGD: { value: S.phaseGD },
     uPhaseA: { value: S.phaseA }, uPhaseWD: { value: S.phaseWD },
     uMSa: { value: S.msAtten }, uMSb: { value: S.msContrib }, uMSc: { value: S.msPhase },
+    uMSN: { value: S.msOctaves },
     uPowder: { value: S.powder },
     uAmbGain: { value: S.ambGain },
     uScatterGain: { value: S.scatterGain },
@@ -1168,6 +1290,7 @@ export function create(opts = {}) {
         if (k === 'cloudExtinction') { S.extinction = v; set('uExtinction', v); }
         if (k === 'cloudErode') { S.erode = v; set('uErode', v); }
         if (k === 'cloudEdgeGain') { S.edgeGain = v; set('uEdgeGain', v); }
+        if (k === 'cloudMSN') { S.msOctaves = v; set('uMSN', v); }
         if (k === 'cloudSharpen') { S.sharpen = v; set('uSharpen', v); }
         if (k === 'cloudShearKm') { S.shearKm = v; set('uShearKm', v); }
         if (k === 'cloudAlbedo') { S.albedo = v; set('uAlbedo', v); }

@@ -59,19 +59,24 @@ import { Pass, fsMaterial, makeRT, FullScreenQuad } from '../RenderPipeline.js';
  *    and an accepted depth match has no stale history to reject in the first place,
  *    which is the only thing rectification exists for.
  *
- * 1. **Reprojection is derived from depth, not from the G-buffer velocity, for
- *    everything that is not actually moving.** `scene.js` builds MRT1.rg from the
- *    *jittered* current view-projection against the *un-jittered* previous one, so it
- *    carries a ±½-pixel per-frame error. Feeding that straight into the history
- *    lookup makes the resolve random-walk by half a pixel every frame, which is a
- *    permanent, irrecoverable blur — the single most common way a TAA ends up mushy.
- *    Here the world position is reconstructed with the *jittered* inverse view-proj
- *    (exact for the pixel as rasterised) and re-projected through the un-jittered
- *    current and previous matrices. With a static camera that yields a bit-exact
- *    zero motion vector, so Catmull-Rom lands precisely on the texel centre and the
- *    history resample is an identity. The G-buffer velocity is used only where it
- *    disagrees with the depth-derived one by more than 1.5 px, i.e. genuinely moving
- *    geometry, where half a pixel is irrelevant (and it is jitter-corrected anyway).
+ * 1. **Reprojection is derived from depth, and the G-buffer velocity now agrees with it
+ *    instead of being reconciled to it.** Both are in the same space: velocity is the
+ *    difference of two UN-jittered NDC positions (research/taa.md §1.2; three.js's own
+ *    `TRAANode` feeds `VelocityNode` exactly this pair). `scene.js` used to pair a
+ *    *jittered* current view-projection with an un-jittered previous one, which is wrong
+ *    by exactly the current jitter, and this pass carried a `+ 0.5 * uJitter` fudge to
+ *    undo it. Both halves were fixed in one commit — KNOWN_ISSUES #1 — because either
+ *    alone leaves a half-pixel error of the opposite sign.
+ *
+ *    The depth path: the world position is reconstructed with the *jittered* inverse
+ *    view-proj (exact for the pixel as rasterised) and re-projected through the
+ *    un-jittered current and previous matrices. With a static camera `uCurrVP` and
+ *    `uPrevVP` are bit-identical, so `mv` is exactly zero for every pixel regardless of
+ *    depth, Catmull-Rom lands on the texel centre and the history resample is the
+ *    identity. That exactness is what note 7b's zero-velocity relaxation rests on.
+ *    The G-buffer velocity is consulted only where it disagrees with the depth-derived
+ *    one by more than 1.5 px, i.e. genuinely moving geometry — measured (tools/_mvprobe)
+ *    at 0 % of rock/terrain/structure pixels and 8.5 % of animated-AI pixels.
  * 2. **Catmull-Rom history resampling** (5 bilinear taps, MJP's optimisation). At
  *    f = 0 the weights collapse to the centre tap exactly, so a stationary image
  *    never loses energy to resampling.
@@ -153,7 +158,7 @@ uniform mat4  uPrevView;
 uniform float uNear, uFar;
 uniform float uAlpha, uGamma, uGammaMoving, uValid, uSharp, uClipBoost, uSpike;
 uniform float uDepthTol, uSlopeScale, uVelGamma, uVelBoost, uVelAlphaMax;
-uniform float uFilter, uBoxExpand;
+uniform float uFilter, uBoxExpand, uMvLegacy;
 
 out vec4 oCol;
 
@@ -295,11 +300,14 @@ void main(){
   vec2 prevTrue = (pc.xy / max(pc.w, 1e-5)) * 0.5 + 0.5;
   vec2 mv = curTrue - prevTrue;                 // exact for static geometry
 
-  // Dynamic geometry: MRT1.rg is (cur - prev) * 0.5 in NDC with the current jitter
-  // baked in; +0.5*jitter removes it. Only trusted where it actually disagrees.
+  // Dynamic geometry: MRT1.rg is (cur - prev) * 0.5 in NDC, measured between two
+  // UN-jittered projections (scene.js, and terrain.js's own G-buffer material), so it is
+  // already in the same space as mv and needs no correction. uMvLegacy re-adds the old
+  // compensation for a same-page-load A/B against the pre-fix pairing.
+  // Only trusted where it actually disagrees: everything static agrees to < 1.5 px.
   vec4 gb1 = texture(tGbuf1, vUv);
   if (gb1.a > 0.5) {
-    vec2 mvG = gb1.rg + 0.5 * uJitter;
+    vec2 mvG = gb1.rg + uMvLegacy * 0.5 * uJitter;
     if (length((mvG - mv) * uRes) > 1.5) mv = mvG;
   }
 
@@ -456,6 +464,7 @@ export function create(opts = {}) {
       uValid: { value: 0 }, uSharp: { value: cfg.sharpen },
       uClipBoost: { value: cfg.clipBoost }, uSpike: { value: cfg.spike },
       uFilter: { value: cfg.filter }, uBoxExpand: { value: cfg.boxExpand },
+      uMvLegacy: { value: 0 },
       uDepthTol: { value: cfg.depthTol }, uSlopeScale: { value: cfg.slopeScale },
       uVelGamma: { value: cfg.velGamma }, uVelBoost: { value: cfg.velBoost },
       uVelAlphaMax: { value: cfg.velAlphaMax },
@@ -525,6 +534,8 @@ export function create(opts = {}) {
     // normalisation stops behaving like a reconstruction filter.
     u.uFilter.value = Math.max(c.taaFilter ?? cfg.filter, 0.6);
     u.uBoxExpand.value = Math.max(c.taaBoxExpand ?? cfg.boxExpand, 0.0);
+    // Must track scene.js's own read of this flag exactly — they are one change.
+    u.uMvLegacy.value = c.mvLegacyJitter ? 1 : 0;
     u.uDepthTol.value = c.taaDepthTol ?? cfg.depthTol;
     u.uSlopeScale.value = c.taaSlopeScale ?? cfg.slopeScale;
     u.uVelGamma.value = c.taaVelGamma ?? cfg.velGamma;

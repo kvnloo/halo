@@ -5,7 +5,35 @@ deliberately, not opportunistically.
 
 ---
 
-## 1. Motion vectors are computed against mismatched projections — CRITICAL, COUPLED
+## 1. Motion vectors are computed against mismatched projections — FIXED
+
+**Fixed** in `src/render/passes/scene.js` + `src/render/passes/taa.js`, one change, both
+files. `uCurrViewProj` is now `pipe.currViewProj` (un-jittered, matching `uPrevViewProj`)
+and `taa.js` no longer adds `0.5 * uJitter`. `ctx.config.mvLegacyJitter = 1` restores the
+old pairing in both files simultaneously for an A/B. Full workings, measurements and the
+three follow-ups below in **`reports/taa.md`**. Verify with `node tools/_mvprobe.mjs`,
+which reads MRT1 back off the GPU: every static surface must report `zeroFrac 1.0000`.
+
+Three things the original diagnosis below got wrong, all measured:
+
+1. **There are three velocity producers, not one.** `terrain.js` and `vegetation.js` have
+   their own G-buffer materials (they opt out of `scene.overrideMaterial` for vertex
+   displacement). `terrain.js` was already *correct* — its `prerender` runs before
+   `_applyJitter`, so it reads an un-jittered `projectionMatrix` despite a comment
+   claiming it mirrors scene.js. **`vegetation.js` is still wrong** and needs the same
+   one-line change (`vVegCur` comes from the jittered `gl_Position`).
+2. **`motionBlur.js:189` applies the same `+ 0.5 * uJitter` compensation** and now
+   over-corrects by ≤0.16 px of half-extent — provably below its own `mbMinPx = 0.60`
+   cutoff, so it is invisible, but the line should go.
+3. **The claimed impact — "permanent, unrecoverable blur" — did not happen.** `taa.js`
+   only consults the G-buffer velocity where it disagrees with the depth-derived one by
+   >1.5 px, and the error was ≤0.707 px. Measured `gateFrac` on every static surface at
+   `ref_01500`: **0**. The bug was real, exact and worth fixing; it was never reaching a
+   scored still.
+
+---
+
+### Original report, kept for the reasoning
 
 **Where:** `src/render/passes/scene.js`, the G-buffer pre-pass setup.
 
@@ -558,3 +586,201 @@ hazard by looking for `/* glsl */` templates that end somewhere other than a sta
 boundary or a `+` concatenation. **Run it before any measurement you intend to believe.**
 
 In GLSL comments, use 'single quotes'.
+
+---
+
+# Wave F integration pass — 2026-07-30
+
+Full working notes in `reports/integration.md` (Wave E's are archived at
+`reports/integration_waveE.md`). Score **30.09**, best on record. Sections 21–24 are new.
+
+## Status changes to existing sections
+
+- **§8 (desaturation): brightness half CLOSED, chroma half OPEN — and the diagnosis has
+  changed.** Whole-frame means over all nine scored poses:
+
+  ```
+                  ours     target   ref keyframes
+  lum_mean      107.81      107.8         105.40    FIXED, delta +0.01
+  p50           112.22        105          99.44    overshot +7.2
+  sat_mean       55.72       83.9          79.14    NOT fixed, 28.2 short
+  ```
+
+  `sat_mean` moved **57.10 -> 55.72**, i.e. slightly *backwards* this wave.
+
+  **Stop attributing the residual to `volumetricFog.js`.** Wave E's evidence was that both
+  tails were pulled inward — the additive-inscatter signature. That is no longer true.
+  `p01` is now **14.89 against a reference 15.67** (it was +8.89 *over* at Wave E), so the
+  blacks are correct; only `p99` is still crushed (206.67 vs 222.11). An additive term
+  lifts both ends. A correct `p01` with a crushed `p99` is a **highlight roll-off /
+  exposure-shoulder** signature — `tonemap.js`, not the fog.
+
+  Two corroborations: `lab_b` is **−6.08** against a reference −1.59 and a target of +1.4
+  (an achromatic haze cannot create a chroma *bias*, only wash chroma toward zero); and the
+  deficit is strongly pose-dependent (`ref_00600` 68.59 vs `ref_01500` 48.07), which a
+  whole-frame haze would not be. Next experiment is a grade/tonemap chromaticity A/B
+  measured on the **`sand` ROI**, not whole-frame.
+
+  The Wave E warning still stands: do not chase this with grade saturation. It cannot fix a
+  crushed `p99` or a −6 `lab_b`.
+
+- **§12 (collider contract): NOW FULLY FIXED.** `structures.js:1148` emits the bridge deck
+  as a 14-segment chain of axis-aligned `Box3` instead of an OBB, with the error bounded at
+  `Lseg * sin(9.7°)` = 0.79 m per side. No `[warn] [physics] ignoring malformed collider`
+  appeared in any console capture this pass.
+
+- **§13 (perf): the numbers are void again, for a different reason — see §22.** `perf.ms`
+  in `scores/*.json` is an EMA read once at the end of the run, so in an `--all` run it
+  reports only the *last* pose. `waveF.json` says `ms: 5.13`; the real per-pose p50 range is
+  8.3–14.1 ms. Use `tools/_perfprobe.mjs`.
+
+- **§16 (concurrent writes): reproduced within one session of being written down.** A
+  determinism check returned `BROKEN` purely because `structures.js` was saved between the
+  two captures. The gate works — run it before believing any result.
+
+- **§17 (showcase defects): 4 of 5 unchanged.** Items 1, 3, 4 and 5 are still open exactly
+  as described; item 3 is now three cells with ~10 figures in the tide pools. Item 2 (the
+  ring) is **partially fixed** — it is a textured band now, not two thin lines, though it
+  reads as a vertical column rather than an arc. No showcase work landed this wave.
+
+- **§18 (shared depth texture): still open, and now costing a whole subsystem — see §21.**
+
+- **§1, §15, §20:** unchanged. §20's `parsecheck` gate passes clean (42 files).
+
+---
+
+## 21. Depth of field is a shipped no-op, gated off by §18
+
+Every capture prints, verbatim:
+
+```
+[console.info] [dof] world path disabled: dofWorldDepthValid is false because KNOWN_ISSUES 18 leaves pipe.depthTex holding no world geometry (measured: every pixel returns CoC 0 and the pass is byte-identical to dofEnabled:false). Set ctx.config.dofWorldDepthValid = true the day scene.js stops clearing the shared depth texture, and re-derive dofViewmodelCoC once the viewmodel reaches the G-buffer.
+```
+
+The postfx author did the right thing — gating it off honestly beats shipping a pass tuned
+against a depth buffer containing only a gun, and the re-enable condition is precise. But it
+means **§18 is no longer only an accuracy problem; it has removed a feature from the build**,
+on top of silently degrading `ssao`, `ssr`, `taa`, `motionBlur` and water refraction.
+
+§18 is the highest-priority open item in the project. It is also the most likely root of §24.
+
+## 22. Every recorded frame-time number is still wrong, in a new way — FIXED by a new tool
+
+§13 fixed `stats.ms` being a structural zero. It is now non-zero and still not what anyone
+thinks it is:
+
+- `Engine.advance()` accumulates `stats.ms` as an EMA (α=0.1) and `capture.mjs` reads it
+  **once, at the end**. An `--all` run serves nine poses from one page, so
+  `scores/*.json` records the EMA at the end of the *last* pose and labels it the run's.
+- A single-pose capture has the opposite bias: the EMA is seeded on a cold page, so it still
+  carries shader-compile cost. `ref_00000` alone reports **11.60 ms**; `waveF.json` reports
+  **5.13 ms**. Both are in the repo and they disagree by 2.3x.
+
+Use **`node tools/_perfprobe.mjs`** — one pose at a time, 30 warm-up frames discarded, 90
+individually-timed frames, p50/p95/mean. Same method as §13's table, so directly comparable.
+
+**And note this caveat, which applies to §13's numbers too:** `performance.now()` around
+`step()` measures **CPU submit cost, not GPU frame time**, because WebGL submission is
+asynchronous. These numbers are comparable to each other and are not frame times. GPU timer
+queries (`EXT_disjoint_timer_query_webgl2`) would fix it.
+
+## 23. Triangle count has 2.3x'd since Wave E — `rocks` suspected, culling first
+
+Measured steady state, all 21 poses. Two exceed 11 ms at p50; **twenty of twenty-one exceed
+it at p95**.
+
+```
+pose                          p50    p95   mean     max   draws         tris
+shot_stack_gauntlet         14.10  26.10  13.22   35.30     593   29,591,049   <-- over
+shot_shoreline              11.50  18.60  11.05   32.80     645   32,310,093   <-- over
+ref_00600                   10.90  22.60  12.34   29.00     639   32,475,489
+ref_00840                   10.90  24.30  13.09   42.50     635   30,218,405
+...
+shot_overview                8.30  19.60  10.86   29.60     523   30,684,757
+```
+
+Same pose, same method, against §13's table:
+
+```
+shot_stack_gauntlet     p50 ms         tris    draws
+§13 (Wave E)              4.70   12,904,456      575
+Wave F                   14.10   29,591,049      593
+                           3.0x         2.3x      +18
+```
+
+**Draw calls moved +3% while triangles moved +129%.** That is the same objects carrying far
+more geometry — a tessellation/LOD change, not more scene population. `shot_stack_gauntlet`
+is the most rock-dominated pose and the worst regression, and `rocks` is by far the most
+expensive module to initialise (2279 ms, 2x the next). **Named on strong correlation plus a
+mechanism, not on proof** — the `--skip rocks` A/B was not run because `src/` was not
+quiescent.
+
+**Check culling first.** Every pose now renders 29.6–32.5 M triangles, including
+`shot_sky_ring` at 32.5 M for a shot that is mostly empty sky. A floor that high everywhere
+says the geometry is not being frustum- or distance-culled, which is much cheaper to fix
+than a mesh generator.
+
+**And the extra geometry is not buying detail — it is costing it.** Over the same wave, two
+independent sharpness metrics moved the wrong way: `lap_ratio` **0.9857 -> 0.7929** (Wave E
+was within 1.5% of the reference; it is now 21% short) and `spectral_slope` **-2.575 ->
+-2.625** against a reference -2.542. Triangle count more than doubled while the frame got
+measurably *softer*. That is the signature of dense geometry aliasing into sub-pixel noise
+and then being averaged away by TAA — which is another reason to look at culling and LOD
+distance before anything else. Note `detail` scored **+0.75** across this, so the scoring
+axis did not see it; read `raw.lap_ratio` directly.
+
+Secondary: `ref_00120` recorded a **525.70 ms** single frame, 37x its own p50, *after* 30
+warm-up frames were discarded. Everything else in the build peaks at 45 ms. A half-second
+hitch is a visible freeze.
+
+## 24. NEW — `taa` writes pure-black corruption over the ocean at `shot_sky_ring`
+
+`shots/preview/shot_sky_ring.png` contains **7,978 pixels of exact `rgb(0,0,0)`** (0.385% of
+frame) in a fixed box `y902-1035 x357-956` — a shredded band of horizontal black streaks on
+the water at the far shoreline. In an AgX-tonemapped, grain-dithered frame, exact zero in all
+three channels is a NaN/Inf reaching the framebuffer, not a lighting result.
+
+**Deterministic and pose-specific.** Zero exact-black pixels in the other 20 frames captured
+this pass. Two independent captures, against trees that differed in between, produced
+**7,978 and 7,977** pixels in the identical bounding box.
+
+**Bisected to `taa` by elimination** (`node tools/_blackab.mjs` — one page load, one pass
+disabled per capture, via `__HALO__.togglePass()`):
+
+```
+variant                   exact-black      pct
+baseline                        7,977   0.385%
+ssr_off                         8,103   0.391%
+ssao_off                        7,974   0.385%
+cloudComposite_off              7,984   0.385%
+volumetricFog_off              12,644   0.610%
+taa_off                             0   0.000%   <-- artifact gone entirely
+motionBlur_off                  7,977   0.385%
+bloom_off                       7,986   0.385%
+sharpen_off                     7,968   0.384%
+grain_off                      14,814   0.714%
+ocean_off                       7,978   0.385%
+```
+
+Three readings from that table:
+
+1. **`taa_off` is 0.** No other single removal changes anything. Confirmed visually — the
+   region renders as clean water, foam and wet sand with TAA off.
+2. **`ocean_off` changes nothing.** The corruption is not the water geometry; it survives the
+   ocean being removed, so TAA is regenerating it from history/reprojection rather than
+   resolving bad shading.
+3. **`grain_off` nearly doubles it (7,977 -> 14,814).** Film grain is dithering about half
+   the corrupt pixels off exact zero — the true damage is ~0.71% of the frame, and **grain is
+   masking the bug.** Any scan for pure black done with grain on under-counts by half.
+
+Likely mechanism: a NaN entering TAA's neighbourhood min/max clamp poisons the clamp result,
+and TAA feeds its output back as history, so it is self-sustaining. That fits it being stable
+frame to frame and surviving removal of the geometry underneath.
+
+**Coupled to two open issues.** `taa.js` samples `pipe.depthTex`, which §18 establishes holds
+no world geometry at all — so TAA's depth-derived reprojection is computed from garbage
+everywhere, and this pose is a grazing-angle water horizon, exactly where that produces
+extreme reprojection vectors. And §1 follow-up 1 (`vegetation.js` still on the old
+jittered-current convention, confirmed still present) applies to the stack crowns in frame.
+
+Owner: whoever holds `scene.js` + `taa.js`. Fix §18 first and re-measure before anything else.

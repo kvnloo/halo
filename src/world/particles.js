@@ -154,6 +154,23 @@ uniform vec4  uBridge;            // anchor xz -> tip xz
 uniform float uDeckY;
 uniform vec4  uRows;              // row boundaries: sand, spray, dust, pollen
 
+/**
+ * INVARIANT: 'A.y' is the particle's PHYSICAL RADIUS IN METRES and nothing else.
+ *
+ * Emitter masks (gust, foam, light shaft, pollen band) gate whether a particle EXISTS —
+ * 'step(uniformRandom, mask)' — they never scale its size. Multiplying a continuous mask
+ * into size looks like a soft fade and is in fact a 4th-power cutoff, because DRAW_VERT
+ * grows sub-pixel particles to 1.5 px and takes the energy back out of alpha as 1/k^2:
+ *
+ *     px = size * uProjScaleY / dist ; k = max(1, 1.5/px) ; size *= k ; alp /= k*k
+ *
+ * Emitted light is alpha x area, so once a particle is at the 1.5 px floor its
+ * contribution is proportional to size^2. A shore probe at 50% foam therefore emitted
+ * 25% of the light over 25% of the area — ~6% of the contribution — and immediately fell
+ * through the 'alp <= 0.0015' early-out. That is why neither scored pose had a single
+ * visible spray droplet with the camera standing in breaking surf. The k/k^2 compensator
+ * is correct and must not be touched; the masks were the bug.
+ */
 void respawn(int type, vec2 tc, float cyc, out vec4 P, out vec4 V, out vec4 A){
   vec3 r1 = hash33(vec3(tc.x * 0.7310, tc.y * 1.1170, cyc * 2.3170 + 0.5));
   vec3 r2 = hash33(vec3(tc.y * 0.9130 + 11.0, cyc * 1.7710 + 3.0, tc.x * 0.5770));
@@ -169,13 +186,14 @@ void respawn(int type, vec2 tc, float cyc, out vec4 P, out vec4 V, out vec4 A){
     float dry  = 1.0 - smoothstep(0.15, 0.55, g.y);
     float high = smoothstep(0.20, 1.30, g.x);
     float level = 1.0 - smoothstep(0.35, 0.70, g.z);
-    float live = step(r2.x, 0.10 + 0.90 * uGust) * dry * high * level;
+    // 'live' is a PROBABILITY, not a scale. See the note above respawn().
+    float live = (0.10 + 0.90 * uGust) * dry * high * level;
     float sheet = step(0.84, r3.y);
     P.xyz = vec3(p.x, g.x + 0.015 + r1.z * r1.z * 1.15, p.y);
     V.xyz = uWind * (0.68 + 0.55 * r2.y) + (r3.xyz - vec3(0.5, 0.28, 0.5)) * 1.5;
     V.w   = 1.9 + 2.7 * r2.z;
     A.x   = sheet;
-    A.y   = live * mix(0.035 + 0.085 * r3.x, 0.40 + 0.75 * r3.x, sheet);
+    A.y   = mix(0.035 + 0.085 * r3.x, 0.40 + 0.75 * r3.x, sheet) * step(r2.x, live);
   } else if (type == 1) {
     // ---- sea spray: shoreline foam plus wave strike on the stacks -----------
     float useStack = step(r2.x, 0.42) * step(1.0, uStackCount);
@@ -192,7 +210,7 @@ void respawn(int type, vec2 tc, float cyc, out vec4 P, out vec4 V, out vec4 A){
             + vec3(0.0, 4.5 + 7.0 * r1.y, 0.0) + uWind * 0.35;
       V.w   = 1.5 + 1.8 * r1.z;
       A.x   = step(0.55, r2.z);
-      A.y   = beat * mix(0.030 + 0.10 * r3.x, 0.35 + 0.60 * r3.x, A.x);
+      A.y   = mix(0.030 + 0.10 * r3.x, 0.35 + 0.60 * r3.x, A.x) * beat;
     } else {
       int pi = int(floor(r2.y * ${SHORE_PROBES}.0));
       vec4 sp = texelFetch(uShoreTex, ivec2(pi, 0), 0);
@@ -202,7 +220,10 @@ void respawn(int type, vec2 tc, float cyc, out vec4 P, out vec4 V, out vec4 A){
       V.xyz = vec3((r1.x - 0.5) * 1.4, 1.7 + 3.4 * r1.y, -(0.7 + 2.4 * r1.z)) + uWind * 0.30;
       V.w   = 1.2 + 1.5 * r2.z;
       A.x   = step(0.62, r2.z);
-      A.y   = foam * mix(0.026 + 0.075 * r3.x, 0.28 + 0.45 * r3.x, A.x);
+      // this branch is conditioned on r2.x >= 0.42, so rescale it back to U(0,1)
+      // rather than burn another hash: gate EXISTENCE on foam, never droplet size.
+      float uf = clamp((r2.x - 0.42) / 0.58, 0.0, 1.0);
+      A.y   = mix(0.026 + 0.075 * r3.x, 0.28 + 0.45 * r3.x, A.x) * step(uf, foam);
     }
   } else if (type == 2) {
     // ---- dust motes hanging in the light shafts under the bridge deck -------
@@ -216,7 +237,7 @@ void respawn(int type, vec2 tc, float cyc, out vec4 P, out vec4 V, out vec4 A){
     P.xyz = vec3(p.x, mix(gy + 0.4, uDeckY - 1.2, r1.z), p.y);
     V.xyz = uWind * 0.10 + (r2.xyz - vec3(0.5, 0.35, 0.5)) * 0.42;
     V.w   = 6.0 + 9.0 * r3.x;
-    A.y   = shaft * (0.011 + 0.030 * r3.y);
+    A.y   = (0.011 + 0.030 * r3.y) * step(r3.z, shaft);
   } else {
     // ---- pollen drifting off the back-beach dune grass ----------------------
     vec2 p = uCamPos.xz + (r1.xy * 2.0 - 1.0) * 40.0;
@@ -225,7 +246,7 @@ void respawn(int type, vec2 tc, float cyc, out vec4 P, out vec4 V, out vec4 A){
     P.xyz = vec3(p.x, g.x + 0.25 + r1.z * 2.4, p.y);
     V.xyz = uWind * 0.18 + (r2.xyz - 0.5) * 0.5;
     V.w   = 5.0 + 6.5 * r3.x;
-    A.y   = band * (0.010 + 0.020 * r3.y);
+    A.y   = (0.010 + 0.020 * r3.y) * step(r3.z, band);
   }
 }
 

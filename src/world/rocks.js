@@ -173,7 +173,7 @@ const STACKS = [
   {
     // plumb column, faint waist, hard rim — the hero silhouette
     id: 'stack_hero', x: -38, z: -92, baseY: -4.0, topY: 38, radius: 15,
-    res: [256, 192], lod: 0, castShadow: true,
+    res: [224, 176], lod: 0, castShadow: true,
     prof: [[0, 1.12], [0.12, 1.11], [0.38, 1.07], [0.66, 1.035], [0.86, 1.04], [0.95, 1.055], [1.0, 1.005]],
     lean: [0.20, -0.11], notch: { y: 1.9, w: 1.5, d: 0.20, dir: 0.6 },
     ledges: [[0.40, 0.055], [0.66, 0.040]], flute: 1.0, crownFlat: 1.0,
@@ -181,7 +181,7 @@ const STACKS = [
   {
     // leaning slab with one mid-height undercut
     id: 'stack_arch', x: 34, z: -70, baseY: -3.4, topY: 41, radius: 17,
-    res: [256, 192], lod: 0, castShadow: true,
+    res: [224, 176], lod: 0, castShadow: true,
     prof: [[0, 1.14], [0.13, 1.12], [0.40, 1.06], [0.68, 1.02], [0.88, 1.04], [1.0, 0.98]],
     lean: [-0.24, 0.14], notch: { y: 2.0, w: 1.9, d: 0.25, dir: 2.5 },
     undercut: { t: 0.55, w: 0.12, d: 0.17, dir: 2.2 },
@@ -190,7 +190,7 @@ const STACKS = [
   {
     // tapered spire
     id: 'stack_twin_a', x: -96, z: -140, baseY: -7.5, topY: 44, radius: 19,
-    res: [192, 160], lod: 1, castShadow: false,
+    res: [176, 144], lod: 1, castShadow: false,
     prof: [[0, 1.15], [0.16, 1.12], [0.46, 1.05], [0.74, 0.99], [0.90, 0.955], [1.0, 0.88]],
     lean: [0.14, 0.20], notch: { y: 1.7, w: 1.6, d: 0.16, dir: 4.0 },
     undercut: { t: 0.40, w: 0.10, d: 0.12, dir: 0.8 },
@@ -199,7 +199,7 @@ const STACKS = [
   {
     // stubby drum on a broad foot
     id: 'stack_twin_b', x: -128, z: -172, baseY: -9.0, topY: 33, radius: 13,
-    res: [160, 128], lod: 1, castShadow: false,
+    res: [144, 112], lod: 1, castShadow: false,
     prof: [[0, 1.21], [0.10, 1.13], [0.36, 1.08], [0.68, 1.06], [0.88, 1.075], [1.0, 1.03]],
     lean: [-0.18, -0.16], notch: { y: 1.6, w: 1.5, d: 0.15, dir: 1.4 },
     ledges: [[0.52, 0.045]], flute: 1.0, crownFlat: 0.9,
@@ -259,10 +259,14 @@ function makeStackField(spec, rnd) {
    * This is the single feature that stops the silhouette reading as procedural.
    */
   const planes = [];
-  const nPlanes = 6 + rnd.int(0, 4);
+  const nPlanes = 6 + rnd.int(0, 3);
   for (let i = 0; i < nPlanes; i++) {
-    const y0 = spec.baseY + H * rnd.range(-0.06, 0.55);
-    const hh = H * rnd.range(0.40, 1.10);
+    // Bands must reach BELOW the foot. With y0 starting at the base half the planes
+    // began above y = 6 m, so the bottom 10 m of every stack was never clipped by
+    // anything and stood out as a bell-shaped skirt under a faceted shaft — the
+    // "traffic cone" read that survived removing the wave-cut platform flare.
+    const y0 = spec.baseY + H * rnd.range(-0.40, 0.34);
+    const hh = H * rnd.range(0.55, 1.30);
     planes.push({
       phi: rnd.range(0, TAU),
       p: R * rnd.range(0.74, 1.02),
@@ -979,20 +983,44 @@ uniform float uVariant;
 void main(){
   float h;
   if (uVariant < 0.5) {
-    // --- A: meso relief. Fractured, blocky, pocked limestone.
+    // --- A: meso relief. A limestone face is a MOSAIC OF NEAR-FLAT PLATES separated
+    // by knife-edge fracture lines and metre-deep gullies (ref/detail/rock_4k.png).
+    // It is not a field of bumps. The previous map was 0.55*ridged + 0.30*fbm +
+    // worley pockets, i.e. isotropic blob noise at essentially one scale, and at 90 m
+    // that covered every square metre of every stack in identical popcorn — the
+    // single most obvious "procedural" tell in the whole module.
+    //
+    // Note on tiling: tgnoise/tfbm stay periodic under any *additive* offset (the
+    // lattice index shifts by the same integer at p and p+P) but only under INTEGER
+    // scale multiples, so every rescale below is 2x or 3x.
     float P = 6.0;
     vec2 p = vUv * P;
     vec2 w = vec2(tfbm(p, P, 4), tfbm(p + 3.7, P, 4));
-    h  = 0.55 * tridged(p + w * 0.85, P, 5);
-    h += 0.30 * (tfbm(p * 2.0, P * 2.0, 5) * 0.5 + 0.5);
-    // solution pockets
-    vec2 wo = tworley(vUv * 14.0, 14.0);
-    h -= 0.20 * smoothstep(0.46, 0.02, wo.x);
-    // cleavage: a couple of sharp planar breaks
-    float cl = tfbm(p * 0.7 + 9.1, P, 3);
-    h += 0.16 * smoothstep(0.02, 0.10, abs(cl)) * sign(cl);
-    // hairline cracks along worley edges
-    h -= 0.10 * smoothstep(0.10, 0.0, wo.y - wo.x);
+
+    // (1) plates — terrace a smooth warped field so the surface is piecewise flat
+    // with hard risers between levels. That is what bedded, jointed limestone does.
+    float base = tfbm(p + w * 0.55, P, 4);
+    float lv = base * 3.2;
+    float terr = (floor(lv) + smoothstep(0.0, 0.14, fract(lv))) / 3.2;
+    // 65% terraced, 35% smooth: a full terrace reads as a machined contour map, and
+    // once the popcorn was gone that regularity became the new procedural tell.
+    h = mix(base, terr, 0.65) * 0.42 + 0.30;
+
+    // (2) fracture lines — two families of thin deep cuts, the arêtes and joints
+    float c1 = tgnoise(p * 2.0 + 4.2, P * 2.0);
+    float c2 = tgnoise(p + vec2(11.3, 2.1), P);
+    // Widths matter more than depths here: a 1-texel-wide cut Sobels into a near-90
+    // degree normal and that aliases into a crawling white thread at range (measured
+    // lap_var 5565 against a reference 1296 before these were widened).
+    h -= 0.17 * (1.0 - smoothstep(0.0, 0.080, abs(c1)));
+    h -= 0.12 * (1.0 - smoothstep(0.0, 0.052, abs(c2)));
+
+    // (3) a little grain so the plates are not glassy — deliberately small
+    h += 0.09 * tfbm(p * 3.0, P * 3.0, 3);
+
+    // (4) solution pockets, far rarer and larger than the old 14-cell field
+    vec2 wo = tworley(vUv * 7.0, 7.0);
+    h -= 0.13 * smoothstep(0.26, 0.02, wo.x);
   } else {
     // --- B: fine grain. Pitting, grit and micro-cracks; this is the 2 cm decade.
     float P = 10.0;
@@ -1234,9 +1262,9 @@ float k = uDetailAmt;
 vec3 gDet = vec3(0.0);
 gDet += (1.30 * k * w0) * rkGrad(dA1.xyz, Ng);
 gDet += (1.20 * k * w1) * rkGrad(dA0.xyz, Ng);
-gDet += (0.85 * k * w2) * rkGrad(dA2.xyz, Ng);
-gDet += (0.40 * k * w3) * rkGrad(dB1.xyz, Ng);
-gDet += (0.18 * k * w4) * rkGrad(dB2.xyz, Ng);
+gDet += (0.70 * k * w2) * rkGrad(dA2.xyz, Ng);
+gDet += (0.28 * k * w3) * rkGrad(dB1.xyz, Ng);
+gDet += (0.14 * k * w4) * rkGrad(dB2.xyz, Ng);
 // clamp the SUM, not each layer: slope 83 deg, so a stacking accident cannot invert N
 float gLen = length(gDet);
 gDet *= (gLen > 8.0) ? (8.0 / gLen) : 1.0;
@@ -1260,10 +1288,18 @@ float m2 = fbm3(P * 0.215 + 11.0, 3);
 float streak = ridged3(vec3(P.x * 1.05, P.y * 0.042, P.z * 1.05) + m1 * 0.7, 4);
 streak = pow(clamp(streak * 1.25, 0.0, 1.0), 1.5);
 // bedding: asymmetric bands in world y, warped so they are not dead level
+// Bedding. Real strata vary in thickness by a factor of several and wander; a
+// fract() on a lightly warped world y is a dead-level 1.7 m contour ring, which is
+// exactly what appeared the moment the detail map stopped hiding it. Warp hard in y
+// (amplitude ~1.6 m) and modulate the band's own strength, so the strata read as a
+// sequence of unequal beds rather than a lathe finish.
 float bw  = fbm3(P * vec3(0.055, 0.016, 0.055), 3);
-float bs  = fract(P.y * 0.58 + bw * 1.9);
+float bWarp = 1.55 * fbm3(P * vec3(0.030, 0.055, 0.030) + 5.0, 3)
+            + 0.65 * fbm3(P * vec3(0.11, 0.14, 0.11) + 23.0, 2);
+float bs  = fract(P.y * 0.58 + bw * 1.9 + bWarp);
 float bed = smoothstep(0.0, 0.09, bs) * (1.0 - smoothstep(0.55, 0.98, bs));
-float bed2 = fract(P.y * 0.205 + bw * 0.9);
+bed *= 0.35 + 0.65 * smoothstep(-0.25, 0.30, fbm3(P * vec3(0.09, 0.021, 0.09) + 61.0, 3));
+float bed2 = fract(P.y * 0.205 + bw * 0.9 + bWarp * 0.5);
 bed2 = smoothstep(0.0, 0.12, bed2) * (1.0 - smoothstep(0.6, 1.0, bed2));
 
 // ---- albedo ------------------------------------------------------------------
@@ -1299,7 +1335,7 @@ float stainPatch = smoothstep(-0.10, 0.42, fbm3(P * vec3(0.05, 0.012, 0.05) + 17
 float stainMask = streak * (1.0 - smoothstep(0.25, 0.72, Ng.y)) * (0.35 + 0.65 * (1.0 - crn)) * stainPatch;
 alb = mix(alb, uColStain, stainMask * 0.36);
 // bedding shows as a tonal band, not a groove
-alb *= 1.0 - 0.20 * bed - 0.11 * bed2;
+alb *= 1.0 - 0.13 * bed - 0.08 * bed2;
 
 // ---- tide zone ---------------------------------------------------------------
 // The single biggest tonal event on a sea stack's silhouette. In the reference the
@@ -1320,7 +1356,7 @@ float wet = smoothstep(1.15, -0.35, yw) * uWetAmt;
 // so the damp material's height is 1-h and the dry material's is h. A linear 3.45 m
 // ramp gave an 8.7 code-value step where the reference moves 28.6; this one is ragged
 // and near-hard, with dark tongues running up the gullies.
-float dampW = clamp(smoothstep(3.6, 0.15, yw) * uAlgaeAmt, 0.0, 1.0);
+float dampW = clamp(smoothstep(4.4, 0.15, yw) * uAlgaeAmt, 0.0, 1.0);
 dampW *= 0.82 + 0.18 * smoothstep(-0.40, 0.35, m2);   // reuse the macro octave: no extra fbm3
 float dryW = 1.0 - dampW;
 const float DAMP_DEPTH = 0.20;    // research 4.4: 0.15-0.25 for rock
@@ -1643,8 +1679,8 @@ export function create(opts = {}) {
       //    the rock carries more chroma than the sand, as it does in the reference.
       const matRock = makeRockMaterial(ctx, A.tex, B.tex, {
         key: 'rock-limestone',
-        base: C(0.620, 0.500, 0.151),
-        bright: C(0.800, 0.686, 0.280),
+        base: C(0.532, 0.426, 0.120),
+        bright: C(0.700, 0.596, 0.232),
         grime: C(0.086, 0.060, 0.026),
         stain: C(0.158, 0.082, 0.022),
         damp: C(0.062, 0.049, 0.027),
@@ -1679,8 +1715,8 @@ export function create(opts = {}) {
       // more saturated than the near ones.
       const matFar = makeRockMaterial(ctx, A.tex, B.tex, {
         key: 'rock-far',
-        base: C(0.610, 0.494, 0.155),
-        bright: C(0.790, 0.678, 0.282),
+        base: C(0.524, 0.422, 0.124),
+        bright: C(0.692, 0.590, 0.234),
         grime: C(0.110, 0.078, 0.034),
         stain: C(0.162, 0.094, 0.032),
         damp: C(0.072, 0.056, 0.031),
@@ -1699,8 +1735,8 @@ export function create(opts = {}) {
       // whole slab is inside the splash zone.
       const matShelf = makeRockMaterial(ctx, A.tex, B.tex, {
         key: 'rock-shelf',
-        base: C(0.620, 0.500, 0.151),
-        bright: C(0.800, 0.686, 0.280),
+        base: C(0.532, 0.426, 0.120),
+        bright: C(0.700, 0.596, 0.232),
         grime: C(0.086, 0.060, 0.026),
         stain: C(0.158, 0.082, 0.022),
         damp: C(0.062, 0.049, 0.027),

@@ -62,7 +62,12 @@ import { applyWorldMaterial, configureTexture } from '../gfx/materialCommon.js';
 
 /** Linear sand albedo (R,G,B) and overall gain for the env probe's ground hemisphere. */
 const SAND_BOUNCE = [0.30, 0.235, 0.165];
-const SAND_BOUNCE_GAIN = 3.60;
+/* 5.60, not 3.60. With the body at metalness 1.0 the HemisphereLight and the warm
+ * bounce DirectionalLight contribute NOTHING — three's meshphysical gives metals no
+ * diffuse term — so this probe is the gun's entire ambient, and its ground hemisphere
+ * is the only warm light it ever sees. Measured at 3.60 the gun came out R-B -13.5
+ * against the reference's +11.0: a blue-black gun in a warm frame. */
+const SAND_BOUNCE_GAIN = 7.20;
 
 const MAG_SIZE = 60;
 const START_AMMO = 36;          // the reference frame reads 36; boot matching it
@@ -76,7 +81,7 @@ const DAMAGE = 9.5;
 /** Mount pose in view space (metres / radians). Solved against kf_01500: it puts the
  *  counter-housing apex at ~(1352, 640) of 1920x1080 and runs the rail off the right
  *  edge at y~1000, which is where the reference has them. */
-const MOUNT_POS = new THREE.Vector3(0.202, -0.150, -0.395);
+const MOUNT_POS = new THREE.Vector3(0.1966, -0.2126, -0.3458);
 const MOUNT_ROT = { pitch: 0.1658, yaw: 0.1571, roll: 0.1745 };   // 9.5 / 9 / 10 deg
 const ADS_POS = new THREE.Vector3(0.052, -0.092, -0.335);
 const ADS_ROT = { pitch: 0.0524, yaw: 0.0262, roll: 0.0175 };
@@ -511,6 +516,189 @@ function transformMB(geo, m) {
 }
 
 /* ========================================================================== */
+/*  build-time ray-cast ambient occlusion                                     */
+/* ========================================================================== */
+
+/**
+ * Binary BVH over a flat triangle soup (9 floats per triangle). Median split on the
+ * longest axis of the centroid bounds; leaves of <= 6 triangles.
+ */
+function buildBVH(tri) {
+  const n = tri.length / 9;
+  const idx = new Int32Array(n);
+  const cx = new Float32Array(n), cy = new Float32Array(n), cz = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    idx[i] = i;
+    const o = i * 9;
+    cx[i] = (tri[o] + tri[o + 3] + tri[o + 6]) / 3;
+    cy[i] = (tri[o + 1] + tri[o + 4] + tri[o + 7]) / 3;
+    cz[i] = (tri[o + 2] + tri[o + 5] + tri[o + 8]) / 3;
+  }
+  const maxNodes = Math.max(1, 2 * n);
+  const bnd = new Float32Array(maxNodes * 6);
+  const left = new Int32Array(maxNodes).fill(-1);
+  const right = new Int32Array(maxNodes).fill(-1);
+  const start = new Int32Array(maxNodes);
+  const count = new Int32Array(maxNodes);
+  let nNodes = 0;
+
+  const build = (lo, hi) => {
+    const node = nNodes++;
+    let x0 = 1e9, y0 = 1e9, z0 = 1e9, x1 = -1e9, y1 = -1e9, z1 = -1e9;
+    for (let i = lo; i < hi; i++) {
+      const o = idx[i] * 9;
+      for (let k = 0; k < 3; k++) {
+        const px = tri[o + k * 3], py = tri[o + k * 3 + 1], pz = tri[o + k * 3 + 2];
+        if (px < x0) x0 = px; if (px > x1) x1 = px;
+        if (py < y0) y0 = py; if (py > y1) y1 = py;
+        if (pz < z0) z0 = pz; if (pz > z1) z1 = pz;
+      }
+    }
+    const b = node * 6;
+    bnd[b] = x0; bnd[b + 1] = y0; bnd[b + 2] = z0; bnd[b + 3] = x1; bnd[b + 4] = y1; bnd[b + 5] = z1;
+    if (hi - lo <= 6) { start[node] = lo; count[node] = hi - lo; return node; }
+    const ex = x1 - x0, ey = y1 - y0, ez = z1 - z0;
+    const axis = ex >= ey && ex >= ez ? cx : (ey >= ez ? cy : cz);
+    const mid = (lo + hi) >> 1;
+    // nth_element by hand (quickselect) so build stays O(n log n)
+    let l = lo, h = hi - 1;
+    while (l < h) {
+      const pivot = axis[idx[(l + h) >> 1]];
+      let i = l, j = h;
+      while (i <= j) {
+        while (axis[idx[i]] < pivot) i++;
+        while (axis[idx[j]] > pivot) j--;
+        if (i <= j) { const t = idx[i]; idx[i] = idx[j]; idx[j] = t; i++; j--; }
+      }
+      if (mid <= j) h = j; else if (mid >= i) l = i; else break;
+    }
+    count[node] = 0;
+    left[node] = build(lo, mid);
+    right[node] = build(mid, hi);
+    return node;
+  };
+  if (n > 0) build(0, n); else { nNodes = 1; count[0] = 0; }
+  return { tri, idx, bnd, left, right, start, count };
+}
+
+/** Any-hit ray query. Möller-Trumbore, no backface rejection (thin shells). */
+function bvhOccluded(bvh, ox, oy, oz, dx, dy, dz, tmax) {
+  const { tri, idx, bnd, left, right, start, count } = bvh;
+  // 0 * Infinity is NaN, so never let a slab reciprocal be infinite
+  const ix = 1 / (Math.abs(dx) < 1e-8 ? (dx < 0 ? -1e-8 : 1e-8) : dx);
+  const iy = 1 / (Math.abs(dy) < 1e-8 ? (dy < 0 ? -1e-8 : 1e-8) : dy);
+  const iz = 1 / (Math.abs(dz) < 1e-8 ? (dz < 0 ? -1e-8 : 1e-8) : dz);
+  const stack = bvhOccluded._s || (bvhOccluded._s = new Int32Array(128));
+  let sp = 0;
+  stack[sp++] = 0;
+  while (sp > 0) {
+    const node = stack[--sp];
+    const b = node * 6;
+    let t0 = 0, t1 = tmax;
+    let a = (bnd[b] - ox) * ix, c = (bnd[b + 3] - ox) * ix;
+    if (a > c) { const t = a; a = c; c = t; }
+    if (a > t0) t0 = a; if (c < t1) t1 = c;
+    a = (bnd[b + 1] - oy) * iy; c = (bnd[b + 4] - oy) * iy;
+    if (a > c) { const t = a; a = c; c = t; }
+    if (a > t0) t0 = a; if (c < t1) t1 = c;
+    a = (bnd[b + 2] - oz) * iz; c = (bnd[b + 5] - oz) * iz;
+    if (a > c) { const t = a; a = c; c = t; }
+    if (a > t0) t0 = a; if (c < t1) t1 = c;
+    if (t0 > t1) continue;
+    const cnt = count[node];
+    if (cnt === 0) { stack[sp++] = left[node]; stack[sp++] = right[node]; continue; }
+    for (let i = start[node]; i < start[node] + cnt; i++) {
+      const o = idx[i] * 9;
+      const e1x = tri[o + 3] - tri[o], e1y = tri[o + 4] - tri[o + 1], e1z = tri[o + 5] - tri[o + 2];
+      const e2x = tri[o + 6] - tri[o], e2y = tri[o + 7] - tri[o + 1], e2z = tri[o + 8] - tri[o + 2];
+      const px = dy * e2z - dz * e2y, py = dz * e2x - dx * e2z, pz = dx * e2y - dy * e2x;
+      const det = e1x * px + e1y * py + e1z * pz;
+      if (det > -1e-12 && det < 1e-12) continue;
+      const inv = 1 / det;
+      const tx = ox - tri[o], ty = oy - tri[o + 1], tz = oz - tri[o + 2];
+      const u = (tx * px + ty * py + tz * pz) * inv;
+      if (u < 0 || u > 1) continue;
+      const qx = ty * e1z - tz * e1y, qy = tz * e1x - tx * e1z, qz = tx * e1y - ty * e1x;
+      const v = (dx * qx + dy * qy + dz * qz) * inv;
+      if (v < 0 || u + v > 1) continue;
+      const t = (e2x * qx + e2y * qy + e2z * qz) * inv;
+      if (t > 1e-5 && t < tmax) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Per-vertex ambient occlusion, cast against the whole assembled viewmodel at build
+ * time. research/weapons.md 2.3.2: "do not run CSM on the viewmodel — the cascades are
+ * sized for 340 m and the first cascade texel at 2048^2 is far too coarse for a 0.9 m
+ * object. Self-shadow with baked ambient occlusion instead: for each vertex cast
+ * N = 32 cosine-weighted rays against the merged geometry and store the visibility in
+ * a vertex attribute. This is what gives you the dark line under the carry handle and
+ * inside the magazine well."
+ *
+ * It is applied to the INDIRECT terms only (see the `<aomap_fragment>` injection in
+ * `vmMaterial`), never to the sun — occluding a delta light with a hemispherical
+ * visibility term is double-counting, and it is what makes baked AO read as dirt.
+ *
+ * Results are cached per (quantised position, quantised normal), which collapses the
+ * non-indexed soup ~4x and keeps the whole bake inside ~200 ms.
+ */
+function bakeVertexAO(geos, occluderTris, rays = 24, maxDist = 0.22) {
+  const bvh = buildBVH(occluderTris);
+  const cache = new Map();
+  // Hammersley, cosine-weighted about +Z
+  const sx = new Float32Array(rays), sy = new Float32Array(rays), sz = new Float32Array(rays);
+  for (let i = 0; i < rays; i++) {
+    let bits = i;
+    bits = ((bits << 16) | (bits >>> 16)) >>> 0;
+    bits = (((bits & 0x55555555) << 1) | ((bits & 0xaaaaaaaa) >>> 1)) >>> 0;
+    bits = (((bits & 0x33333333) << 2) | ((bits & 0xcccccccc) >>> 2)) >>> 0;
+    bits = (((bits & 0x0f0f0f0f) << 4) | ((bits & 0xf0f0f0f0) >>> 4)) >>> 0;
+    bits = (((bits & 0x00ff00ff) << 8) | ((bits & 0xff00ff00) >>> 8)) >>> 0;
+    const u1 = (i + 0.5) / rays, u2 = bits * 2.3283064365386963e-10;
+    const r = Math.sqrt(u1), phi = u2 * Math.PI * 2;
+    sx[i] = r * Math.cos(phi); sy[i] = r * Math.sin(phi); sz[i] = Math.sqrt(Math.max(0, 1 - u1));
+  }
+  for (const geo of geos) {
+    const pos = geo.getAttribute('position'), nrm = geo.getAttribute('normal');
+    const out = new Float32Array(pos.count);
+    for (let v = 0; v < pos.count; v++) {
+      const px = pos.getX(v), py = pos.getY(v), pz = pos.getZ(v);
+      let nx = nrm.getX(v), ny = nrm.getY(v), nz = nrm.getZ(v);
+      const nl = Math.hypot(nx, ny, nz) || 1; nx /= nl; ny /= nl; nz /= nl;
+      const key = `${Math.round(px * 2000)},${Math.round(py * 2000)},${Math.round(pz * 2000)},`
+        + `${Math.round(nx * 4)},${Math.round(ny * 4)},${Math.round(nz * 4)}`;
+      const hit = cache.get(key);
+      if (hit !== undefined) { out[v] = hit; continue; }
+      // orthonormal basis about the normal (Duff et al. branchless ONB)
+      const sgn = nz >= 0 ? 1 : -1;
+      const a = -1 / (sgn + nz), b = nx * ny * a;
+      const t0x = 1 + sgn * nx * nx * a, t0y = sgn * b, t0z = -sgn * nx;
+      const t1x = b, t1y = sgn + ny * ny * a, t1z = -ny;
+      const ox = px + nx * 3e-4, oy = py + ny * 3e-4, oz = pz + nz * 3e-4;
+      let open = 0;
+      for (let i = 0; i < rays; i++) {
+        const dx = t0x * sx[i] + t1x * sy[i] + nx * sz[i];
+        const dy = t0y * sx[i] + t1y * sy[i] + ny * sz[i];
+        const dz = t0z * sx[i] + t1z * sy[i] + nz * sz[i];
+        if (!bvhOccluded(bvh, ox, oy, oz, dx, dy, dz, maxDist)) open++;
+      }
+      /* Floor the visibility at 0.30. src/render/lighting.js's own header records that
+       * the reference clip never lets a shadow reach black — shadow_frac 0.050 with
+       * p01 = 17, i.e. the darkest 1% of pixels still sit at code value 17. An
+       * unclamped cast-AO term on a metal (which has no diffuse fill at all) drove
+       * 44% of the gun below code 25 with p01 = 0.6. */
+      const ao = 0.30 + 0.70 * (open / rays);
+      cache.set(key, ao);
+      out[v] = ao;
+    }
+    geo.setAttribute('aAO', new THREE.BufferAttribute(out, 1));
+  }
+  return cache.size;
+}
+
+/* ========================================================================== */
 /*  procedural textures                                                       */
 /* ========================================================================== */
 
@@ -530,17 +718,33 @@ function makeSurfaceTex(rand, opts = {}) {
   const scratches = opts.scratches ?? 300;
   const aniso = opts.aniso ?? 0.86;         // 1 = all scratches along U
   const grain = opts.grain ?? 1.0;
-  const hgt = new Float32Array(N * N);
+  const hgt = new Float32Array(N * N);      // NORMAL-bearing height: coarse only
+  const fineF = new Float32Array(N * N);    // sub-pixel grain: roughness only
   const wearF = new Float32Array(N * N);
 
-  // --- base cast/machined grain
+  /* SCALE BUDGET — research/weapons.md 4.3b.
+   * The viewmodel sits ~0.4 m from a 55 deg vertical / 85.6 deg horizontal camera, so
+   * one pixel at 1920 wide is 2*0.4*tan(42.8 deg)/1920 = 0.39 mm. This texture is
+   * sampled triplanar at uDetailScale ~7 (one repeat per 143 mm), so at N = 512 a
+   * texel is 0.28 mm — the WHOLE texture lives at or below the pixel.
+   *
+   * Anything finer than ~1 mm therefore cannot be a normal: it aliases into a
+   * per-pixel specular crust that survives its own albedo. Measured before this split,
+   * with --config weaponAlbedoScale=0.001, the receiver top face still read L = 141.6
+   * of 173.2 — 82% of the brightest large surface on the gun was albedo-independent,
+   * and achromatic, i.e. pure specular fizz. That is the "woven burlap / sandstone"
+   * read.
+   *
+   * So: only the 8-period octave (17 mm features) and the rasterised scratches drive
+   * the normal. The 48-period octave (2.9 mm, i.e. 7 px) moves into the ROUGHNESS
+   * channel, where sub-pixel geometry physically belongs.
+   */
   for (let y = 0; y < N; y++) {
     for (let x = 0; x < N; x++) {
       const i = y * N + x;
       const u = x / N * 8, v = y / N * 8;
-      const g = fbmT(u, v, 8, 4, 11) - 0.5;
-      const fine = fbmT(u * 6, v * 6, 48, 2, 27) - 0.5;
-      hgt[i] = (g * 0.55 + fine * 0.45) * grain;
+      hgt[i] = (fbmT(u, v, 8, 4, 11) - 0.5) * 0.55 * grain;
+      fineF[i] = (fbmT(u * 6, v * 6, 48, 2, 27) - 0.5) * grain;
       wearF[i] = fbmT(u * 1.5, v * 1.5, 12, 4, 53);
     }
   }
@@ -579,13 +783,18 @@ function makeSurfaceTex(rand, opts = {}) {
   for (let y = 0; y < N; y++) {
     for (let x = 0; x < N; x++) {
       const i = y * N + x;
-      const dhx = (at(x + 1, y) - at(x - 1, y)) * 0.5;
-      const dhy = (at(x, y + 1) - at(x, y - 1)) * 0.5;
+      // 5-tap derivative: a further low-pass, so even the coarse octave cannot put
+      // energy at the texel (= sub-pixel) frequency.
+      const dhx = (at(x + 2, y) + at(x + 1, y) - at(x - 1, y) - at(x - 2, y)) * 0.25;
+      const dhy = (at(x, y + 2) + at(x, y + 1) - at(x, y - 1) - at(x, y - 2)) * 0.25;
       const nx = Math.max(-1, Math.min(1, -dhx * 6.0));
       const ny = Math.max(-1, Math.min(1, -dhy * 6.0));
-      // roughness: scratch cores polish, cast grain roughens
-      const rgh = 0.5 + hgt[i] * 0.9;
+      // roughness carries the sub-pixel grain: cast grain roughens, scratch cores polish
+      const rgh = 0.5 + hgt[i] * 0.9 + fineF[i] * 1.15;
       // wear: mottled, contrast stretched so it breaks up rather than washes
+      // wear stays COARSE — fineF is deliberately not in here. Mixing a 2.9 mm octave
+      // into the wear mask and then into a bright bare-alloy colour is how you get
+      // per-pixel chalky speckle on a dark base.
       let w = wearF[i] * 0.75 + (0.5 + hgt[i] * 1.6) * 0.25;
       w = Math.max(0, Math.min(1, (w - 0.34) * 2.35));
       data[i * 4] = (nx * 0.5 + 0.5) * 255;
@@ -1188,7 +1397,46 @@ function buildRifle(rand) {
   const parts = { mag: [], bolt: [], boltPoly: [], handL: [], armR: [] };
 
   /* ---------------------------------------------------------- receiver ---- */
-  push(G.body, chamferBox(0.0620, 0.0870, 0.340, 0.0048, { offset: [0, -0.0105, 0.005], aoBottom: 0.80 }));
+  push(G.body, chamferBox(0.0680, 0.0910, 0.340, 0.0052, { offset: [0, -0.0105, 0.005], aoBottom: 0.80 }));
+
+  /* ------------------------------------------------- carry-handle shell ---- *
+   * The reference MA5B's dominant mass is a rounded, TAPERED shell that sweeps from
+   * low at the fore-end up over the receiver and back to the counter housing. The
+   * previous build had a flat untapered rail prism instead, which is why the gun read
+   * as a plank and why the silhouette went thin above the receiver: measured
+   * per-scanline coverage inside the weapon ROI was y900 469/922 against the
+   * reference's 640.
+   *
+   * Built as one extrusion of a dome cross-section with independent sx/sy per station
+   * so the shell can grow in height without growing in width — a uniform scale gives
+   * a cone, and a cone is exactly the "flat plank with a bevel" read we are replacing.
+   */
+  {
+    const dome = roundedPoly([[0.5, 0.0], [0.5, 0.60], [0.30, 1.0], [-0.30, 1.0], [-0.5, 0.60], [-0.5, 0.0]],
+      [0.05, 0.16, 0.20, 0.20, 0.16, 0.05], 3);
+    const base = 0.0305;
+    const st = [
+      { z: -0.2080, sx: 0.030, sy: 0.010, oy: base, edge: 0.9, ao: 0.75 },
+      { z: -0.2000, sx: 0.048, sy: 0.024, oy: base, edge: 0.55 },
+      { z: -0.1700, sx: 0.058, sy: 0.042, oy: base, edge: 0.0 },
+      { z: -0.1200, sx: 0.064, sy: 0.050, oy: base, edge: 0.0 },
+      { z: -0.0600, sx: 0.070, sy: 0.058, oy: base, edge: 0.0 },
+      { z: 0.0100, sx: 0.070, sy: 0.060, oy: base, edge: 0.0 },
+      { z: 0.0620, sx: 0.068, sy: 0.056, oy: base, edge: 0.0 },
+      { z: 0.0900, sx: 0.056, sy: 0.044, oy: base, edge: 0.55 },
+      { z: 0.0960, sx: 0.036, sy: 0.026, oy: base, edge: 0.9, ao: 0.75 },
+    ];
+    for (let i = 0; i < st.length; i++) {
+      const a = st[Math.max(0, i - 1)], b = st[Math.min(st.length - 1, i + 1)];
+      st[i].nz = -((b.sx + b.sy) - (a.sx + a.sy)) * 0.5 / (b.z - a.z);
+    }
+    push(G.body, extrudeProfile(dome, st, { capAo: 0.5 }));
+    // the two long panel seams where the shell halves meet the receiver
+    for (const sx of [-1, 1]) {
+      push(G.body, chamferBox(0.0060, 0.0075, 0.250, 0.0016,
+        { offset: [sx * 0.0322, 0.0330, -0.055], edge: 1.2, ao: 0.7 }));
+    }
+  }
   // side relief panels: two shallow milled flats, one per flank
   for (const sx of [-1, 1]) {
     const mb = new MB();
@@ -1201,10 +1449,14 @@ function buildRifle(rand) {
   /* -------------------------------------------------------------- rail ---- */
   {
     const mb = new MB();
-    const x1 = 0.0285, yTop = 0.0465, c = 0.0038;
-    const z0 = -0.072, z1 = 0.176;
-    const rx0 = -0.0180, rx1 = 0.0180;       // recess outer
-    const rz0 = -0.046, rz1 = 0.086;
+    /* The rail now caps the carry-handle shell instead of standing on the bare
+     * receiver, and its milled recess is a SIGHT CHANNEL, not a trough: at 36 x 132 mm
+     * the old recess was 20% of the weapon's visible area and read as an open box.
+     * 24 x 96 mm, sunk into a shell top at y = 0.1005. */
+    const x1 = 0.0200, yTop = 0.0925, c = 0.0034;
+    const z0 = -0.150, z1 = 0.082;
+    const rx0 = -0.0088, rx1 = 0.0088;       // recess outer
+    const rz0 = -0.040, rz1 = 0.056;
     const mF = [0, 1], mE = [1, 1], mLo = [0.3, 1];
     // top face: four borders around the milled recess
     const q = (a, b, cc, d, mk) => mb.quad(a, b, cc, d, [0, 1, 0], mk, mk, mk, mk);
@@ -1212,8 +1464,8 @@ function buildRifle(rand) {
     q([-x1 + c, yTop, rz0], [rx0, yTop, rz0], [rx0, yTop, rz1], [-x1 + c, yTop, rz1], mF);
     q([rx1, yTop, rz0], [x1 - c, yTop, rz0], [x1 - c, yTop, rz1], [rx1, yTop, rz1], mF);
     // rear border carries the circular port
-    panelWithHole(mb, -x1 + c, x1 - c, rz1, z1 - c, yTop, 0, 0.126, 0.0130, 20, mF);
-    portHole(mb, 0, 0.126, yTop, 0.0130, 0.012, 20);
+    panelWithHole(mb, -x1 + c, x1 - c, rz1, z1 - c, yTop, 0, 0.068, 0.0070, 16, mF);
+    portHole(mb, 0, 0.068, yTop, 0.0070, 0.008, 16);
     // recess lip + floor
     const lip = 0.0036, fy = yTop - 0.0038;
     const wall = (a, b, cc, d, n) => mb.quad(a, b, cc, d, nrm3(n), mE, mE, mLo, mLo);
@@ -1227,7 +1479,7 @@ function buildRifle(rand) {
       mb.quad([sx * (x1 - c), yTop, z0 + c], [sx * (x1 - c), yTop, z1 - c],
         [sx * x1, yTop - c, z1 - c], [sx * x1, yTop - c, z0 + c],
         sx > 0 ? n : n, mE, mE, mLo, mLo);
-      mb.quad([sx * x1, yTop - c, z0], [sx * x1, yTop - c, z1], [sx * x1, 0.031, z1], [sx * x1, 0.031, z0],
+      mb.quad([sx * x1, yTop - c, z0], [sx * x1, yTop - c, z1], [sx * x1, 0.082, z1], [sx * x1, 0.082, z0],
         [sx, 0, 0], mLo, mLo, [0, 0.9], [0, 0.9]);
     }
     // front + rear end chamfers
@@ -1367,26 +1619,36 @@ function buildRifle(rand) {
  * hard armour plates catching the only highlights — so the budget goes into the
  * silhouette and the plates, not into anatomy that would never be resolved.
  */
-function buildHands(G, parts) {
+/** Left-glove and right-forearm mounts, in the rifle's local frame. Solved offline
+ *  against the reference silhouette lobes by `node tools/_wpntri.mjs hands`. */
+const HAND_L = { p: [-0.0329, -0.0817, -0.1976], r: [0.4473, 0.4991, 0.3360] };
+const ARM_R = { p: [0.0850, 0.0100, 0.0700], r: [-0.3241, -0.6599, 0.3643] };
+
+function buildHands(G, parts, o = {}) {
+  const HL = o.handL || HAND_L, AR = o.armR || ARM_R;
   /* ------------------------------------------------- left hand on the fore-end */
   // Solved against the fore-end box, which sits at [0, -0.0720, -0.2750] with half
   // extents 0.0215 (y) / 0.070 (z): the palm has to contact its underside, so the
   // back-of-hand box (half height 0.0185) centres near y -0.105. The old -0.1150 put
   // the whole hand ~40 mm clear of the handguard and it read as a knife lying on the
   // sand rather than a grip. Verified by capture, not by arithmetic.
-  const H = xform(0.0125, -0.0805, -0.2560, -14 * DEG, 26 * DEG, -13 * DEG);
+  const H = xform(HL.p[0], HL.p[1], HL.p[2], HL.r[0], HL.r[1], HL.r[2]);
   const mul = (a, b) => a.clone().multiply(b);
 
   // back of hand
-  push(parts.handL, chamferBox(0.0900, 0.0370, 0.0980, 0.0110, { offset: [0.004, 0, 0] }), H.clone());
+  push(parts.handL, chamferBox(0.1010, 0.0490, 0.1090, 0.0135, { offset: [0.004, 0, 0] }), H.clone());
   // wrist + cuff
-  push(parts.handL, chamferBox(0.0800, 0.0420, 0.0500, 0.0100, { offset: [-0.0600, -0.0040, 0] }), H.clone());
-  push(parts.handL, chamferBox(0.0880, 0.0510, 0.0220, 0.0060,
-    { offset: [-0.0880, -0.0050, 0], edge: 1.1 }), H.clone());
+  push(parts.handL, chamferBox(0.0890, 0.0540, 0.0600, 0.0125, { offset: [-0.0620, -0.0060, 0] }), H.clone());
+  push(parts.handL, chamferBox(0.0970, 0.0640, 0.0280, 0.0072,
+    { offset: [-0.0910, -0.0070, 0], edge: 1.1 }), H.clone());
   // forearm, tapering away from the camera
-  push(parts.handL, segRounded(0.190, 0.0420, 0.0290, 0.0360, 0.0260, 0.0165,
-    { steps: 5, capF: 0.10, capB: 0.06 }),
-  mul(H, xform(-0.0950, -0.0060, 0, 0, 108 * DEG, -26 * DEG)));
+  // Longer, thicker, and angled DOWN-left: a left arm enters the frame from the
+  // bottom-left going up-right. The old one ran horizontally in from the left at
+  // mid-receiver height, which no left arm can do, and it left the reference's
+  // bottom-left lobe empty (measured coverage y1079 663/922 against 922).
+  push(parts.handL, segRounded(0.250, 0.0480, 0.0340, 0.0400, 0.0290, 0.0190,
+    { steps: 6, capF: 0.09, capB: 0.05 }),
+  mul(H, xform(-0.0950, -0.0180, 0, 0, 108 * DEG, -52 * DEG)));
 
   // knuckle plates + proximal finger segments
   for (let i = 0; i < 4; i++) {
@@ -1419,7 +1681,7 @@ function buildHands(G, parts) {
   }
 
   /* --------------------------------- right forearm, bottom-right of the frame */
-  const R = xform(0.0900, -0.1450, 0.1250, -26 * DEG, -30 * DEG, 12 * DEG);
+  const R = xform(AR.p[0], AR.p[1], AR.p[2], AR.r[0], AR.r[1], AR.r[2]);
   push(parts.armR, segRounded(0.230, 0.0560, 0.0500, 0.0400, 0.0380, 0.0230,
     { steps: 6, capF: 0.08, capB: 0.16 }), mul(R, xform(0, 0, 0, 0, 155 * DEG, 0)));
   // MJOLNIR forearm plate
@@ -1447,10 +1709,13 @@ uniform float uWearAmt;
 uniform float uRoughVar;
 uniform float uGrime;
 uniform float uAoDepth;
+uniform float uSpecAA;
+uniform float uCastAo;
 uniform mat3  normalMatrix;
 varying vec3 vObjPosVM;
 varying vec3 vObjNrmVM;
 varying vec2 vMaskVM;
+varying float vAoVM;
 `;
 
 /**
@@ -1486,7 +1751,10 @@ float edgeM = vMaskVM.x;
 // clamp(edgeM,..) * .. form multiplied every large flat face to exactly zero: the
 // receiver could only ever be flat base colour minus grime. Flats now take 35% of
 // the detail map's wear, chamfers still take 100%.
-float wear  = smoothstep(0.28, 0.82, dd.a) * (0.35 + 0.65 * clamp(edgeM, 0.0, 1.4));
+// Flats take 15%, chamfers 100%. research 4.2: wear follows CURVATURE. At 35% on a
+// near-black anodised base the mottled bare-alloy colour read as chalky speckle over
+// the whole receiver rather than as a rim of exposed metal on the edges.
+float wear  = smoothstep(0.34, 0.86, dd.a) * (0.15 + 0.85 * clamp(edgeM, 0.0, 1.4));
 float grime = 1.0 - dd.a;
 
 diffuseColor.rgb *= (1.0 - uGrime * grime * (1.0 - min(edgeM, 1.0)));
@@ -1548,18 +1816,68 @@ if (uRailStreak.x > 0.0) {
   roughnessFactor = mix(roughnessFactor, 0.26, k);
   metalnessFactor = mix(metalnessFactor, 0.90, k * 0.5);
 }
+
+/* ---- GEOMETRIC SPECULAR ANTIALIASING — Kaplanyan 2016 / Tokuyoshi 2017 /
+ * Tokuyoshi-Kaplanyan 2019, in Filament's formulation (research 4.4, verbatim from
+ * google/filament shaders/src/surface_shading_lit.fs). three r185 does not ship it.
+ *
+ * A gun made of chamfered boxes presents hundreds of ~1 px chamfer facets at
+ * roughness 0.3-0.45. Without this they are per-pixel specular noise that survives
+ * its own albedo — that is the "chalky crust" read, and it is why nulling the base
+ * colour left the receiver top at 82% of its brightness.
+ *
+ * Filament defaults: variance 0.15, threshold 0.2, MIN_PERCEPTUAL_ROUGHNESS 0.045.
+ * derivativesScale is 1 because the viewmodel renders at native resolution.
+ *
+ * The derivative MUST be taken on the GEOMETRIC normal. Filament calls
+ * getWorldGeometricNormalVector(); using the mapped normal double-counts the detail
+ * map, which is exactly the term we are trying to stop aliasing. vNormal from
+ * <normal_pars_fragment> is the interpolated, un-perturbed vertex normal. */
+{
+  vec3 gdu = dFdx(vNormal);
+  vec3 gdv = dFdy(vNormal);
+  float variance = uSpecAA * (dot(gdu, gdu) + dot(gdv, gdv));
+  float a2 = roughnessFactor * roughnessFactor;
+  float kernel = min(2.0 * variance, 0.2);
+  roughnessFactor = sqrt(clamp(a2 + kernel, 0.0, 1.0));
+}
+roughnessFactor = max(roughnessFactor, 0.045);
+`;
+
+/* Cast-AO application. <aomap_fragment> is the one hook in meshphysical that runs
+ * AFTER <lights_fragment_end>, where reflectedLight.indirect* still exist and the
+ * direct terms are already accumulated — so this multiplies the IBL/ambient and
+ * leaves the sun alone, which is what research 2.3.2 asks for. Occluding a delta
+ * light with a hemispherical visibility term is double-counting and reads as dirt.
+ *
+ * Specular occlusion goes through three's own computeSpecularOcclusion() rather than
+ * the raw scalar: a rough surface integrates a wide cone and must not be occluded as
+ * hard as the diffuse lobe. Variable names (geometryNormal / geometryViewDir) are
+ * three r155+; they were geometry.normal before. */
+const VM_AO = /* glsl */`
+{
+  float vmAo = mix(1.0, clamp(vAoVM, 0.0, 1.0), uCastAo);
+  reflectedLight.indirectDiffuse *= vmAo;
+  #if defined( USE_ENVMAP ) && defined( STANDARD )
+    float vmDotNV = saturate( dot( geometryNormal, geometryViewDir ) );
+    reflectedLight.indirectSpecular *= computeSpecularOcclusion( vmDotNV, vmAo, material.roughness );
+  #endif
+}
 `;
 
 const VM_VERT_PARS = /* glsl */`
 attribute vec2 aMask;
+attribute float aAO;
 varying vec3 vObjPosVM;
 varying vec3 vObjNrmVM;
 varying vec2 vMaskVM;
+varying float vAoVM;
 `;
 const VM_VERT = /* glsl */`
 vObjPosVM = transformed;
 vObjNrmVM = objectNormal;
 vMaskVM   = aMask;
+vAoVM     = aAO;
 `;
 
 function vmMaterial(ctx, key, o) {
@@ -1621,6 +1939,8 @@ function vmMaterial(ctx, key, o) {
     uRoughVar: { value: o.roughVar ?? 0.30 },
     uGrime: { value: o.grime ?? 0.30 },
     uAoDepth: { value: o.aoDepth ?? 0.45 },
+    uSpecAA: { value: o.specAA ?? 0.15 },     // Filament default
+    uCastAo: { value: o.castAo ?? 1.0 },
   });
 
   applyWorldMaterial(mat, ctx, { matId: MAT_ID.VIEWMODEL, aerial: false, inject: { key } });
@@ -1635,7 +1955,8 @@ function vmMaterial(ctx, key, o) {
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', `#include <common>\n${VM_PARS}`)
       .replace('#include <lights_physical_fragment>',
-        `{\n${VM_FRAG}\n}\n#include <lights_physical_fragment>`);
+        `{\n${VM_FRAG}\n}\n#include <lights_physical_fragment>`)
+      .replace('#include <aomap_fragment>', `#include <aomap_fragment>\n${VM_AO}`);
     mat.userData.shader = shader;
   };
   mat.__vmUniforms = U;
@@ -1757,7 +2078,7 @@ function buildEnvProbe(ctx, intensityScale) {
  * surviving zero-area strip was found: by measuring triangles, not by tightening a
  * threshold. Nothing in the runtime path uses it. */
 export const __dbg = { buildRifle, buildHands };
-export const __mount = { pos: MOUNT_POS, rot: MOUNT_ROT, pivot: PIVOT };
+export const __mount = { pos: MOUNT_POS, rot: MOUNT_ROT, pivot: PIVOT, handL: HAND_L, armR: ARM_R };
 
 /* ========================================================================== */
 /*  module                                                                    */
@@ -1936,46 +2257,75 @@ export function create(opts = {}) {
       tex.railN = configureTexture(makeRailNormalTex(texRand.fork(3)), ctx, { repeat: false });
       tex.decal = configureTexture(makeDecalTex(texRand.fork(4)), ctx, { repeat: false });
 
-      // 0.45, not 0.70: measured gun-only at matched pose, 0.70 -> 0.45 moves lum_std
-      // 32.8 -> 35.0 and R-B +9.1 -> +12.4 at the same mean. A stronger probe is a
-      // stronger *flat* ambient — it fills the shadowed flanks, which is precisely
-      // the tonal range the reference has and this gun lacks.
-      const envInt = ctx.config.weaponEnvInt ?? 0.45;
+      /* THE ENV PROBE IS A FILL, NOT A KEY.
+       * At 0.45 it supplied 52% of every photon on this object (measured:
+       * --config weaponEnvInt=0 moved gun lum_mean 56.46 -> 27.27) and, being applied
+       * with no occlusion, it lit the inside of the trigger group exactly as brightly
+       * as the sky-facing plates. research 2.2 puts the viewmodel fill at 0.06-0.12 of
+       * sun, diffuse-dominant, "explicitly because a strong one kills the tonal range".
+       * Cut to 0.20 and now modulated per-vertex by cast AO. */
+      const envInt = ctx.config.weaponEnvInt ?? 0.95;
       try { envRT = buildEnvProbe(ctx, envInt); } catch (e) { console.warn('[weapons] env probe failed', e); }
       const envMap = envRT ? envRT.texture : null;
 
+      /* MATERIAL VALUES — research/weapons.md 4.5, linear base colour / F0.
+       *
+       * The previous wave drove the body to 0x847661 = linear (0.229, 0.180, 0.120).
+       * That is dry-SAND albedo: warm (R/B = 1.9) and 5x past the value 4.5's "albedo
+       * trap" paragraph names as the failure point ("raising base colour to 0.08 would
+       * hit the mean and destroy both the contrast and the laplacian variance"). It
+       * hit the mean exactly — gun p50 47.98 against the reference's 48.97 — and
+       * destroyed the image: frac<25 was 0.0005 against 0.1898, the 130-170 rail-sheen
+       * bin 0.0113 against 0.1065.
+       *
+       * The reference gun is warm because it sits in strong warm sand bounce, not
+       * because its albedo is warm: on the material itself, the counter-housing shell
+       * in kf_00000 reads RGB (63.3, 69.6, 75.8), R-B = **-12.5**. Baking the bounce
+       * into the albedo AND applying a sand-tinted bounce probe on top double-counts it.
+       *
+       *   black anodised aluminium  metalness 1.0  linear 0.045/0.046/0.048  rough .35-.55
+       *   black polymer furniture   metalness 0.0  linear 0.021/0.021/0.022  rough .55-.70
+       *   glove fabric              metalness 0.0  linear 0.035/0.033/0.030  rough .90
+       *
+       * Anodising stays at metalness 1.0 — it is a thin oxide, not paint (4.5). At
+       * metalness 1 three's <lights_physical_fragment> turns `color` into F0, so these
+       * surfaces reflect only 4.5% at normal incidence and rise to ~100% at grazing:
+       * dark faces, bright chamfer rims. That IS the hard-surface read, and it is why
+       * the brightness must come from specular and never from raising base colour. */
       mats.body = vmMaterial(ctx, 'vm_body', {
-        color: 0x847661, roughness: 0.46, metalness: 0.62, detail: tex.metal,
-        worn: 0x8b8678, detailScale: 7.2, normalStr: 0.95, wear: 0.55,
-        roughVar: 0.30, grime: 0.28, aoDepth: 0.52, envInt: 1.0,
+        color: 0x3c3e43, roughness: 0.44, metalness: 1.0, detail: tex.metal,
+        worn: 0x74797d, detailScale: 7.2, normalStr: 0.30, wear: 0.26,
+        roughVar: 0.24, grime: 0.10, aoDepth: 0.34, envInt: 1.0,
         decal: tex.decal, decalAmt: 1.0, railStreak: [0.0, 0.0, 30.0],
       });
       mats.rail = vmMaterial(ctx, 'vm_rail', {
-        color: 0x94836e, roughness: 0.30, metalness: 0.84, detail: tex.metal,
-        worn: 0x9b9587, detailScale: 9.5, normalStr: 0.70, wear: 0.65,
-        roughVar: 0.26, grime: 0.22, aoDepth: 0.48, envInt: 1.15,
+        color: 0x3f4247, roughness: 0.33, metalness: 1.0, detail: tex.metal,
+        worn: 0x7d8286, detailScale: 9.5, normalStr: 0.24, wear: 0.34,
+        roughVar: 0.22, grime: 0.09, aoDepth: 0.32, envInt: 1.15,
         decal: tex.decal, decalAmt: 0.85, railStreak: [0.0, 0.0, 26.0],
       });
       mats.poly = vmMaterial(ctx, 'vm_poly', {
-        color: 0x665b4e, roughness: 0.66, metalness: 0.05, detail: tex.poly,
-        worn: 0x635f55, detailScale: 6.0, normalStr: 1.05, wear: 0.40,
+        color: 0x2a2b2b, roughness: 0.62, metalness: 0.0, detail: tex.poly,
+        worn: 0x4b4a46, detailScale: 6.0, normalStr: 0.46, wear: 0.40,
         decal: tex.decal, decalAmt: 0.55,
-        roughVar: 0.24, grime: 0.40, aoDepth: 0.55, envInt: 0.9,
+        roughVar: 0.30, grime: 0.34, aoDepth: 0.38, envInt: 0.9,
       });
       mats.glove = vmMaterial(ctx, 'vm_glove', {
-        color: 0x585046, roughness: 0.78, metalness: 0.02, detail: tex.weave,
-        worn: 0x5d594f, detailScale: 30.0, normalStr: 1.25, wear: 0.45,
-        roughVar: 0.30, grime: 0.26, aoDepth: 0.46, envInt: 0.85,
+        // pebbled leather: the weave has to be ~2.4 mm to survive a 0.39 mm pixel,
+        // so detailScale drops 30 -> 16 (one repeat per 62 mm at PER = 10/256).
+        color: 0x343330, roughness: 0.88, metalness: 0.0, detail: tex.weave,
+        worn: 0x3c3a36, detailScale: 16.0, normalStr: 0.80, wear: 0.45,
+        roughVar: 0.30, grime: 0.26, aoDepth: 0.34, envInt: 0.85,
       });
       mats.plate = vmMaterial(ctx, 'vm_plate', {
-        color: 0x5b5346, roughness: 0.40, metalness: 0.30, detail: tex.metal,
-        worn: 0x6f6b5f, detailScale: 12.0, normalStr: 0.80, wear: 0.75,
-        roughVar: 0.26, grime: 0.30, aoDepth: 0.50, envInt: 1.05,
+        color: 0x3a3d42, roughness: 0.40, metalness: 0.85, detail: tex.metal,
+        worn: 0x72777b, detailScale: 12.0, normalStr: 0.26, wear: 0.38,
+        roughVar: 0.22, grime: 0.14, aoDepth: 0.34, envInt: 1.05,
       });
       mats.engrave = new THREE.MeshStandardMaterial({
-        color: new THREE.Color().setHex(0x585449, THREE.SRGBColorSpace),
-        roughness: 0.34, metalness: 0.80, envMapIntensity: 1.1,
-        normalMap: tex.railN, normalScale: new THREE.Vector2(0.55, 0.55),
+        color: new THREE.Color().setHex(0x44484d, THREE.SRGBColorSpace),
+        roughness: 0.32, metalness: 1.0, envMapIntensity: 1.1,
+        normalMap: tex.railN, normalScale: new THREE.Vector2(0.40, 0.40),
       });
       applyWorldMaterial(mats.engrave, ctx, { matId: MAT_ID.VIEWMODEL, aerial: false, inject: { key: 'vm_engrave' } });
 
@@ -2029,6 +2379,14 @@ export function create(opts = {}) {
         else if (k === 'weaponDecalAmt') { for (const u of uni('uDecalAmt')) u.value = +v; }
         else if (k === 'weaponRailStreak') { for (const u of uni('uRailStreak')) u.value.x = +v; }
         else if (k === 'weaponWearAmt') { for (const u of uni('uWearAmt')) u.value = +v; }
+        else if (k === 'weaponCastAo') { for (const u of uni('uCastAo')) u.value = +v; }
+        else if (k === 'weaponSpecAA') { for (const u of uni('uSpecAA')) u.value = +v; }
+        else if (k === 'weaponNormalStr') {
+          for (const m of Object.values(mats)) {
+            const u = m.__vmUniforms?.uNormalStr;
+            if (u) { if (m.__baseNS === undefined) m.__baseNS = u.value; u.value = m.__baseNS * +v; }
+          }
+        }
         else if (k === 'weaponAlbedoScale') {
           for (const key of ['body', 'rail', 'poly', 'plate', 'glove']) {
             const m = mats[key];
@@ -2042,6 +2400,7 @@ export function create(opts = {}) {
       const { G, parts } = buildRifle(rng);
       buildHands(G, parts);
 
+      const merged = [];
       const addMesh = (group, geos, mat, name) => {
         if (!geos.length) return null;
         const geo = geos.length === 1 ? geos[0] : mergeGeometries(geos, false);
@@ -2054,6 +2413,7 @@ export function create(opts = {}) {
         mesh.castShadow = false;
         mesh.receiveShadow = true;
         group.add(mesh);
+        merged.push(geo);
         return mesh;
       };
       addMesh(grpGun, G.body, mats.body, 'body');
@@ -2069,6 +2429,29 @@ export function create(opts = {}) {
       addMesh(grpBolt, parts.boltPoly, mats.poly, 'boltGrip');
       addMesh(grpHand, parts.handL, mats.glove, 'handL');
       addMesh(grpArm, parts.armR, mats.glove, 'armR');
+
+      /* ---- cast ambient occlusion (research 2.3.2). One BVH over the whole rest-pose
+       * viewmodel, then 24 cosine-weighted rays per unique (position, normal). This is
+       * the dark line under the carry handle, the black inside the mag well and the
+       * trigger group, and the contact darkening where the glove wraps the fore-end
+       * (2.3.3) — none of which the authored aMask.y chamfer term can produce, because
+       * it knows nothing about what is standing in front of what. */
+      {
+        const t0 = (globalThis.performance ?? Date).now();
+        let nTri = 0;
+        for (const g of merged) nTri += g.getAttribute('position').count / 3;
+        const soup = new Float32Array(nTri * 9);
+        let w = 0;
+        for (const g of merged) {
+          const p = g.getAttribute('position').array;
+          soup.set(p, w); w += p.length;
+        }
+        const uniq = bakeVertexAO(merged, soup, ctx.config.weaponAoRays ?? 24);
+        if (ctx.config.weaponAoLog) {
+          console.log('[weapons] cast AO', nTri, 'tris', uniq, 'unique verts',
+            ((globalThis.performance ?? Date).now() - t0).toFixed(0), 'ms');
+        }
+      }
 
       /* ------------------------------------------------ muzzle flash + FX */
       flashLight = new THREE.PointLight(0xffd9a0, 0, 5.0, 2.0);

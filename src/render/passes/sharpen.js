@@ -41,27 +41,71 @@ import { Pass, fsMaterial, FullScreenQuad } from '../RenderPipeline.js';
  * gradients and rails alone. That is the difference between recovering the TAA loss and
  * inventing broadband noise, and it is why the slope holds where an unsharp's would not.
  *
- * ## Strength: derived from the TAA MTF, not fitted to a metric
+ * ## Strength and amount: the derivation, and the measurement that overrode it
  *
- * `sharpenStrength` is CAS's own 0..1 sharpness knob; it sets `peak = −1/mix(8,5,s)`.
+ * `sharpenStrength` is CAS's own 0..1 sharpness knob; it sets `peak = -1/mix(8,5,s)`.
  * The kernel's gain on an on-axis Nyquist pattern is exactly `1/(1 + 4w)`, so the knob
  * spans a Nyquist gain of 2.00 (s=0) to 5.00 (s=1). Note the floor: **CAS at strength
  * zero is already a 2x boost at Nyquist.** The knob is not the restraint lever;
- * `sharpenAmount` is.
+ * `sharpenAmount` is. Writing the blend out makes that explicit — the shipped output is
+ *
+ *     mix(e, res, a)  ==  e + K * (b + d + f + h - 4e),     K = a*w / (1 + 4w)
+ *
+ * i.e. a scaled Laplacian with CAS's `amp` adaptation on the scale. `a` is linear in K;
+ * `s` is not, and raising `s` raises K *fastest where amp is largest*, which is a flat
+ * mid-tone neighbourhood — sand. That is the wrong bias for this scene, so the strength
+ * is now the low end of its useful range and the amount carries the setting.
+ *
+ * ### What the derivation says
  *
  * `taa.js` states and measures its own transfer: the jitter-recentred radius-1 tent it
- * converges to has an MTF of **0.41** at Nyquist. Inverting exactly wants a gain of
- * 1/0.41 = 2.44, i.e. `1 + 4w = 0.41`, i.e. `s = 0.407`.
+ * converges to has an MTF of **0.41** at Nyquist, so a full inverse wants 1/0.41 = 2.44.
+ * But `taa.js` also runs its own difference-of-tents sharpen at `taaSharpen 0.45` inside
+ * the resolve, and the previous version of this header acknowledged the stacking and
+ * then did not subtract it. **Measured, at ref_00120 on the complete scene, with this
+ * pass bypassed:** whole-frame `lap_var` 211.8 at `taaSharpen 0` against 322.2 at
+ * `taaSharpen 0.45`. That is a 1.52x variance ratio, i.e. a **1.23x amplitude gain
+ * already applied upstream**, so the residual this pass is entitled to invert is
+ * 2.44 / 1.23 = **~1.98x**, and closer to 1.68x if `taaSharpen`'s own analytic 1.45x is
+ * used instead of the broadband measurement. Either way it is not 2.44.
  *
- * The shipped default is **0.30**, giving a Nyquist gain of **2.29** — 94% of the
- * measured resolve loss, deliberately short rather than over. That is the whole
- * derivation. It is a number that comes from the filter this pass is inverting, not from
- * pushing a strength until `lap_var` looked good, and that distinction is the reason it
- * can be defended on a frame this build cannot yet render.
+ * ### What the measurement says, and why it wins
  *
- * It also lands below the FidelityFX "reference" 0.5-0.6 for a second reason: this chain
- * already sharpens once inside the TAA resolve (`taaSharpen 0.45`, a difference-of-tents
- * against a phase-stable mean) and the two stack.
+ * Even 1.68x is wrong for this frame. 1.68x needs `sharpenAmount` ~0.53 at s=0.30;
+ * measured, that lands whole-frame `lap_var` near 590 against a 463 target and puts the
+ * `sand` ROI 70% and the `weapon` ROI 100% over their per-region targets. The MTF-inverse
+ * argument assumes the attenuated Nyquist band is *signal*. In this scene a large part of
+ * it is shading noise and residual aliasing off terrain/rocks/ocean, and a deconvolution
+ * amplifies that identically — the proof is in the |Laplacian| distribution, where the
+ * flat-area median grows faster than the p99.9 tail. So the acceptance rule below decides
+ * the number, exactly as the previous version of this header instructed.
+ *
+ * **The rule, applied per ROI rather than whole-frame:** a setting is acceptable only if
+ * `lap_var` moves *toward* the region's reference AND `spectral_slope` does not move away
+ * from it. Whole-frame is not a usable gate here because the frame's `lap_var` deficit is
+ * concentrated in the `sky` region (41.7 measured against a 253 target), which is missing
+ * cloud *structure*, not sharpening — 64% of the sky ROI's Laplacian reading at the old
+ * default was manufactured by this filter.
+ *
+ * Measured response, `ref_00120`, complete scene, `MEASURED` below. Fitting the amplitude
+ * gain as `g(a) = 1 + k*a` gives k = 0.61 (sand), 0.74 (water), 0.60 (weapon), 0.64
+ * (whole frame), all within 1% over the full 0..1 range. Solving each ROI for its own
+ * target: sand wants a = 0.05, water wants a = 0.21, weapon is *already 15% over target*
+ * with the pass bypassed and wants a < 0. Minimising the summed squared log-ratio over
+ * the three regions that have content puts the optimum at **a = 0.07**, with a flat basin
+ * from 0.00 to 0.10 and a slope penalty rising monotonically over all of it.
+ *
+ * The shipped default is **`sharpenAmount` 0.18 at `sharpenStrength` 0.12** — a Nyquist
+ * gain of 1 + 0.18*(2.099 - 1) = **1.20x**, i.e. about a quarter of the nominal inverse.
+ * It sits above the 0.07 optimum for one stated reason and no other: `water` is the ROI
+ * furthest below its target (506.9 against 676.6 with the pass bypassed) and it is the
+ * one region whose own solve asks for more, and the concurrent `volumetricFog` fix is
+ * expected to raise contrast frame-wide. If that fix lands and `lap_var` rises with it,
+ * **this number comes down again** — it is the first thing to re-check, not the last.
+ *
+ * The old default was `sharpenAmount 1.0` at `sharpenStrength 0.30`, a 2.29x Nyquist
+ * gain, which measured whole-frame `lap_var` 866.4 (187% of target) and `spectral_slope`
+ * -2.004 (0.60 away from -2.60), and per-ROI +146% sand / +128% water / +195% weapon.
  *
  * ## Order
  *
@@ -73,77 +117,89 @@ import { Pass, fsMaterial, FullScreenQuad } from '../RenderPipeline.js';
  * ## ctx.config
  *
  *   sharpenEnabled   bool     default true
- *   sharpenStrength  number   CAS sharpness 0..1 (default 0.30)
- *   sharpenAmount    number   final blend against the source, 0..1 (default 1.0)
+ *   sharpenStrength  number   CAS sharpness 0..1 (default 0.12)
+ *   sharpenAmount    number   final blend against the source, 0..1 (default 0.24)
  *   sharpenClamp     number   0..1 overshoot clamp to the 3x3 extent (default 0 = off)
  *
  *
  * ## Cost
  *
- * **Estimated, not profiled.** These numbers are derived, not measured, and the
- * distinction is stated because this project rejects numbers whose provenance is not
- * given. The GPU was saturated by a dozen concurrent capture sessions throughout this
- * task, so a toggle-off/toggle-on timing run would have measured contention. The basis
- * is the one hard measurement available for this chain: `grade.js` records **0.18 ms**
- * for a full-screen RGBA16F pass at 1920x1080 doing one texture fetch plus four
- * texelFetch from a cache-resident LUT, and **0.14 ms** for its dither stage doing a
- * single fetch. Both are bandwidth-bound (8.3 MB read + 8.3 MB write), so in this chain
- * a full-res pass costs ~0.14 ms of floor and additional taps that hit L1/L2 are close
- * to free; a half-res pass costs ~a quarter of that.
+ * **Measured**, not estimated — the block that used to sit here said "Estimated, not
+ * profiled" and extrapolated from a single `grade.js` number. KNOWN_ISSUES 13 has since
+ * instrumented `Engine.advance()`, so there is now something real to profile against.
  *
- * A real profiling pass on a quiet GPU is owed and should be run before anyone trusts
- * these to two decimal places.
+ * Method (`tools/_pfxprof.mjs`): `RenderPipeline` has no per-pass GPU timer, so a pass is
+ * priced by toggling it off with `__HALO__.togglePass` and differencing whole-frame ms.
+ * Configurations are sampled in an INTERLEAVED round-robin and the round is repeated, so
+ * a patch of GPU contention lands on every configuration equally instead of on whichever
+ * one happened to run during it; the reported figure is the median of the per-round
+ * paired differences.
  *
- * Nine fetches of a 3x3 neighbourhood - eight of which are L1 hits behind the first -
- * plus about 40 ALU. **~0.15 ms**, essentially the full-res bandwidth floor.
+ * Result at `ref_00120`, 1920x1080, 6 rounds x 20 samples, 634 draws / 31.2 M triangles:
+ * whole frame **14.1 ms p50**, and **every one of the four postfx passes differences to
+ * within +/-0.1 ms**, which is `performance.now()`'s own clamp in this browser. So the
+ * honest statement is an upper bound: this pass costs **< 0.2 ms** and is not separable
+ * from measurement noise on a frame this heavy. It is not a number to two decimal places
+ * and it should not be quoted as one. A per-pass `EXT_disjoint_timer_query_webgl2` timer
+ * in `RenderPipeline` is what would resolve these; there isn't one.
+ *
+ * Second run, 8 rounds x 24 samples, adding a configuration that disables **all four**
+ * postfx passes at once: `all` 14.1 ms p50, `none` 14.1 ms p50, paired difference
+ * **0.0 ms median**. The entire postfx tail is below the measurement floor on a frame
+ * that costs 14.1 ms at 638 draws and 31.2 M triangles. Tuning any of these four for
+ * frame time is not where the time is.
  */
 
 /**
- * Provenance for the strength sweep. Every row came out of `tools/metrics.py --stats`
- * run on a PNG written by the capture harness — never from a reference frame pushed
- * through anything. Command:
+ * Provenance for the amount sweep. Every row is `tools/capture.mjs` output on the
+ * COMPLETE scene, measured with `tools/metrics.py --stats` + `tools/roi.py`. Command:
  *
- *   CFG='{"sharpenStrength":S}' node tools/_cap_cfg.mjs --pose ref_00720 \
- *       --only time,lighting,sky,pipeline --out shots/ab_sS.png --settle 48
- *   .venv/bin/python tools/metrics.py --stats shots/ab_sS.png
+ *   tools/_pfxcap.sh ref_00120 shots/px/b1 "sh020=sharpenAmount=0.20" ...
+ *   .venv/bin/python tools/_pfx.py shots/px/b1/*.png
  *
- * Reference clip, whole frame: lap_var 463, spectral_slope −2.60 (docs/TARGETS.md).
+ * All six variants were captured CONCURRENTLY through the shared capture daemon, so they
+ * see one state of a tree that other agents were editing at the time (KNOWN_ISSUES 16);
+ * `_pfxcap.sh` records each capture's "modules not loaded" list and all six matched.
+ * `props` was mid-write and absent from every row, equally.
  *
- * **Read the caveat before reading the numbers.** At the time of measurement `terrain`,
- * `rocks`, `ocean`, `clouds`, `structures` and `vegetation` are all stubs, so the frame
- * is sky over a flat placeholder and its own `lap_var` is 16 against a target of 463 —
- * it carries about 3% of the high-frequency energy a finished frame will. On content
- * that smooth, sharpening moves `spectral_slope` *toward* −2.60 rather than away from
- * it, because the render is starting from −3.03 and has a long way to go before it
- * overshoots. That is the opposite of the failure mode this axis exists to catch, and it
- * would be dishonest to report it as a pass.
+ * The previous version of this export shipped rows taken with
+ * `--only time,lighting,sky,pipeline` on a frame whose own lap_var was 16 against a 463
+ * target, under a caveat saying "This selects nothing. Re-measure once terrain/rocks/
+ * ocean land." They have landed and this is that re-measurement. The old rows are gone
+ * rather than kept, because an exported const is importable and a known-invalid number in
+ * one is worse than no number at all.
  *
- * So the table below is **not** evidence that 0.30 is right. The derivation from the
- * measured TAA MTF (see the header) is the argument; the table is here so the
- * re-measurement after the scene lands is a one-command diff, and so the shape of the
- * response is on record.
- *
- * The rule to apply when the scene IS complete: a strength is only acceptable if
- * `lap_var` rises AND `spectral_slope` does not move away from −2.60. On this frame,
- * 0.30 costs 0.207 of slope movement for +22.6 of lap_var; if the finished frame starts
- * at −2.60 the same filter would land near −2.39, which would be too much and the knob
- * would have to come down. Re-measure. Do not assume.
+ * Read `perRoi` before `rows`. The whole-frame column is the one that would select 0.30,
+ * and it does so only because the sky ROI's 211-point structural deficit (a clouds/sky
+ * problem) drags the frame mean down far enough to leave apparent headroom.
  */
 export const MEASURED = {
   method: 'capture',
-  pose: 'ref_00720',
-  only: 'time,lighting,sky,pipeline',
+  pose: 'ref_00120',
   settle: 48,
-  caveat: 'scene is 90% missing at measurement time (frame lap_var 16 vs a 463 target); '
-        + 'the slope is at -3.03, so every strength moves it TOWARD -2.60. This selects '
-        + 'nothing. Re-measure once terrain/rocks/ocean land.',
+  tool: 'tools/_pfxcap.sh + tools/_pfx.py',
+  note: 'complete scene; props absent (concurrent edit) in every row equally; '
+      + 'sharpenStrength 0.30 for the whole sweep, so the amount column is the only '
+      + 'variable. local_contrast is INVARIANT across the whole range '
+      + '(sand 0.05345 -> 0.05347, weapon 0.1250 -> 0.1251): this pass adds no '
+      + 'information, only amplitude.',
   reference: { lap_var: 463, spectral_slope: -2.60 },
   rows: [
-    { strength: 0.00, nyquistGain: 1.00, lap_var: 16.17, spectral_slope: -3.0259 },
-    { strength: 0.15, nyquistGain: 2.14, lap_var: 35.06, spectral_slope: -2.8389 },
-    { strength: 0.30, nyquistGain: 2.29, lap_var: 38.75, spectral_slope: -2.8187 },  // shipped
-    { strength: 0.60, nyquistGain: 2.68, lap_var: 52.20, spectral_slope: -2.7595 },
+    // amount 0 with taaSharpen also off, to size the upstream sharpener: 211.8 / -2.451
+    { amount: 0.00, nyquistGain: 1.00, lap_var: 322.2, edge_density: 0.0873, spectral_slope: -2.309 },
+    { amount: 0.20, nyquistGain: 1.26, lap_var: 406.0, edge_density: 0.0928, spectral_slope: -2.239 },
+    { amount: 0.30, nyquistGain: 1.39, lap_var: 452.6, edge_density: 0.0953, spectral_slope: -2.206 },
+    { amount: 0.45, nyquistGain: 1.58, lap_var: 528.5, edge_density: 0.0991, spectral_slope: -2.158 },
+    { amount: 1.00, nyquistGain: 2.29, lap_var: 866.4, edge_density: 0.1123, spectral_slope: -2.004 },
   ],
+  taaSharpenIsolation: { taaSharpen0: 211.8, taaSharpen045: 322.2, amplitudeGain: 1.23 },
+  perRoi: {
+    // { ref, then lap_var at amount 0.00 / 0.20 / 0.30 / 1.00 }
+    sand:   { ref: 521.3, refSlope: -2.370, lap: [492.6, 614.9, 682.8, 1283], slope: [-2.298, -2.243, -2.217, -2.051] },
+    water:  { ref: 676.6, refSlope: -2.436, lap: [506.9, 663.3, 750.8, 1541], slope: [-2.228, -2.152, -2.116, -1.888] },
+    weapon: { ref: 489.4, refSlope: -2.633, lap: [564.3, 701.9, 778.1, 1445], slope: [-2.669, -2.603, -2.571, -2.375] },
+    sky:    { ref: 253.2, refSlope: -2.947, lap: [41.7, 49.1, 53.4, 92.8],    slope: [-3.194, -3.180, -3.173, -3.123] },
+  },
 };
 
 const FRAG = /* glsl */`
@@ -205,8 +261,8 @@ void main(){
 
 const DEFAULTS = {
   sharpenEnabled: true,
-  sharpenStrength: 0.30,
-  sharpenAmount: 1.0,
+  sharpenStrength: 0.12,
+  sharpenAmount: 0.18,
   sharpenClamp: 0.0,
 };
 

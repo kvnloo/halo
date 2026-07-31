@@ -77,12 +77,14 @@ import { Pass, fsMaterial, FullScreenQuad } from '../RenderPipeline.js';
  * command and the capture stays byte-identical — which a `Date.now()` or
  * `performance.now()` seed would destroy, taking the whole measurement loop with it.
  *
- * Measured cost to the frame statistics at the shipped amplitude (`ref_00720`,
- * `--only time,lighting,sky,pipeline`, sharpen off, so the grain is isolated):
- * `lap_var` 12.39 -> 16.17 and `spectral_slope` −3.0412 -> −3.0259. That is +3.8 of
- * Laplacian variance against a 463 target (0.8%) and 0.015 of slope, in the direction of
- * the −2.60 target rather than away from it. Grain this fine is not what will move the
- * spectrum; it is deliberately below the level at which it could.
+ * **The old cost claim here was void and is replaced.** It read "`lap_var` 12.39 ->
+ * 16.17 ... +3.8 of Laplacian variance against a 463 target (0.8%)", measured at
+ * `ref_00720` with `--only time,lighting,sky,pipeline` on a frame that was sky over a
+ * placeholder. On the complete scene at `ref_00120` the pass as a whole is a *net
+ * subtraction*, because the CA resample dominates everything the grain adds — see the
+ * table in the CA section. With the shipped luma-preserving CA the whole pass costs
+ * 2.2% of whole-frame `lap_var`; with the old CA it cost 10.4%. The grain itself is
+ * still deliberately below the level at which it could move the spectrum.
  *
  * ## Vignette
  *
@@ -97,9 +99,40 @@ import { Pass, fsMaterial, FullScreenQuad } from '../RenderPipeline.js';
  * Lateral only (transverse), which is the kind a real lens shows off-axis: displacement
  * along the radius, growing as r^2, exactly zero on the optical axis. Longitudinal CA —
  * per-channel focus shift — is a depth-of-field effect and does not belong in a 2D pass.
- * Default 0.7 px at the frame corner, so the mid-field is a third of a pixel and the
- * centre is nothing. If coloured fringing is visible anywhere, it is at least three times
- * too strong.
+ *
+ * ### It used to be the most destructive operation in the whole post chain
+ *
+ * A lateral displacement is a bilinear fetch, and a bilinear fetch at sub-pixel offset d
+ * is a two-tap box with weights (1-d, d), whose MTF at Nyquist is |1 - 2d|. At the 0.70 px
+ * corner offset this pass shipped, that is 0.40 — R and B lost 60% of their finest detail,
+ * and R-to-B separation reached 1.40 px, well past this header's own "if coloured fringing
+ * is visible anywhere, it is at least three times too strong" rule.
+ *
+ * Two changes. **(1)** The amplitude came down to 0.45 px at the corner (0.90 px total
+ * R/B separation). **(2)** The luminance is taken from the *centre* tap and only the
+ * chroma from the displaced ones, so the luma MTF is 1.0 by construction at any
+ * amplitude. That is the same thing as a YCoCg round trip that displaces CoCg and keeps
+ * Y, minus the two matrix multiplies: adding a constant to all three channels moves Y and
+ * leaves Co/Cg alone. It is also the more correct model — transverse CA is a *chromatic*
+ * error, three images of the same scene at slightly different magnifications, and what the
+ * eye reads off it is a coloured fringe, not a softer picture. `grainCALuma` 0 restores
+ * the old behaviour for A/B.
+ *
+ * Measured, `ref_00120`, complete scene, all four variants captured concurrently through
+ * the shared daemon with an identical module-load state (`tools/_pfxcap.sh`), everything
+ * else at the shipped defaults. `lap_var`, whole frame and per ROI:
+ *
+ *                                     whole     sand    water   weapon      sky
+ *     grainCA 0     (no CA at all)    488.2    760.7    725.6    835.0     74.5
+ *     0.45, luma-preserving (SHIPPED) 477.3    738.7    719.7    817.6     71.7
+ *     0.45, no luma preservation      453.6    690.9    707.3    779.4     66.1
+ *     0.70, no luma preservation (OLD) 437.4   658.0    697.9    753.2     62.5
+ *
+ * So the old configuration destroyed **10.4% of whole-frame and 13.5% of `sand`
+ * Laplacian variance**; the shipped one costs **2.2% and 2.9%**. At equal amplitude the
+ * luma preservation alone recovers 5.2% whole-frame and 6.9% on `sand`. `local_contrast`
+ * is unchanged by any of them (sand 0.0550 in all four rows), which is why the old
+ * setting was pure loss: it removed high-frequency energy and returned nothing.
  *
  * ## ctx.config
  *
@@ -108,30 +141,39 @@ import { Pass, fsMaterial, FullScreenQuad } from '../RenderPipeline.js';
  *   grainSize        number   grain cell in pixels (1.0)
  *   grainResponse    number   0 = flat, 1 = full luminance dependence (1.0)
  *   grainVignette    number   corner darkening, 0..1 (0.12)
- *   grainCA          number   channel separation at the corner, in pixels (0.70)
+ *   grainCA          number   channel separation at the corner, in pixels (0.45)
+ *   grainCALuma      number   1 = keep the centre tap's luma so CA costs no sharpness
+ *                             (default 1); 0 = the old, lossy per-channel resample
  *   grainDither      number   TPDF amplitude in LSBs, peak. Falls back to `gradeDither`
  *                             so the existing knob keeps working. (1.0)
  *
  *
  * ## Cost
  *
- * **Estimated, not profiled.** These numbers are derived, not measured, and the
- * distinction is stated because this project rejects numbers whose provenance is not
- * given. The GPU was saturated by a dozen concurrent capture sessions throughout this
- * task, so a toggle-off/toggle-on timing run would have measured contention. The basis
- * is the one hard measurement available for this chain: `grade.js` records **0.18 ms**
- * for a full-screen RGBA16F pass at 1920x1080 doing one texture fetch plus four
- * texelFetch from a cache-resident LUT, and **0.14 ms** for its dither stage doing a
- * single fetch. Both are bandwidth-bound (8.3 MB read + 8.3 MB write), so in this chain
- * a full-res pass costs ~0.14 ms of floor and additional taps that hit L1/L2 are close
- * to free; a half-res pass costs ~a quarter of that.
+ * **Measured**, not estimated — the block that used to sit here said "Estimated, not
+ * profiled" and extrapolated from a single `grade.js` number. KNOWN_ISSUES 13 has since
+ * instrumented `Engine.advance()`, so there is now something real to profile against.
  *
- * A real profiling pass on a quiet GPU is owed and should be run before anyone trusts
- * these to two decimal places.
+ * Method (`tools/_pfxprof.mjs`): `RenderPipeline` has no per-pass GPU timer, so a pass is
+ * priced by toggling it off with `__HALO__.togglePass` and differencing whole-frame ms.
+ * Configurations are sampled in an INTERLEAVED round-robin and the round is repeated, so
+ * a patch of GPU contention lands on every configuration equally instead of on whichever
+ * one happened to run during it; the reported figure is the median of the per-round
+ * paired differences.
  *
- * Three bilinear fetches within a sub-pixel of each other (so two are L1 hits), five PCG
- * words, and the 8-bit write. **~0.15 ms**, essentially the full-res bandwidth floor -
- * and it *replaces* grade.js's separate 0.14 ms dither pass rather than adding to it.
+ * Result at `ref_00120`, 1920x1080, 6 rounds x 20 samples, 634 draws / 31.2 M triangles:
+ * whole frame **14.1 ms p50**, and **every one of the four postfx passes differences to
+ * within +/-0.1 ms**, which is `performance.now()`'s own clamp in this browser. So the
+ * honest statement is an upper bound: this pass costs **< 0.2 ms** and is not separable
+ * from measurement noise on a frame this heavy. It is not a number to two decimal places
+ * and it should not be quoted as one. A per-pass `EXT_disjoint_timer_query_webgl2` timer
+ * in `RenderPipeline` is what would resolve these; there isn't one.
+ *
+ * Second run, 8 rounds x 24 samples, adding a configuration that disables **all four**
+ * postfx passes at once: `all` 14.1 ms p50, `none` 14.1 ms p50, paired difference
+ * **0.0 ms median**. The entire postfx tail is below the measurement floor on a frame
+ * that costs 14.1 ms at 638 draws and 31.2 M triangles. Tuning any of these four for
+ * frame time is not where the time is.
  */
 
 const FRAG = /* glsl */`
@@ -145,6 +187,7 @@ uniform float uGrainSize;   // px
 uniform float uGrainResp;   // 0..1
 uniform float uVigK;        // solved from the requested corner darkening
 uniform float uCA;          // px at the corner
+uniform float uCALuma;      // 1 = keep centre-tap luma (chroma-only displacement)
 uniform float uDither;      // LSBs, peak. 0 = off (destination is not 8-bit)
 uniform float uFrame;
 uniform float uBypass;
@@ -201,6 +244,27 @@ void main(){
 
   c = vec3(texture(tSrc, uvR).r, texture(tSrc, uvG).g, texture(tSrc, uvB).b);
 
+  /* ---- restore the centre tap's luminance -------------------------------------
+   * A lateral displacement is implemented as a bilinear fetch, and a bilinear fetch
+   * at a sub-pixel offset d is a two-tap box with weights (1-d, d), whose MTF at
+   * Nyquist is |1 - 2d|. At the 0.70 px corner offset this pass used to ship that is
+   * 0.40 — R and B lost 60% of their finest detail and the pass measured as a net
+   * REMOVAL of 334 lap_var on a complete frame, three times more than every other
+   * stage in this file contributes.
+   *
+   * Real transverse CA is a *chromatic* error: the three images are the same scene at
+   * slightly different magnifications, so what the eye reads is a coloured fringe, not
+   * a softer picture. Splitting the fetch into luma and chroma reproduces exactly that
+   * — take the chroma from the displaced taps and the luminance from the centre one —
+   * and the luma MTF is then 1.0 by construction at any amplitude. Equivalent to a
+   * YCoCg round trip (displace CoCg, keep Y) but without the two matrix multiplies:
+   * adding a constant to all three channels moves Y and leaves Co/Cg untouched. */
+  if (uCALuma > 0.0 && uBypass < 0.5) {
+    vec3 lw = vec3(0.2126, 0.7152, 0.0722);
+    float lCentre = dot(texture(tSrc, vUv).rgb, lw);
+    c += (lCentre - dot(c, lw)) * uCALuma;
+  }
+
   if (uBypass < 0.5) {
     // ---- grain, evaluated per channel at that channel's displaced position --
     float L = dot(c, vec3(0.2126, 0.7152, 0.0722));
@@ -237,7 +301,8 @@ const DEFAULTS = {
   grainSize: 1.0,
   grainResponse: 1.0,
   grainVignette: 0.12,
-  grainCA: 0.70,
+  grainCA: 0.45,
+  grainCALuma: 1.0,
   grainDither: 1.0,
 };
 
@@ -272,6 +337,7 @@ export function create(opts = {}) {
       uGrainResp: { value: cfg.grainResponse },
       uVigK: { value: 0.066 },
       uCA: { value: cfg.grainCA },
+      uCALuma: { value: cfg.grainCALuma },
       uDither: { value: 0 },
       uFrame: { value: 0 },
       uBypass: { value: 0 },
@@ -295,6 +361,7 @@ export function create(opts = {}) {
     u.uGrainSize.value = Math.max(0.25, c.grainSize ?? cfg.grainSize);
     u.uGrainResp.value = Math.max(0, Math.min(1, c.grainResponse ?? cfg.grainResponse));
     u.uCA.value = Math.max(0, c.grainCA ?? cfg.grainCA);
+    u.uCALuma.value = Math.max(0, Math.min(1, c.grainCALuma ?? cfg.grainCALuma));
 
     // Solve k so that the corner lands exactly on the requested darkening:
     // (1/(1+k))^2 = 1 - amount.

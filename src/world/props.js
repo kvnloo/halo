@@ -107,15 +107,17 @@ function lumpField(rand, n, ampLo, ampHi, freqLo, freqHi) {
  * An irregular stone. `cuts` slices flat faces off it, which is what separates a
  * water-worn cobble (0 cuts, rounded) from broken talus rubble (3-5 cuts, angular).
  */
-function makeStone(rand, { detail = 1, lumps = 7, amp = 0.20, cuts = 0, flatten = 1, faceted = false } = {}) {
+function makeStone(rand, { detail = 1, lumps = 7, amp = 0.20, cuts = 0, cutMin = 0.70, flatten = 1, faceted = false } = {}) {
   const src = new THREE.IcosahedronGeometry(1, detail);
   const g = src.index ? src.toNonIndexed() : src;
   const f = lumpField(rand, lumps, amp * 0.35, amp, 0.9, 3.4);
   const planes = [];
   for (let i = 0; i < cuts; i++) {
     const [nx, ny, nz] = rand.onSphere();
-    // shallow cuts: deeper ones turn an 80-triangle icosphere into a cut gem
-    planes.push([nx, ny, nz, rand.range(0.70, 0.95)]);
+    // shallow cuts: deeper ones turn an 80-triangle icosphere into a cut gem, and on
+    // an 80-triangle sphere one plane at d = 0.70 can flatten a quarter of the surface
+    // into a single facet that shades as a grey polygon.
+    planes.push([nx, ny, nz, rand.range(cutMin, 0.97)]);
   }
   const p = g.attributes.position;
   const v = new THREE.Vector3();
@@ -130,15 +132,19 @@ function makeStone(rand, { detail = 1, lumps = 7, amp = 0.20, cuts = 0, flatten 
     p.setXYZ(i, v.x, v.y, v.z);
   }
   g.computeVertexNormals();                     // non-indexed => per-face normals
-  if (!faceted) {
-    // Soften toward the radial direction: water-worn stones read rounded, and the
-    // facets of a 80-triangle icosphere otherwise show as obvious flat plates.
+  // Soften toward the radial direction. A low-poly icosphere shaded off its face
+  // normals reads as cut glass: 200 px facets each taking a different flat value.
+  // `cuts` already supplies the angular *silhouette*, so the angular variants do not
+  // need faceted *shading* as well — they just need less softening than a water-worn
+  // cobble. (Critic item 6: the `if (!faceted)` skip was the visible defect.)
+  {
+    const blend = faceted ? 0.55 : 0.66;
     const nrm = g.attributes.normal;
     const a = new THREE.Vector3();
     for (let i = 0; i < p.count; i++) {
       a.fromBufferAttribute(nrm, i);
       v.fromBufferAttribute(p, i).normalize();
-      a.lerp(v, 0.60).normalize();
+      a.lerp(v, blend).normalize();
       nrm.setXYZ(i, a.x, a.y, a.z);
     }
   }
@@ -437,13 +443,25 @@ export function create(opts = {}) {
       this.key = key;
       this.geos = geos;
       this.material = material;
-      this.o = Object.assign({ castShadow: false, matId: MAT_ID.DEFAULT, roughness: 0.7 }, o);
+      this.o = Object.assign({
+        castShadow: false, matId: MAT_ID.DEFAULT, roughness: 0.7,
+        // `aux`: allocate `instanceColor` and stream three per-instance floats through
+        // it. three declares USE_COLOR in the fragment whenever an InstancedMesh has an
+        // instanceColor, so the payload arrives as `vColor.rgb` with no extra plumbing
+        // and no extra draw state. Used to carry wetness sampled from the terrain at
+        // scatter time (critic item 4) instead of guessing it per-fragment from world Y.
+        aux: false,
+        // `hardCull`: drop the instance at `fadeEnd` instead of scaling it to zero.
+        // With a per-instance randomised `fadeEnd` the aggregate is a smooth *density*
+        // falloff, which is how a real cobble bed thins out — a size gradient is not.
+        hardCull: false,
+      }, o);
       this.items = [];
       this.meshes = [];
       this.buckets = [];
     }
 
-    /** item: { x, y, z, q:Quaternion, sx, sy, sz, gi, fadeEnd } */
+    /** item: { x, y, z, q:Quaternion, sx, sy, sz, gi, fadeEnd, aux?:[r,g,b] } */
     push(it) { this.items.push(it); }
 
     build(parent) {
@@ -464,6 +482,10 @@ export function create(opts = {}) {
         m.receiveShadow = true;
         m.layers.set(LAYER.OPAQUE);
         m.count = 0;
+        if (this.o.aux) {
+          m.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(n * 3).fill(1), 3);
+          m.instanceColor.setUsage(THREE.DynamicDrawUsage);
+        }
         patchForGBuffer(m, { matId: this.o.matId, roughness: this.o.roughness });
         parent.add(m);
         this.meshes.push(m);
@@ -483,26 +505,30 @@ export function create(opts = {}) {
         const m = this.meshes[i];
         if (!m) continue;
         const arr = m.instanceMatrix.array;
+        const carr = m.instanceColor ? m.instanceColor.array : null;
+        const hard = this.o.hardCull;
         const bucket = this.buckets[i];
         let n = 0;
         for (let k = 0; k < bucket.length; k++) {
           const it = bucket[k];
           const dx = it.x - cam.x, dy = it.y - cam.y, dz = it.z - cam.z;
           const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
-          const fe = it.fadeEnd, fs = fe * 0.72;
+          const fe = it.fadeEnd;
           let f = 1;
-          if (d > fs) {
-            if (d >= fe) continue;
-            f = (fe - d) / (fe - fs);
-            f = f * f * (3 - 2 * f);
+          if (d >= fe) continue;
+          if (!hard) {
+            const fs = fe * 0.72;
+            if (d > fs) { f = (fe - d) / (fe - fs); f = f * f * (3 - 2 * f); }
           }
           _p.set(it.x, it.y, it.z);
           _s.set(it.sx * f, it.sy * f, it.sz * f);
           _m.compose(_p, it.q, _s).toArray(arr, n * 16);
+          if (carr && it.aux) { carr[n * 3] = it.aux[0]; carr[n * 3 + 1] = it.aux[1]; carr[n * 3 + 2] = it.aux[2]; }
           n++;
         }
         m.count = n;
         m.instanceMatrix.needsUpdate = true;
+        if (m.instanceColor) m.instanceColor.needsUpdate = true;
         live += n;
       }
       return live;
@@ -514,6 +540,7 @@ export function create(opts = {}) {
   /** Per-instance macro variation, hashed from the instance origin — no extra buffer. */
   const TINT_VERTEX_PARS = /* glsl */`
     varying vec3 vPropTint;
+    varying float vPropUp;
     uniform float uTintAmt;
   `;
   const TINT_VERTEX = /* glsl */`
@@ -526,16 +553,61 @@ export function create(opts = {}) {
     #else
       vPropTint = vec3(1.0);
     #endif
+    // Object-space elevation, normalised so it is independent of the instance scale:
+    // -1 at the buried underside, +1 at the crown. This is what the bedding/contact
+    // occlusion is keyed off (critic item 3) — the scatter aligns object +Y with the
+    // ground normal, so it is 'up' in the only sense that matters here.
+    vPropUp = position.y / max(length(position), 1e-4);
   `;
   const PROP_PARS = /* glsl */`
     varying vec3 vPropTint;
+    varying float vPropUp;
+    /**
+     * Ambient occlusion, written by a material body and consumed at
+     * <lights_fragment_end>. AO is an indirect-only term: multiplying it into the albedo
+     * darkens direct sunlight too, which is the mistake reports/terrain.md 2 documents
+     * (their shadowed sides went to sRGB 4 against a reference p01 of 31).
+     */
+    float gPropAO = 1.0;
     /** Descending smoothstep. GLSL leaves smoothstep(hi, lo, x) undefined, so spell it out. */
     float pDown(float hi, float lo, float x){
       float t = clamp((hi - x) / max(hi - lo, 1e-5), 0.0, 1.0);
       return t * t * (3.0 - 2.0 * t);
     }
-    /** Below the swash line everything is soaked; it dries out up the berm. */
+    /**
+     * Fallback wetness for prop classes that do not carry a per-instance value. This is
+     * a horizontal plane in world Y and it is *wrong* for anything large enough to show
+     * a gradient down its own flank — see the header note. Classes that matter (cobble)
+     * take wetness from the terrain at scatter time and read it out of 'vColor.r'.
+     */
     float pWet(vec3 wp){ return pDown(2.2, 0.10, wp.y); }
+
+    /** View-space depth in metres, from the perspective divide. No extra varying. */
+    float pDist(){ return 1.0 / max(gl_FragCoord.w, 1e-6); }
+
+    /**
+     * Gradient-of-noise bump. A 320-triangle stone lit purely off its vertex normals has
+     * no micro-relief at any distance, which is most of why a cobble field measures as
+     * pixel fizz (shallow spectral slope) rather than as stone. Central-difference the
+     * same fbm the albedo uses, in the surface tangent frame, and tilt the normal by it.
+     * Standard forward-difference bump mapping (Blinn 1978); the tangent frame is built
+     * from the shading normal so it works on an arbitrary silhouette with no UVs.
+     * 'freq' is in cycles/m and 'amp' is the RELIEF IN METRES. The probe offset has to
+     * be a fixed fraction of the feature size, not a fixed distance: probing 1.2 cm
+     * across a 2.3 cm feature samples half a cycle, which aliases and returned tilts up
+     * to 70 degrees — visible as a white/black speckle crawling over every stone.
+     */
+    vec3 pBump(vec3 n, vec3 wp, float freq, float amp){
+      if (amp < 1e-4) return n;
+      vec3 up = abs(n.y) < 0.90 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+      vec3 T = normalize(cross(up, n));
+      vec3 B = cross(n, T);
+      float e = 0.20 / freq;
+      float h0 = fbm3(wp * freq, 2);
+      float hT = fbm3((wp + T * e) * freq, 2);
+      float hB = fbm3((wp + B * e) * freq, 2);
+      return normalize(n - (T * (hT - h0) + B * (hB - h0)) * (amp / e));
+    }
   `;
 
   /**
@@ -579,9 +651,39 @@ export function create(opts = {}) {
     // applyWorldMaterial's own hook — see the note in the file header.
     mat.onBeforeCompile = (shader) => {
       shader.uniforms.uTintAmt = { value: o.tint ?? 0.14 };
+      // `propsDbg=1` paints every prop pixel pure emissive magenta. §2 and §4 of
+      // reports/terrain.md were both found with a knob like this and neither was
+      // visible in a normal capture: it is the only way to measure what fraction of a
+      // frame this module actually owns, which is the number the whole cobble
+      // re-authoring turns on. 0 = off, one static-uniform branch.
+      shader.uniforms.uPropsDbg = { value: ctx.config?.propsDbg ? Number(ctx.config.propsDbg) : 0 };
+      const dc = o.dbgColor || [1, 0, 1];
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <opaque_fragment>',
+        `if (abs(uPropsDbg - 1.0) < 0.5) {
+           gl_FragColor = vec4(${dc[0].toFixed(3)}, ${dc[1].toFixed(3)}, ${dc[2].toFixed(3)}, 1.0);
+           return;
+         }
+         #include <opaque_fragment>`);
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <common>', '#include <common>\nuniform float uPropsDbg;');
       shader.fragmentShader = shader.fragmentShader.replace(
         '#include <lights_physical_fragment>',
         `{\n${body}\n}\n#include <lights_physical_fragment>`);
+      if (o.ao) {
+        // indirect-only, per the note on gPropAO
+        shader.fragmentShader = shader.fragmentShader.replace(
+          '#include <lights_fragment_end>',
+          `#include <lights_fragment_end>
+           {
+             // propsDbg=2 kills the indirect term outright, which measures what share
+             // of a prop's pixel value is ambient — i.e. the ceiling on what any amount
+             // of contact occlusion can ever buy in this scene.
+             float aoDbg = abs(uPropsDbg - 2.0) < 0.5 ? 0.0 : gPropAO;
+             reflectedLight.indirectDiffuse  *= aoDbg;
+             reflectedLight.indirectSpecular *= aoDbg;
+           }`);
+      }
     };
     applyWorldMaterial(mat, ctx, {
       matId,
@@ -719,6 +821,27 @@ export function create(opts = {}) {
         return out;
       }
 
+      /**
+       * Two-stage rejection sampling for the large sets. `bound(x,z)` must be a cheap
+       * upper bound on `weight(x,z,g)`; points that fail it never pay for a
+       * `terrain.sample()`. Mathematically identical to `scatterPoints` (accept with
+       * probability `bound * (weight/bound) = weight`), but for the cobble bed it cuts
+       * terrain queries by ~4x, which is what makes a 40k-instance set affordable.
+       */
+      function scatterPoints2(rnd, count, bound, weight, tries = 40) {
+        const out = [];
+        let guard = count * tries;
+        while (out.length < count && guard-- > 0) {
+          const x = rnd.range(X0, X1), z = rnd.range(Z0, Z1);
+          const pb = bound(x, z);
+          if (pb <= 0 || rnd.next() >= pb) continue;
+          const g = ground(x, z);
+          const w = weight(x, z, g);
+          if (w > 0 && rnd.next() < w / pb) out.push({ x, z, g });
+        }
+        return out;
+      }
+
       /** Sit an object on the ground, tilted to the surface, with a random spin. */
       function seat(g, rnd, tiltBlend = 1, jitter = 0.28) {
         _p.set(g.nx, Math.max(0.2, g.ny), g.nz).normalize();
@@ -728,33 +851,127 @@ export function create(opts = {}) {
         return q.multiply(_q);
       }
 
-      /* ================================================== 1. cobbles / rubble */
+      /* ============================================ 1. beach detritus (cobbles)
+       *
+       * SIZE BAND. `ref/detail/sand_4k.png` and terrain.js's own scale-bar measurement
+       * (terrain.js, the `terrainDbg=9` note) both put the near-field stone at 3-9 cm.
+       * This set is clamped to 3-21 cm and nothing here is allowed above 25 cm: talus
+       * and boulders are `rocks.js`'s job, and it already has a landmark/apron system.
+       * The previous distribution (0.045 * 20^(u^2.1)) put 6.7% of the instances —
+       * 0.6-1.2 m boulders — on 50.6% of the screen area, and those boulders are what
+       * the critic photographed as cut glass.
+       *
+       * OWNERSHIP SPLIT, written down so the next agent does not re-duplicate it:
+       *     < 15 cm     terrain.js — displaced cobble pavement + shingle + splat
+       *    15 - 25 cm   props.js   — this set: discrete bedded stones with contact AO
+       *     > 25 cm     rocks.js   — talus, aprons, landmarks
+       * props deliberately overlaps the top of terrain's band (3-21 cm rather than
+       * 15-25) because terrain's contribution below ~8 cm is *shading*, not silhouette,
+       * and the reference's near field is full of stones that break the horizon line of
+       * the sand behind them. What props must not do is re-draw terrain's whole bed at
+       * a coarser scale, which is what the 45.6%-coverage version was doing.
+       */
       {
         const rnd = ctx.rand.fork(0x51c0bb1e);
         const geos = [
-          // 0: small water-worn pebble, 80 tris — never drawn above ~0.3 m
+          // 0: rounded water-worn cobble
           makeStone(rnd.fork(1), { detail: 1, lumps: 8, amp: 0.24, cuts: 0, flatten: 0.78 }),
-          // 1: the boulder variant. 320 tris, because at 0.5-1 m an 80-triangle
-          //    icosphere silhouettes as a cut gem no matter how it is shaded
-          makeStone(rnd.fork(2), { detail: 2, lumps: 9, amp: 0.22, cuts: 4, flatten: 0.72, faceted: true }),
-          // 2: flat slab, 80 tris
-          makeStone(rnd.fork(3), { detail: 1, lumps: 7, amp: 0.17, cuts: 2, flatten: 0.52, faceted: true }),
+          // 1: sub-angular shingle. Shallow cuts only: on a wave-washed beach nothing
+          //    this size keeps a sharp arris, and a deep cut on an 80-triangle sphere
+          //    reads as a flat grey polygon lying on the sand.
+          makeStone(rnd.fork(2), { detail: 1, lumps: 7, amp: 0.20, cuts: 2, cutMin: 0.84, flatten: 0.66, faceted: true }),
+          // 2: flat rounded pebble — the disc-shaped ones that lie proud of the sand
+          makeStone(rnd.fork(3), { detail: 1, lumps: 8, amp: 0.17, cuts: 0, flatten: 0.45 }),
         ];
         geometries.push(...geos);
 
         const mat = makeMaterial(ctx, 'cobble', MAT_ID.ROCK, /* glsl */`
           vec3 wp = vWorldPositionWM;
+          float dist = pDist();
           float n    = fbm3(wp * 3.1, 4) * 0.5 + 0.5;
           float n2   = fbm3(wp * 21.0, 3) * 0.5 + 0.5;
           float grit = vnoise3(wp * 96.0);
-          float wet  = pWet(wp);
-          // dry cobbles are pale warm grey; wet ones go near-black and glossy
-          vec3 dry = mix(vec3(0.395, 0.360, 0.310), vec3(0.190, 0.172, 0.150), n);
-          dry = mix(dry, vec3(0.480, 0.445, 0.388), smoothstep(0.62, 0.95, n2) * 0.55);
-          dry *= 0.80 + 0.34 * grit;
-          diffuseColor.rgb = mix(dry, dry * 0.24, wet) * vPropTint;
-          roughnessFactor = clamp(mix(0.90, 0.40, wet) * (0.84 + 0.30 * n2) - 0.08 * grit, 0.14, 1.0);
-        `, { roughness: 0.72, tint: 0.16 });
+          // Per-instance wetness, sampled off terrain.sample().wetness at scatter time
+          // and delivered through instanceColor. Constant over one stone: a 20 cm cobble
+          // does not have a wet base and a dry crown, and the old per-fragment world-Y
+          // plane gave every stone exactly that (critic item 4).
+          float wet = clamp(vColor.r, 0.0, 1.0);
+          // Where the sand line crosses this stone, in vPropUp units. The scatter puts
+          // the centre a signed (1 - 2*bury) semi-heights above the ground, so the sand
+          // meets the stone at exactly 2*bury - 1. Occlusion is anchored to THAT, not to
+          // a fixed fraction of the stone, or a deeply bedded stone gets its contact
+          // shading somewhere up its own crown.
+          float bury  = clamp(vColor.g, 0.0, 1.0);
+          float gline = 2.0 * bury - 1.0;
+          // Two terms, because a bedded stone has two things going on: a broad band of
+          // damp sand wicked up its lower flank, and a tight near-black line where the
+          // sand actually meets it. One smoothstep gives you either a grey wash over
+          // half the stone or a hard edge with nothing around it.
+          // Both thresholds are broken up by the same low-frequency field the albedo
+          // uses. A clean smoothstep in object-space elevation paints a dead-straight
+          // horizontal stripe across every stone — it reads as a waterline decal, not as
+          // sand piled against a rock.
+          float gl2     = gline + (n2 - 0.5) * 0.85;
+          float damp    = smoothstep(gl2 - 0.10, gl2 + 0.95, vPropUp);
+          float contact = smoothstep(gl2 - 0.16, gl2 + 0.46, vPropUp);
+
+          // Rock type is PER STONE (vColor.b), not a world-space noise field. Keying it
+          // off fbm3(wp*21) gave every stone the same 5 cm blotch pattern, which reads
+          // as camouflage rather than as a shingle bed of differing lithologies.
+          //
+          // What the reference actually shows (kf_00450, near field, zoomed): the
+          // majority of stones are half-buried and SAND-COATED — warm tan, barely
+          // separated from the sand in value — and the contrast in that crop comes from
+          // hard black contact shadows, not from dark stone albedo. A minority are wet
+          // brown and a few are near-black. So the distribution is weighted that way.
+          float rt = clamp(vColor.b, 0.0, 1.0);
+          // Hue matters as much as value here. terrain.js authors its dry sand at
+          // 0.322/0.196/0.116 — a blue:red ratio of 0.36. A stone at 0.51 is *cooler*
+          // than the sand it lies on, and a field of them measurably pulls the sand ROI
+          // lab_b down. Every entry below is held at or under the sand's own ratio.
+          // Measured, not guessed: with albedo HSV-saturation 0.61 these stones RENDER
+          // at sat 40 against the sand's 51 (magenta-mask probe, propsDbg=1). The
+          // additive floor in this scene costs roughly a fifth of the chroma at this
+          // albedo, so the authored value has to overshoot by that much — 0.61 * 51/40
+          // = 0.78 — to land on the sand's rendered chroma. That is an iron-stained
+          // calcareous shingle, which is what reports/terrain.md concluded the sand is.
+          // g/r held at terrain's own dry sand ratio (0.196/0.322 = 0.609) so the set
+          // does not pull the sand ROI's lab_a green.
+          vec3 sandCoat = vec3(0.276, 0.168, 0.071);    // S 0.743
+          vec3 midRock  = vec3(0.166, 0.101, 0.042);    // S 0.747
+          vec3 darkRock = vec3(0.052, 0.032, 0.013);    // S 0.750
+          // Weighted toward the bright end on purpose. Measured on this scene: props
+          // pixels render at sat 40 against the surrounding sand's 51 with identical
+          // HSV saturation in the ALBEDO, because a low-albedo surface under a fixed
+          // achromatic additive floor loses proportionally more chroma. Saturation here
+          // is therefore bought with brightness, and the dark minority is what pays for
+          // p01 / lum_std. A uniformly dark field gets neither.
+          vec3 dry = mix(sandCoat, midRock, smoothstep(0.34, 0.78, rt));
+          dry = mix(dry, darkRock, smoothstep(0.72, 0.99, rt));
+          dry *= (0.86 + 0.26 * grit) * mix(0.86, 1.14, n);
+          // Wet stone goes dark AND cooler: the water film kills the warm multiple
+          // scattering between grains, the same reason reports/terrain.md made its damp
+          // sand multiplier cooler as well as darker.
+          vec3 col = mix(dry, dry * vec3(0.30, 0.33, 0.40), wet);
+          // damp sand and organic film trapped at the bedding line
+          col *= mix(0.55, 1.0, damp) * mix(0.35, 1.0, contact);
+          diffuseColor.rgb = col * vPropTint;
+
+          // Contact occlusion — indirect only, so the sunlit crown keeps its value while
+          // the bedding line goes black. This is what buys shadow_frac / local_contrast.
+          gPropAO = mix(0.03, 1.0, contact);
+
+          // Wet stone is the specular event in a beach frame; dry stone is not matte
+          // either. Old floor was 0.76-1.00 dry, which produced highlight_frac 0.0000.
+          roughnessFactor = clamp(mix(0.66, 0.17, wet) * (0.86 + 0.26 * n2) - 0.07 * grit, 0.08, 1.0);
+
+          // Micro-relief. Without this a 3 cm feature is albedo-only, which raises
+          // lap_var without steepening spectral_slope — the exact 'broadband fizz'
+          // failure docs/TARGETS.md names.
+          float bAmp = 1.0 - smoothstep(4.0, 18.0, dist);
+          normal = pBump(normal, wp, 13.0, 0.0060 * bAmp);
+          normal = pBump(normal, wp, 47.0, 0.0022 * bAmp);
+        `, { roughness: 0.60, tint: 0.16, ao: true, dbgColor: [1, 0, 1] });
 
         // Cobbles form beds and drifts, not confetti — a coherent field decides where.
         const bed = (x, z) => THREE.MathUtils.clamp(
@@ -762,53 +979,78 @@ export function create(opts = {}) {
           (gradNoise2(x * 0.190, z * 0.260, 733) * 0.5 + 0.5) * 0.34, 0, 1);
 
         const scat = new Scatter('cobble', geos, mat, {
-          // the flat slab variant contributes almost no shadow area; skip its cascades
-          castShadow: [true, true, false], matId: MAT_ID.ROCK, roughness: 0.72,
+          castShadow: [true, true, true], matId: MAT_ID.ROCK, roughness: 0.60,
+          aux: true, hardCull: true,
         });
 
-        // The reference foreground carries roughly 2 stones per m² at cobble scale.
-        // 17k over the ~35,000 m² beach band is 0.5/m² — still 4x short, and where the
-        // triangle budget lands. Closing the rest wants either terrain displacement
-        // for the sub-10 cm grade or a camera-relative near-field set; see the report.
-        const pts = scatterPoints(rnd, 17000, (x, z, g) => {
+        /**
+         * Density, not size, terminates the bed. Every stone gets one fixed near-field
+         * radius drawn from [11, 30] m and is dropped hard at it; because the radius is
+         * per-instance the aggregate is a smooth density falloff, and no stone ever
+         * shrinks. The old `fadeEnd = clamp(size*260, 20, 170)` did the opposite: the
+         * 3-9 cm stones that ARE the reference died at 20 m while the boulders — the
+         * ones that should not exist — survived to 170 m and were always on screen.
+         */
+        const NEAR_MIN = 11, NEAR_MAX = 30;
+
+        const bound = (x, z) => {
+          const nr = nearRock(x, z);
+          if (nr < 0) return 0;
+          return Math.min(1, 0.62 * (0.25 + bed(x, z)) + nr * 0.75 + nearCliff(x, z) * 0.55);
+        };
+        const pts = scatterPoints2(rnd, 200000, bound, (x, z, g) => {
           if (g.y < -2.6 || g.y > 11) return 0;
           if (g.slope > 0.62) return 0;
           const nr = nearRock(x, z);
           if (nr < 0) return 0;
           // densest just above the waterline, thinning up the dry berm
           const band = THREE.MathUtils.clamp(1.18 - Math.abs(g.y - 0.55) * 0.30, 0.12, 1.0);
-          let w = 0.42 * band * (0.25 + bed(x, z)) * (1 - g.slope * 0.7);
+          let w = 0.62 * band * (0.25 + bed(x, z)) * (1 - g.slope * 0.7);
           w += nr * 0.75 + nearCliff(x, z) * 0.55;
           return Math.min(1, w);
         });
 
+        // `makeStone` returns a lumped unit icosphere whose mean radius is ~1.05, so the
+        // instance scale is a RADIUS and the stone's DIAMETER is ~2.1x it. The old code
+        // read `size` as a diameter (`y = g.y - sink + size*0.5`), which is why a
+        // nominal '0.09 m median' cobble measured 20 cm across in the frame and the
+        // nominal 0.84 m tail measured 1.8 m. Everything below is quoted as diameter.
+        const R_MEAN = 1.05;
+
         for (const pt of pts) {
-          // power-law sizes: many pebbles, few boulders
-          const size = 0.045 * Math.pow(20.0, Math.pow(rnd.next(), 2.1));
-          // only the top ~4% by size pay for the 320-triangle variant
-          const gi = size > 0.62 ? 1 : (rnd.next() < 0.5 ? 0 : 2);
-          const sink = size * rnd.range(0.18, 0.62);
-          const y = pt.g.y - sink + size * 0.5;
+          // diameter 0.099 m at u=0 .. 0.267 m at u=1; p50 0.148, p90 0.235, p99 0.264.
+          // Above ~0.27 m is talus and belongs to rocks.js, which has an apron system;
+          // below ~0.10 m terrain.js's displaced pavement already owns the grade.
+          const size = 0.045 * Math.pow(2.7, Math.pow(rnd.next(), 1.3));
+          const gi = rnd.next() < 0.52 ? 0 : (rnd.next() < 0.55 ? 1 : 2);
+          const buryF = rnd.range(0.20, 0.68);
+          const sy = size * rnd.range(0.62, 1.00);
+          // buryF 0 -> resting on the surface, 0.5 -> centre at ground level, 1 -> gone.
+          // The material recovers the sand line exactly as vPropUp = 2*bury - 1.
+          const hh = sy * R_MEAN;
+          const y = pt.g.y + hh * (1.0 - 2.0 * buryF);
           scat.push({
             x: pt.x, y, z: pt.z,
             q: seat(pt.g, rnd, 0.8, 0.30),
             sx: size * rnd.range(0.85, 1.25),
-            sy: size * rnd.range(0.62, 1.00),
+            sy,
             sz: size * rnd.range(0.85, 1.25),
             gi,
-            // pebbles vanish close in; boulders survive out to the haze band
-            fadeEnd: THREE.MathUtils.clamp(size * 260, 20, 170),
+            fadeEnd: NEAR_MIN + (NEAR_MAX - NEAR_MIN) * rnd.next(),
+            // r = wetness from the terrain field (constant over the stone — see the
+            // material), g = bedding depth, b = lithology: sand-coated .. wet slate,
+            // pushed dark where the terrain says the stone is in the swash.
+            aux: [pt.g.wet, buryF, THREE.MathUtils.clamp(rnd.next() * 0.85 + pt.g.wet * 0.30, 0, 1)],
           });
-          if (size > 0.42 && colliders.length < 190) {
-            colliders.push({
-              type: 'sphere',
-              center: new THREE.Vector3(pt.x, y, pt.z),
-              radius: size * 0.58,
-              surface: 'rock',
-            });
-          }
         }
         scatters.push(scat);
+        counts.cobbles = pts.length;
+
+        /**
+         * Published so `terrain.js` can splat a contact-darkening skirt under the bed
+         * without re-deriving the field. Same function the scatter uses; 0..1.
+         */
+        api.bedDensity = (x, z) => (nearRock(x, z) < 0 ? 0 : bed(x, z));
       }
 
       /* =========================================== 2. driftwood and branches */
@@ -826,7 +1068,7 @@ export function create(opts = {}) {
           base = mix(base, vec3(0.300, 0.262, 0.212), smoothstep(0.55, 0.95, n) * 0.6);
           diffuseColor.rgb = mix(base, base * 0.42, wet * 0.8) * vPropTint;
           roughnessFactor = clamp(mix(0.94, 0.55, wet) * (0.86 + 0.22 * grain), 0.10, 1.0);
-        `, { roughness: 0.9, tint: 0.13 });
+        `, { roughness: 0.9, tint: 0.13, dbgColor: [1, 0, 0] });
 
         const scat = new Scatter('driftwood', [geo], mat, {
           castShadow: true, matId: MAT_ID.DEFAULT, roughness: 0.9,
@@ -881,7 +1123,7 @@ export function create(opts = {}) {
           diffuseColor.rgb = base * vPropTint;
           // wet weed is the glossiest thing on the beach — it is what catches the sun
           roughnessFactor = clamp(0.45 + 0.30 * n, 0.05, 1.0);
-        `, { roughness: 0.58, tint: 0.26, side: THREE.DoubleSide });
+        `, { roughness: 0.58, tint: 0.26, side: THREE.DoubleSide, dbgColor: [0, 1, 0] });
 
         const scat = new Scatter('kelp', [geo], mat, {
           castShadow: false, matId: MAT_ID.FOLIAGE, roughness: 0.58,
@@ -927,13 +1169,18 @@ export function create(opts = {}) {
           base = mix(base, vec3(0.560, 0.470, 0.400), smoothstep(0.7, 1.0, n) * 0.4);
           diffuseColor.rgb = mix(base, base * 0.62, wet * 0.7) * vPropTint;
           roughnessFactor = clamp(mix(0.52, 0.20, wet) * (0.9 + 0.2 * n), 0.05, 1.0);
-        `, { roughness: 0.42, tint: 0.10 });
+        `, { roughness: 0.42, tint: 0.10, dbgColor: [0, 0, 1] });
 
         const shells = new Scatter('shell', [shellGeo], shellMat, {
           castShadow: false, matId: MAT_ID.DEFAULT, roughness: 0.42,
         });
 
-        const pts = scatterPoints(rnd, 480, (x, z, g) => {
+        // 480 shells over a 34,000 m^2 beach at fadeEnd 22 put essentially none of them
+        // on screen (measured 0.00% at ref_00450 with the per-class debug colours).
+        // The reference's near field carries visible shell hash, so the set is dense
+        // enough to actually appear and is culled at a distance where a 5 cm shell is
+        // still more than a pixel.
+        const pts = scatterPoints(rnd, 2600, (x, z, g) => {
           if (g.y < -0.6 || g.y > 3.4) return 0;
           if (g.slope > 0.42) return 0;
           if (nearRock(x, z) < 0) return 0;
@@ -951,7 +1198,7 @@ export function create(opts = {}) {
             sx: size * rnd.range(0.85, 1.2),
             sy: size * rnd.range(0.70, 1.1),
             sz: size * rnd.range(0.85, 1.2),
-            gi: 0, fadeEnd: 22,
+            gi: 0, fadeEnd: 26,
           });
         }
         scatters.push(shells);
@@ -964,7 +1211,7 @@ export function create(opts = {}) {
           float n = fbm3(wp * 55.0, 3) * 0.5 + 0.5;
           diffuseColor.rgb = mix(vec3(0.190, 0.098, 0.058), vec3(0.320, 0.190, 0.112), n) * vPropTint;
           roughnessFactor = clamp(0.40 + 0.24 * n, 0.05, 1.0);
-        `, { roughness: 0.44, tint: 0.18 });
+        `, { roughness: 0.44, tint: 0.18, dbgColor: [1, 1, 0] });
 
         const crabs = new Scatter('crab', [crabGeo], crabMat, {
           castShadow: false, matId: MAT_ID.DEFAULT, roughness: 0.44,
@@ -999,7 +1246,7 @@ export function create(opts = {}) {
           diffuseColor.rgb = mix(alloy, vec3(0.330, 0.288, 0.220), sanded * 0.55 * grime) * vPropTint;
           metalnessFactor = mix(0.34, 0.08, sanded);
           roughnessFactor = clamp(mix(0.38, 0.80, grime) + sanded * 0.25, 0.06, 1.0);
-        `, { roughness: 0.48, tint: 0.07 });
+        `, { roughness: 0.48, tint: 0.07, dbgColor: [0, 1, 1] });
 
         const scat = new Scatter('alloy', [geo], mat, {
           castShadow: true, matId: MAT_ID.FORERUNNER, roughness: 0.48,
@@ -1066,7 +1313,7 @@ export function create(opts = {}) {
           diffuseColor.rgb = base;
           metalnessFactor = 0.45;
           roughnessFactor = clamp(0.30 + 0.26 * w - 0.10 * scuff, 0.05, 1.0);
-        `, { roughness: 0.4, tint: 0.0 });
+        `, { roughness: 0.4, tint: 0.0, dbgColor: [1, 0.45, 0] });
 
         const plasmaMat = makeMaterial(ctx, 'plasma', MAT_ID.METAL, /* glsl */`
           vec3 wp = vWorldPositionWM;
@@ -1075,7 +1322,7 @@ export function create(opts = {}) {
           metalnessFactor = 0.35;
           roughnessFactor = clamp(0.22 + 0.20 * w, 0.05, 1.0);
           totalEmissiveRadiance += vec3(0.10, 0.42, 0.62) * smoothstep(0.55, 0.95, w) * 0.55;
-        `, { roughness: 0.3, tint: 0.0 });
+        `, { roughness: 0.3, tint: 0.0, dbgColor: [0.45, 0, 1] });
 
         // No shadow cascades for these two: a 20 cm object buys four extra shadow
         // draws for a contact shadow the cobbles beside it already imply.
@@ -1113,7 +1360,7 @@ export function create(opts = {}) {
           roughnessFactor = 0.42;
           // engine bells stay hot against the sky — the cue that still reads at 600 m
           totalEmissiveRadiance += vec3(0.55, 0.72, 1.0) * smoothstep(0.72, 0.98, p) * 1.4;
-        `, { roughness: 0.42, tint: 0.0 });
+        `, { roughness: 0.42, tint: 0.0, dbgColor: [0, 1, 0.45] });
 
         pelican = new THREE.Mesh(geo, mat);
         pelican.name = 'props.pelican';
@@ -1163,6 +1410,11 @@ export function create(opts = {}) {
       if (ctx.config.frozen) { if (frozenT === null) frozenT = ctx.clock.t; t = frozenT; }
       else { frozenT = null; t = ctx.clock.t; }
       placePelican(t);
+
+      for (const m of materials) {
+        const u = m.userData.shader?.uniforms?.uPropsDbg;
+        if (u) u.value = ctx.config.propsDbg ? Number(ctx.config.propsDbg) : 0;
+      }
 
       // The LOD rebuild is O(items), so only redo it when the camera actually moved.
       // During a capture the camera is static: this runs once and every settle frame

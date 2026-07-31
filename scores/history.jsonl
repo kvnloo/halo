@@ -3,3 +3,4 @@
 {"tag":"latest","n":9,"score":22.24,"axes":{"structure":3.74,"grade":0,"perceptual":2.07,"detail":56.64,"geometry":62.52,"spectrum":82.27},"perf":{"fps":0,"ms":0,"drawCalls":592,"tris":12760765}}
 {"tag":"waveE","n":9,"score":28.62,"axes":{"structure":5.13,"grade":0,"perceptual":4.66,"detail":75.17,"geometry":79.44,"spectrum":96.6},"perf":{"fps":0,"ms":0,"drawCalls":601,"tris":14057892}}
 {"tag":"waveE-fix","n":9,"score":28.62,"axes":{"structure":5.13,"grade":0,"perceptual":4.66,"detail":75.17,"geometry":79.44,"spectrum":96.6},"perf":{"fps":207,"ms":4.83,"drawCalls":601,"tris":14057892}}
+{"tag":"waveF","n":9,"score":30.09,"axes":{"structure":4.63,"grade":0,"perceptual":9.49,"detail":75.92,"geometry":90.96,"spectrum":82.27},"perf":{"fps":195,"ms":5.13,"drawCalls":626,"tris":31286677}}

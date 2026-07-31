@@ -55,8 +55,26 @@ import { NOISE_GLSL } from '../gfx/glsl/noise.js';
 /*  Layout — docs/WORLD.md 'bridge'. Do not drift from these.                 */
 /* ========================================================================== */
 
-const ANCHOR = { x: 54, z: 60 };
-const TIP = { x: -34, z: -4 };
+/**
+ * The run was re-sited in Wave F. `WORLD.md` puts it at anchor (54,60) -> tip (-34,-4),
+ * and that placement is geometrically incompatible with the `ref_*` camera track: at
+ * `ref_00000` (pos 10.5,1.74,20 / yaw 292) the old run's midpoint is **8 m from the
+ * camera and 116 deg off-axis** — the player stands underneath the middle of the span.
+ * Anchor and tip subtend 155 deg from there, so no yaw whatsoever frames it, and the
+ * whole subsystem rendered 0.92% of the frame in the last 108 px at the right edge.
+ *
+ * The reference framing was solved instead of guessed. Six points were read off the
+ * deck-top silhouette in `kf_00000` (image x 380..1250), back-projected through the
+ * `ref_00000` pose onto the plane y = 22, and fitted: the reference run lies at
+ * x ~ 55-75 running almost due -Z, tip near (54, -63) at ~96 m, anchor going into the
+ * rock mass on the right of frame at ~45 m. It is *seen across*, not stood under.
+ *
+ * So: same length (108.8 m), same deck height, anchored in the cliff/headland rock
+ * that fills x > 1450 in the reference, running seaward. Verified by the isolated
+ * two-capture mask, not by eye — see `reports/structures.md`.
+ */
+const ANCHOR = { x: 80.0, z: 42.7 };
+const TIP = { x: 61.7, z: -64.6 };
 
 const DECK_Y = 21.5;                 // deck walking surface
 const DECK_THICK = 2.6;              // -> underside 18.9
@@ -68,7 +86,14 @@ const SOFFIT_Y = DECK_Y - DECK_THICK;      // 18.9  — rib faces
 const COFFER_Y = SOFFIT_Y + 0.40;          // 19.30 — recessed panel floor
 const RIB_W = 0.35;                        // spec: 0.35 m rib grid
 
-const GIRDER_BOT = 16.30;
+/**
+ * Girder depth, measured off the silhouette rather than assumed. At `ref_00000` the
+ * reference deck's *top* edge and ours agree to 8-15 px over image x 700-1200, but
+ * its underside sits ~35 px lower — at the 65 m the run is from that camera, 35 px
+ * is 3.4 m of missing section. WORLD.md's "2.6 m thick" is the deck *plate*; the
+ * fascia beam under it is what carries the depth, and in `kf_00000` it is deep.
+ */
+const GIRDER_BOT = 13.60;
 const CHANNEL_X = 6.98;                    // recessed light channel floor, girder
 const CHANNEL_Y0 = 17.18, CHANNEL_Y1 = 17.82;
 
@@ -77,10 +102,17 @@ const RAIL_CH_Y0 = 21.84, RAIL_CH_Y1 = 22.06;
 
 const OVER = 0.02;                         // stacked plates overlap, no coplanar z-fight
 
-/** Struts: feet from WORLD.md, converted to bridge-local in build(). */
+/**
+ * Struts, in **bridge-local** coordinates (lx across the run, lz along it) so they
+ * follow the run instead of being re-derived from world points every time it moves.
+ * Local z 40 and 92 reproduce the reference spacing: one broad pylon a little past
+ * a third of the way out, standing on damp sand, and one at the tip standing in the
+ * water. `y` is the world height of the foot, read off the WORLD.md beach profile at
+ * the resulting world Z (z ~ +7 -> +1.0; z ~ -44 -> -2.4).
+ */
 const STRUT_FEET = [
-  { x: 6, y: 2.4, z: 30, scale: 1.00 },     // near the cliff — the broad pylon
-  { x: -26, y: 0.6, z: 2, scale: 0.86 },    // at the tip — the one standing in the water
+  { lx: 3.6, y: 1.00, lz: 40, scale: 1.00 },   // the broad pylon, on damp sand
+  { lx: 0.2, y: -2.30, lz: 92, scale: 0.86 },  // at the tip, standing in the water
 ];
 
 const PART = { DECK: 0, STRUT: 1, GIRDER: 2, RAIL: 3, RIB: 4, COFFER: 5, ANCHOR: 6 };
@@ -258,9 +290,13 @@ function buildBridge(ctx) {
     bake(out, p.geo, p.mat, p.mat, PART.DECK, 0.88);
   }
 
-  /* ------------------------------------------------------------- parapets */
-  // 0.9 m rail, three stacked plates so the middle is a continuous recessed
-  // channel on both faces — that channel carries the cyan strips.
+  /* --------------------------------------------------------------- nosing */
+  // Was a 0.9 m three-band rail with a continuous lit channel, running the full
+  // 109 m on both sides. In `kf_00000` the deck edge is a bare chamfered slab: at
+  // the 40-100 m the reference views this object from, the silhouette is the only
+  // thing it has, and a guardrail on it is the difference between a Forerunner slab
+  // and a lit highway overpass. Cut to a single 0.34 m nose, which is what the
+  // reference's slim raised lip actually subtends.
   const railZ = [];
   {
     let z = -14;
@@ -272,9 +308,7 @@ function buildBridge(ctx) {
     railZ[railZ.length - 1][1] = Math.min(railZ[railZ.length - 1][1], 100.5);
   }
   const railBands = [
-    { y0: DECK_Y - OVER, y1: DECK_Y + 0.34, xi: 6.80, xo: 7.71, ch: 0.08 },
-    { y0: DECK_Y + 0.32, y1: DECK_Y + 0.58, xi: 7.02, xo: 7.47, ch: 0.05, ao: 0.42 },
-    { y0: DECK_Y + 0.56, y1: PARAPET_TOP, xi: 6.80, xo: 7.71, ch: 0.10 },
+    { y0: DECK_Y - OVER, y1: DECK_Y + 0.34, xi: 6.80, xo: 7.71, ch: 0.10 },
   ];
   for (const s of [1, -1]) {
     for (const seg of railZ) {
@@ -296,7 +330,8 @@ function buildBridge(ctx) {
     [6.10, SOFFIT_Y + 0.30], [7.50, SOFFIT_Y + 0.30], [7.50, 18.42],
     [7.80, 18.16], [7.80, 17.98],
     [7.34, 17.90], [CHANNEL_X, CHANNEL_Y1], [CHANNEL_X, CHANNEL_Y0], [7.36, 17.10],
-    [7.62, 16.94], [7.62, 16.72], [7.24, GIRDER_BOT], [6.60, GIRDER_BOT], [6.10, 16.86],
+    [7.62, 16.94], [7.62, 16.30], [7.44, 15.55], [7.30, GIRDER_BOT + 0.95],
+    [6.92, GIRDER_BOT], [6.28, GIRDER_BOT + 0.30], [6.10, 16.86],
   ];
   for (const s of [1, -1]) {
     const contour = gp.map((p) => [p[0] * s, p[1]]);
@@ -305,44 +340,28 @@ function buildBridge(ctx) {
     bake(out, g, m, m, PART.GIRDER, 1.0);
   }
 
-  /* --------------------------------------------------- soffit coffer grid */
-  // Bays of ~5.6 m with a heavier rib between them; 0.4 m deep so the grid still
-  // casts a readable shadow line at 50 m rather than dissolving into a waffle.
-  const ribZ = [];
-  {
-    let z = -16, i = 0;
-    while (z < 107) {
-      const heavy = (i % 2) === 1;
-      ribZ.push({ z, heavy });
-      z += heavy ? 5.9 : 5.4;
-      i++;
-    }
-  }
-  const longX = [0, 3.68, -3.68, 7.10, -7.10];
-  for (const x of longX) {
-    const w = Math.abs(x) > 6 ? RIB_W * 1.7 : RIB_W;
-    const p = planPlate(rect(x - w * 0.5, x + w * 0.5, -16, 106.2), null,
-      SOFFIT_Y, COFFER_Y - SOFFIT_Y + OVER, 0.06);
+  /* ------------------------------------------------------------- soffit */
+  // Measured, not invented. `ref/detail/bridge_4k.png` crop (950,420)-(1500,560) is
+  // the underside: lum 71.3, **std 22.6, lap_var 125.5** — a near-smooth warm-khaki
+  // plane with two or three long shallow channels and one machinery hub. The 0.35 m
+  // coffer waffle that used to be here measured lap_var 342-566 against that 125 and
+  // read, at 4 px per rib, as the underside of a wooden boardwalk. WORLD.md calls the
+  // underside 'coffered' but the reference frame it is meant to describe is not; the
+  // frame wins. Kept: the two outer longitudinal fascia ribs, which the reference does
+  // have as a hard edge line where the soffit turns up into the girder.
+  // Three wide soffit plates with two 1.2 m gaps between them: the gaps *are* the
+  // channels (a recess is an absence of plate, not another plate). Two edges across
+  // 15 m instead of eight, and no transverse frequency at all.
+  for (const span of [[-7.42, -3.77], [-2.53, 2.53], [3.77, 7.42]]) {
+    const p = planPlate(rect(span[0], span[1], -16, 106.2), null,
+      SOFFIT_Y, COFFER_Y - SOFFIT_Y + OVER, 0.09);
     bake(out, p.geo, p.mat, p.mat, PART.RIB, 1.0);
   }
-  for (const r of ribZ) {
-    const w = r.heavy ? 0.78 : RIB_W;
-    const drop = r.heavy ? 0.22 : 0.0;
-    const p = planPlate(rect(-7.42, 7.42, r.z - w * 0.5, r.z + w * 0.5), null,
-      SOFFIT_Y - drop, COFFER_Y - SOFFIT_Y + drop + OVER, 0.06);
+  // Four transverse expansion joints over 122 m — landmarks, not a lattice.
+  for (const z of [4.0, 34.5, 63.0, 92.5]) {
+    const p = planPlate(rect(-7.36, 7.36, z - 0.32, z + 0.32), null,
+      SOFFIT_Y - 0.15, 0.15 + OVER, 0.06);
     bake(out, p.geo, p.mat, p.mat, PART.RIB, 1.0);
-  }
-  // recessed panel inside every coffer cell (a second, deeper step)
-  const cellX = [[-7.10, -3.68], [-3.68, 0], [0, 3.68], [3.68, 7.10]];
-  for (let i = 0; i < ribZ.length - 1; i++) {
-    const z0 = ribZ[i].z + (ribZ[i].heavy ? 0.39 : 0.175) + 0.42;
-    const z1 = ribZ[i + 1].z - (ribZ[i + 1].heavy ? 0.39 : 0.175) - 0.42;
-    if (z1 - z0 < 0.9) continue;
-    for (const cx of cellX) {
-      const x0 = cx[0] + 0.55, x1 = cx[1] - 0.55;
-      const p = planPlate(rect(x0, x1, z0, z1), null, COFFER_Y, 0.20 + OVER, 0.06);
-      bake(out, p.geo, p.mat, p.mat, PART.COFFER, 0.48);
-    }
   }
 
   /* ---------------------------------------------------------- fascia inset */
@@ -418,13 +437,13 @@ function buildBridge(ctx) {
 /*  Struts — raked A-frames, each a pair of tapered blades                     */
 /* ========================================================================== */
 
-function buildStruts(ctx, out, toLocal) {
+function buildStruts(ctx, out) {
   const rnd = ctx.rand.fork('struts');
   const rr = (a, b) => rnd.range(a, b);
   const info = [];
 
   for (const foot of STRUT_FEET) {
-    const f = new THREE.Vector3(foot.x, foot.y, foot.z).applyMatrix4(toLocal);
+    const f = new THREE.Vector3(foot.lx, foot.y, foot.lz);
     const rake = THREE.MathUtils.degToRad(62);
     const topY = SOFFIT_Y - 1.35;                       // into the under-structure
     const rise = topY - f.y;
@@ -445,44 +464,82 @@ function buildStruts(ctx, out, toLocal) {
       const nrm = new THREE.Vector3(side, 0, 0);
       nrm.addScaledVector(up, -nrm.dot(up)).normalize();
       const chord = new THREE.Vector3().crossVectors(up, nrm).normalize();
-      const th = 1.42 * sc;
+      const th = 1.90 * sc;
       const basis = new THREE.Matrix4().makeBasis(chord, up, nrm);
       basis.setPosition(botP.x - nrm.x * th * 0.5, botP.y - nrm.y * th * 0.5, botP.z - nrm.z * th * 0.5);
 
-      const hcB = 2.05 * sc, hcT = 3.85 * sc;
+      // Blade chord, measured off the silhouette. At `ref_00000` the reference's
+      // seaward A-frame is 180 px across at image row 470; ours was 75. Same pose,
+      // same ~87 m distance, so the reference blade chord is 2.4x ours — it is a
+      // broad raked wedge, and at 4-8 m ours read as two poles under a slab. 9-18 m
+      // chord puts the pair's silhouette on the reference.
+      const hcB = 4.40 * sc, hcT = 8.20 * sc;
       const hc = (t) => THREE.MathUtils.lerp(hcB, hcT, t * t * 0.45 + t * 0.55);
-      const outline = [
+
+      // A chord this wide is tilted 28 deg out of horizontal, so its two upper
+      // corners differ by `chord * 2 * cos(rake)` = 8 m in world height: left alone,
+      // one of them punches up through the deck and the other stops 5 m short of the
+      // soffit. Both are wrong, and the reference wedge does neither — its top is a
+      // long *horizontal* edge tucked under the deck. So the blade outline is cut by
+      // the world plane y = CAP: every vertex above it slides down the rake to it,
+      // and the two nominal top corners are placed on it. In blade coordinates that
+      // is a slanted line; in world it is horizontal, which is the point.
+      const CAP = SOFFIT_Y + 0.28;
+      const capCy = (cx) => (CAP - botP.y - cx * chord.y) / up.y;
+      const clip = (p) => (p[1] > capCy(p[0]) ? [p[0], capCy(p[0])] : p);
+      const dedupe = (pts) => pts.filter((p, i) => {
+        const q = pts[(i + pts.length - 1) % pts.length];
+        return Math.hypot(p[0] - q[0], p[1] - q[1]) > 1e-3;
+      });
+      const hcTop = hc(1.0) + 0.55;
+      const outline = dedupe([
         [-hcB * 1.10, -0.35], [hcB * 1.10, -0.35],
         [hc(0.10), 0.10 * len], [hc(0.42), 0.42 * len], [hc(0.74), 0.74 * len],
-        [hc(0.90) + 0.24, 0.90 * len], [hc(1.0) + 0.55, 0.965 * len], [hc(1.0) + 0.55, len + 0.9],
-        [-hc(1.0) - 0.55, len + 0.9], [-hc(1.0) - 0.55, 0.965 * len], [-hc(0.90) - 0.24, 0.90 * len],
+        [hc(0.90) + 0.24, 0.90 * len],
+        [hcTop, capCy(hcTop)], [-hcTop, capCy(-hcTop)],
+        [-hc(0.90) - 0.24, 0.90 * len],
         [-hc(0.74), 0.74 * len], [-hc(0.42), 0.42 * len], [-hc(0.10), 0.10 * len],
-      ];
+      ].map(clip));
       bake(out, plate(outline, null, th, 0.20), basis, IDENT, PART.STRUT, 1.0);
 
       // Nested chevron steps on both faces — the signature blade motif. Each ring
       // steps up toward the centre, so the blade reads as a ziggurat in section:
       // three concentric bright chamfers with dark grooves between them.
+      // Was three concentric 0.46 m pinstripes standing 0.26/0.21/0.16 m proud, and
+      // it measured as corduroy: on the strut face crop the *normalised* laplacian
+      // energy lap_var/std^2 was 1.508 against the reference blade's 0.238, while the
+      // absolute contrast was only two thirds of the reference at every blur radius.
+      // The reference blade is a monolith carrying three nested mitered contours
+      // 0.6-0.9 m wide with grooves deep enough that their shadow sides read
+      // near-black — fewer, bigger, and with real occluders, not more lines.
+      //
+      // Two bands now, the inner one a solid plateau, so the section is
+      // face -> 0.80 m band 0.30 proud -> 0.50 m groove -> plateau 0.62 proud, and
+      // the blade edge's own 0.20 chamfer completes a three-contour nest. `bots`
+      // rises with the tier so the inner contour dies out where the blade narrows
+      // toward the foot instead of inverting through the centreline.
+      const RINGS = [
+        { inset: 0.90, band: 1.60, step: 0.42, tops: 0.910, bots: 0.05, apex: 2.6, ao: 0.80 },
+        { inset: 3.60, band: null, step: 0.90, tops: 0.820, bots: 0.20, apex: 1.8, ao: 0.94 },
+      ];
       const mkRing = (inset, apex, tops, bots) => {
         const seq = [bots, 0.34, 0.66, tops];
+        const hw = (t) => Math.max(hc(t) - inset, 0.30);
         const r = [];
-        for (const t of seq) r.push([hc(t) - inset, t * len]);
+        for (const t of seq) r.push([hw(t), t * len]);
         r.push([0, tops * len + apex]);                       // the chevron point
-        for (let i = seq.length - 1; i >= 0; i--) r.push([-(hc(seq[i]) - inset), seq[i] * len]);
-        return r;
+        for (let i = seq.length - 1; i >= 0; i--) r.push([-hw(seq[i]), seq[i] * len]);
+        return dedupe(r.map(clip));
       };
-      for (let k = 0; k < 3; k++) {
-        const inset = 0.42 + k * 0.86;
-        const step = 0.26 - k * 0.05;
-        const tops = 0.90 - k * 0.075, bots = 0.055 + k * 0.05;
-        const apex = 2.4 - k * 0.5;
-        const ring = mkRing(inset, apex, tops, bots);
-        const hole = mkRing(inset + 0.46, apex - 0.7, tops - 0.016, bots + 0.03);
-        const g = plate(ring, k < 2 ? [hole] : null, step, 0.075);
+      for (const R of RINGS) {
+        const ring = mkRing(R.inset, R.apex, R.tops, R.bots);
+        const hole = R.band === null ? null
+          : [mkRing(R.inset + R.band, R.apex - 1.0, R.tops - 0.030, R.bots + 0.055)];
+        const g = plate(ring, hole, R.step, 0.10);
         for (const face of [1, -1]) {
-          const t = new THREE.Matrix4().makeTranslation(0, 0, face > 0 ? th : -step);
+          const t = new THREE.Matrix4().makeTranslation(0, 0, face > 0 ? th : -R.step);
           const m = basis.clone().multiply(t);
-          bake(out, g.clone(), m, t, PART.STRUT, k === 0 ? 0.78 : 0.9);
+          bake(out, g.clone(), m, t, PART.STRUT, R.ao);
         }
         g.dispose();
       }
@@ -605,10 +662,14 @@ const ALLOY_FRAG = /* glsl */`
   float lod = 1.0 - smoothstep(0.008, 0.048, px);       // fade sub-pixel tiers
 
   bool  isDeck  = part < 0.5;
+  float isStrut = step(0.5, part) * step(part, 1.5);
   // Big plates. The reference's fascia panels are 15-25 m long, separated by one
   // bold groove — small panels everywhere read as corduroy, not architecture.
-  float pu = isDeck ? 16.0 : 3.6;
-  float pv = isDeck ? 2.55 : 2.4;
+  // The strut blade is the worst offender: it is 4-7 m wide and 25 m long, so a
+  // 3.6 x 2.4 m lattice put a seam every 3-5 screen pixels over the whole thing.
+  // At 9 x 7 at most one major seam crosses the blade.
+  float pu = isDeck ? 16.0 : mix(6.5, 9.0, isStrut);
+  float pv = isDeck ? 2.55 : mix(4.5, 7.0, isStrut);
 
   vec4 Ju = jointInfo(uvp.x, pu, 0.52, 3.1 + part * 11.0);
   vec4 Jv = jointInfo(uvp.y, pv, 0.46, 17.7 + part * 5.3);
@@ -619,12 +680,15 @@ const ALLOY_FRAG = /* glsl */`
   float gu = 1.0 - smoothstep(wA - px * 0.9, wA + px * 0.9, Ju.x);
   float gv = 1.0 - smoothstep(wA - px * 0.9, wA + px * 0.9, Jv.x);
 
-  // --- tier 2: panel subdivision ------------------------------------------
+  // --- tier 2: panel subdivision (not on the strut blade) ------------------
+  // tierK is 0 on the strut: tiers 2 and 4 are the two that put a line every
+  // 0.97 / 1.32 / 0.04 m, and on the blade they are the entire corduroy signal.
+  float tierK = 1.0 - isStrut;
   vec4 Su = jointInfo(uvp.x, pu * 0.27, 0.55, 91.0 + part * 4.0);
   vec4 Sv = jointInfo(uvp.y, pv * 0.55, 0.50, 131.0 + part * 6.0);
   float wB = 0.055;
-  float su = (1.0 - smoothstep(wB - px, wB + px, Su.x)) * step(0.55, hash11(Su.y * 0.71 + 5.0)) * lod;
-  float sv = (1.0 - smoothstep(wB - px, wB + px, Sv.x)) * step(0.68, hash11(Sv.y * 1.13 + 9.0)) * lod;
+  float su = (1.0 - smoothstep(wB - px, wB + px, Su.x)) * step(0.55, hash11(Su.y * 0.71 + 5.0)) * lod * tierK;
+  float sv = (1.0 - smoothstep(wB - px, wB + px, Sv.x)) * step(0.68, hash11(Sv.y * 1.13 + 9.0)) * lod * tierK;
 
   // --- tier 3: sparse long diagonals (the Forerunner 'arrow' seams) --------
   vec2 dv = mat2(0.9063, 0.4226, -0.4226, 0.9063) * uvp;
@@ -635,7 +699,7 @@ const ALLOY_FRAG = /* glsl */`
   // --- tier 4: 4 cm interlock gap at every joint --------------------------
   float wH = 0.02;
   float hair = max(1.0 - smoothstep(wH - px, wH + px * 2.0, Ju.x),
-                   1.0 - smoothstep(wH - px, wH + px * 2.0, Jv.x)) * lod;
+                   1.0 - smoothstep(wH - px, wH + px * 2.0, Jv.x)) * lod * tierK;
 
   float groove = max(max(gu, gv), max(max(su, sv) * 0.75, gd * 0.9));
   float seamAO = clamp(groove * 0.85 + hair * 0.55, 0.0, 1.0);
@@ -726,15 +790,25 @@ const ALLOY_FRAG = /* glsl */`
   // 1 - max(|n|) is exactly zero on an axis-aligned face and ~0.29 on a 45 deg
   // chamfer, so it is a curvature mask for the cost of three abs and two max.
   {
-    float edge = smoothstep(0.04, 0.30, 1.0 - mx);
+    float edge = smoothstep(0.02, 0.26, 1.0 - mx);
     float wn = vnoise2(uvp * 2.7) * 0.6 + vnoise2(uvp * 11.0) * 0.4;
-    float wear = edge * smoothstep(0.18, 0.72, wn);
+    float wear = edge * smoothstep(0.16, 0.70, wn);
     // The bright line along a Forerunner chamfer in the reference is *specular* —
     // a polished-back roughness catching the sun — not a white paint stripe. Lean
-    // on the roughness drop and keep the albedo lift modest, or every rib in the
-    // coffer grid turns into a lit filament and the soffit loses its silhouette.
-    alb = mix(alb, uAlloyWorn, wear * 0.55);
-    rough = mix(rough, 0.16, wear * 0.80);
+    // on the roughness drop and keep the albedo lift modest, or every rib turns
+    // into a lit filament and the soffit loses its silhouette.
+    //
+    // What was missing was the *metal*. A worn chamfer is bare alloy, and at
+    // metalness 0.02 its F0 is 0.04 — a dielectric sliver that cannot reach the
+    // reference's p99. Driving metalnessFactor up with the wear mask (it is
+    // declared by <metalnessmap_fragment>, which runs before the splice point, so
+    // <lights_physical_fragment> picks it up) buys a real GGX highlight: on the
+    // ref_00000 strut crop with aerialDensity=0 that moved p99 from 105 to the
+    // reference's 200-ish without touching the albedo family the previous wave
+    // measured off the reference.
+    alb = mix(alb, uAlloyWorn, wear * 0.60);
+    rough = mix(rough, 0.10, wear * 0.90);
+    metalnessFactor = mix(metalnessFactor, 0.72, wear * 0.85);
   }
 
   // --- recess ambient occlusion -------------------------------------------
@@ -744,13 +818,20 @@ const ALLOY_FRAG = /* glsl */`
                * step(${CHANNEL_Y0.toFixed(2)} - 0.10, lp.y) * step(lp.y, ${CHANNEL_Y1.toFixed(2)} + 0.10);
     occ *= mix(1.0, 0.10, inCh);
   }
-  if (part > 2.5 && part < 3.5) {                      // parapet channel
-    float inR = step(${RAIL_CH_Y0.toFixed(2)} - 0.03, lp.y) * step(lp.y, ${RAIL_CH_Y1.toFixed(2)} + 0.03);
-    occ *= mix(1.0, 0.22, inR);
-  }
   occ *= 1.0 - seamAO * 0.55;
 
   alb *= mix(0.22, 1.0, clamp(occ, 0.0, 1.0));
+
+  // A downward-facing surface can see almost none of the sky, but three's
+  // HemisphereLight hands it the full ground-colour term regardless of how much of
+  // the lower hemisphere is actually occluded by the 15.5 m slab above it. Left
+  // alone that cold, unshadowed ambient is what kept the soffit at B/R 1.06 when
+  // the reference is 0.64. Attenuating it by the *geometric* downness (not the
+  // seam-perturbed normal — that made every seam flicker and pushed lap_var/std^2
+  // to 1.78 against a reference 0.48) and putting the energy back as sand bounce
+  // below is the same total radiance in a physically defensible spectrum.
+  float downG = clamp(-wN.y, 0.0, 1.0);
+  alb *= mix(1.0, 0.55, downG);
 
   diffuseColor.rgb = alb;
   roughnessFactor = clamp(rough, 0.06, 1.0);
@@ -760,29 +841,36 @@ const ALLOY_FRAG = /* glsl */`
   normal = normalize(mat3(viewMatrix) * wN2);
 
   // --- warm sand bounce on the soffit --------------------------------------
-  // The reference underside is khaki, not blue: it is lit almost entirely by
-  // light coming back off the beach. Added here as unshadowed irradiance.
-  {
-    float down = clamp(-wN2.y, 0.0, 1.0);
-    totalEmissiveRadiance += alb * uBounceCol * (down * down * uBounce * clamp(occ, 0.0, 1.0));
-  }
+  // The reference underside is khaki, not blue: ref/detail/bridge_4k.png measures
+  // rgb 81.6/70.2/52.3 there, blue the MINIMUM channel by 29 code values (B/R 0.64),
+  // because it is lit almost entirely by light coming back off the beach.
+  //
+  // Two bugs, both measured: multiplying by alb meant that on uAlloyDark
+  // (0.076,0.053,0.056) the bounce was worth almost nothing exactly where it is
+  // needed, and down*down zeroed it on every side wall — the soffit rendered
+  // B/R 1.01, i.e. cold. sqrt(alb) keeps the surface's own value modulation (a
+  // dark plate still bounces less) without cubing the deficit, and the lobe is now
+  // linear in down, which is the correct cosine for a Lambertian ground disc
+  // subtending most of the lower hemisphere.
+  totalEmissiveRadiance += sqrt(alb) * uBounceCol
+                         * (downG * uBounce * mix(0.55, 1.0, clamp(occ, 0.0, 1.0)));
 
-  // --- emissive strips -----------------------------------------------------
+  // --- emissive ticks ------------------------------------------------------
+  // Duty cycle, measured off ref/detail/bridge_4k.png: three or four isolated
+  // clusters ~1 m long in a 4K frame of a 100 m object, and dim. The old
+  // step(0.26, ...) was FULL gain over 74% of a 5.26 m period on four separate
+  // edges, gated to keep 82% of segments — 61% of the run was a continuous lit
+  // cyan line, and in shots/cG_str_diag.png those strips were the brightest
+  // non-sky pixels on the object. 0.06 duty * 0.20 gate = ~1.2% of the run.
   {
     float e = 0.0;
-    if (part > 1.5 && part < 2.5) {
+    if (part > 1.5 && part < 2.5) {                    // girder channel only
       e = step(6.94, abs(lp.x)) * step(abs(lp.x), 7.10)
         * step(${CHANNEL_Y0.toFixed(2)} + 0.16, lp.y) * step(lp.y, ${CHANNEL_Y1.toFixed(2)} - 0.16);
-    } else if (part > 2.5 && part < 3.5) {
-      float band = step(${RAIL_CH_Y0.toFixed(2)} + 0.06, lp.y) * step(lp.y, ${RAIL_CH_Y1.toFixed(2)} - 0.06);
-      e = band * max(step(7.40, abs(lp.x)), 1.0 - step(7.08, abs(lp.x)));
-    } else if (part > 0.5 && part < 1.5) {
-      // short dashes down the centreline of each blade face
-      e = step(0.90, fract(lp.y * 0.22 + 0.17)) * step(abs(lp.x), 0.16) * step(0.70, an.z);
     }
     float seg = floor(bp.z * 0.19);
-    float dash = mix(0.10, 1.0, step(0.26, fract(bp.z * 0.19)));
-    e *= dash * step(0.18, hash11(seg * 0.77 + 4.1));
+    float dash = step(0.94, fract(bp.z * 0.19));
+    e *= dash * step(0.80, hash11(seg * 0.77 + 4.1));
     totalEmissiveRadiance += uEmisCol * (uEmisGain * e);
   }
 `;
@@ -868,14 +956,21 @@ export function create(opts = {}) {
     uTintCool: { value: new THREE.Color(0.94, 0.96, 1.24) },
     uDustCol: { value: new THREE.Color(...PALETTE.uDustCol) },
     uEmisCol: { value: new THREE.Color().setHex(0x7fd8ff, THREE.SRGBColorSpace) },
-    uBounceCol: { value: new THREE.Color(1.00, 0.70, 0.38) },
+    // Sand bounce. A downward-facing surface sees almost no sky and a hemisphere of
+    // sunlit beach: at sand albedo ~0.22 under this scene's irradiance the ground's
+    // outgoing radiance is ~0.27, so the irradiance arriving at the soffit is of
+    // order pi*0.27 ~ 0.85 — comparable to the direct sun, and warm. The reference
+    // underside at ref_00000 measures B/R **0.640**; ours measured 1.058 with the
+    // old 0.95 gain, i.e. the cold hemisphere was still winning on a surface that
+    // physically cannot see it.
+    uBounceCol: { value: new THREE.Color(1.00, 0.60, 0.24) },
     // Accents in daylight, not lights. The strips have to survive a darker alloy
     // without becoming the brightest thing on the bridge.
-    uEmisGain: { value: 1.15 },
+    uEmisGain: { value: 0.50 },
     uSeam: { value: 1.0 },
     uStreak: { value: 1.0 },
     uDust: { value: 1.0 },
-    uBounce: { value: 0.95 },
+    uBounce: { value: 1.90 },
   };
 
   /** `--config alloyGain=0.8` scales the whole albedo family, for the scheduled
@@ -919,7 +1014,7 @@ export function create(opts = {}) {
       uniforms.uBridgeInv.value.copy(toLocal);
 
       const parts = buildBridge(ctx);
-      const struts = buildStruts(ctx, parts, toLocal);
+      const struts = buildStruts(ctx, parts);
 
       const geo = mergeGeometries(parts, false);
       for (const g of parts) g.dispose();
@@ -1033,22 +1128,39 @@ export function create(opts = {}) {
     },
 
     /* ---------------------------------------------------------- colliders */
+    /**
+     * KNOWN_ISSUES §12. This module used to emit the deck and both parapets as
+     * `{type:'box', center, quaternion, halfExtents}`; `physics.validCollider`
+     * requires a `Box3` on `.box` and has no OBB case, so all three were discarded
+     * with `[warn] [physics] ignoring malformed collider (type="box")` and the
+     * 109 m deck was **not solid**. Only the four strut capsules survived.
+     *
+     * §12 says do not convert mechanically, and it is right: the run is 9.7 deg off
+     * -Z, so one axis-aligned Box3 around the whole deck would be 37.4 m wide where
+     * the deck is 15.5 — 22 m of solid air. Of the two options §12 lists, the OBB
+     * type belongs to `physics.js`, which I do not own, so this takes the other one:
+     * a chain of `SEG` axis-aligned Box3 segments along the run. Each segment's
+     * bound is the exact AABB of that segment's eight rotated corners, so the error
+     * is `Lseg * sin(9.7 deg)` = 1.58 m of extra width per segment, 0.79 m per side.
+     * `walkableSurfaces` below still carries the exact oriented rect, and the two
+     * agree to that same 0.79 m.
+     */
     buildColliders(struts) {
       const toWorld = group.matrixWorld;
-      const mid = new THREE.Vector3(0, (DECK_Y + SOFFIT_Y) * 0.5, (RUN_LEN + Z_BURIED) * 0.5).applyMatrix4(toWorld);
       const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, group.rotation.y, 0));
-      this.colliders = [
-        {
-          type: 'box', center: mid, quaternion: q.clone(),
-          halfExtents: new THREE.Vector3(HALF_W, DECK_THICK * 0.5, (RUN_LEN - Z_BURIED) * 0.5),
-        },
-      ];
-      for (const s of [1, -1]) {
-        const c = new THREE.Vector3(s * (HALF_W - 0.4), DECK_Y + 0.45, (RUN_LEN + Z_BURIED) * 0.5).applyMatrix4(toWorld);
-        this.colliders.push({
-          type: 'box', center: c, quaternion: q.clone(),
-          halfExtents: new THREE.Vector3(0.42, 0.45, (RUN_LEN - Z_BURIED) * 0.5),
-        });
+      this.colliders = [];
+      const SEG = 14;
+      const zA = Z_BURIED, zB = RUN_LEN;
+      const dz = (zB - zA) / SEG;
+      for (let i = 0; i < SEG; i++) {
+        const z0 = zA + i * dz, z1 = z0 + dz;
+        const pts = [];
+        for (const sx of [-HALF_W, HALF_W]) {
+          for (const sy of [SOFFIT_Y, DECK_Y]) {
+            for (const sz of [z0, z1]) pts.push(new THREE.Vector3(sx, sy, sz).applyMatrix4(toWorld));
+          }
+        }
+        this.colliders.push({ type: 'box', box: new THREE.Box3().setFromPoints(pts) });
       }
       for (const b of struts) {
         this.colliders.push({

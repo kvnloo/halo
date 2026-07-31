@@ -100,7 +100,18 @@ if __name__ == '__main__':
     dump = None
     if '--dump' in sys.argv:
         dump = sys.argv[sys.argv.index('--dump')+1]
-    if mode == 'ours':
+    if mode == 'proj':
+        # mask from tools/_wpntri.mjs's offline projection, eroded 3 px for idle sway
+        a = load(sys.argv[2])
+        m = np.asarray(Image.open('/tmp/vmmask.pgm')) > 128
+        m = ndimage.binary_erosion(m, np.ones((7, 7)))
+        if dump:
+            out = a.copy(); out[~m] = [255, 0, 255]
+            Image.fromarray(out.astype(np.uint8)).save(dump)
+        stats(a, m, 'GUN(ours, projected mask)')
+        roi = np.zeros(m.shape, bool); roi[ROI_Y0:, ROI_X0:] = True
+        stats(a, roi & ~ndimage.binary_dilation(m, np.ones((9, 9))), 'SAND(ours, ROI minus gun)')
+    elif mode == 'ours':
         a = load(sys.argv[2]); b = load(sys.argv[3])
         mask = np.abs(a-b).max(axis=2) > 3
         m = np.zeros(mask.shape, bool); m[ROI_Y0:, ROI_X0:] = True

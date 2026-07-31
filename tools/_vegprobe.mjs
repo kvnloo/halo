@@ -45,36 +45,39 @@ page.on('pageerror', (e) => logs.push('[pageerror] ' + (e.stack || e.message)));
 await page.goto(`${base}/index.html?capture=1&w=${W}&h=${H}&seed=1337`, { waitUntil: 'load', timeout: 600000 });
 await page.evaluate(async () => { await globalThis.__HALO__.ready; });
 
-const out = await page.evaluate(async () => {
+const out = await page.evaluate(async (pose) => {
   const HA = globalThis.__HALO__;
-  HA.setSize(innerWidth, innerHeight); HA.setTime(12.0);
+  HA.setSize(innerWidth, innerHeight); HA.setTime(12.0); HA.setPose(pose); HA.advance(2);
   const ctx = HA.engine.ctx;
-  const rocks = ctx.get('rocks');
-  const terrain = ctx.get('terrain');
   const THREE = HA.THREE;
-  const cam = ctx.camera;
-  const poses = Object.keys(HA.poses).filter((k) => k.startsWith('ref_'));
-  const res = {};
-  for (const pose of poses) {
-    HA.setPose(pose); HA.advance(1);
-    cam.updateMatrixWorld(true);
-    const vp = new THREE.Matrix4().multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
-    const proj = (x, y, z) => {
+  const cam = ctx.camera; cam.updateMatrixWorld(true);
+  const vp = new THREE.Matrix4().multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
+  const veg = ctx.get('vegetation');
+  const rows = [];
+  veg.group.traverse((m) => {
+    if (!m.isMesh) return;
+    const g = m.geometry;
+    const ap = g.getAttribute('aPos');
+    const ao = g.getAttribute('aOri');
+    const info = { mat: m.material.userData?.veg ? (m.material.name || '') : '', n: g.instanceCount,
+      key: m.material.type, tris: g.index ? g.index.count / 3 : 0,
+      bs: g.boundingSphere ? [+g.boundingSphere.center.x.toFixed(1), +g.boundingSphere.center.y.toFixed(1), +g.boundingSphere.center.z.toFixed(1), +g.boundingSphere.radius.toFixed(1)] : null,
+      visible: m.visible, frustumCulled: m.frustumCulled };
+    // project first few instances
+    const pts = [];
+    for (let i = 0; i < Math.min(ap.count, 40); i++) {
+      const x = ap.getX(i), y = ap.getY(i), z = ap.getZ(i);
       const v = new THREE.Vector4(x, y, z, 1).applyMatrix4(vp);
-      if (v.w <= 0) return null;
-      return { sx: +((v.x / v.w * 0.5 + 0.5) * 1920).toFixed(0), sy: +((0.5 - v.y / v.w * 0.5) * 1080).toFixed(0), d: +v.w.toFixed(0) };
-    };
-    const list = [];
-    for (const [id, L] of rocks.landmarks) {
-      if (!L.crown) continue;
-      const p = proj(L.crown.center.x, L.crown.center.y, L.crown.center.z);
-      const px = p ? +(L.crown.radius / p.d * 1080 / (2 * Math.tan(cam.fov * Math.PI / 360))).toFixed(0) : 0;
-      list.push({ id, p: p ? `${p.sx},${p.sy} d=${p.d} r=${px}px` : 'behind',
-        inFrame: !!(p && p.sx > -50 && p.sx < 1970 && p.sy > -50 && p.sy < 1130) });
+      if (v.w <= 0) continue;
+      const sx = (v.x / v.w * 0.5 + 0.5) * 1920, sy = (0.5 - v.y / v.w * 0.5) * 1080;
+      if (sx > -200 && sx < 2100 && sy > -200 && sy < 1300) {
+        pts.push(`${sx.toFixed(0)},${sy.toFixed(0)} d${v.w.toFixed(0)} sY${ao ? ao.getZ(i).toFixed(2) : '?'}`);
+      }
     }
-    res[pose] = list;
-  }
-  return res;
+    info.onscreen = pts.slice(0, 10);
+    rows.push(info);
+  });
+  return { rows, stats: veg.stats };
 }, POSE);
 
 console.log(JSON.stringify(out, null, 1));

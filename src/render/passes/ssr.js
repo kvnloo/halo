@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { Pass, fsMaterial, makeRT, FullScreenQuad } from '../RenderPipeline.js';
+import { ensureOpaqueDepth, opaqueDepthTexture } from './ssao.js';
 
 /**
  * `ssr` — screen-space reflections, for wet sand and water.
@@ -28,8 +29,10 @@ import { Pass, fsMaterial, makeRT, FullScreenQuad } from '../RenderPipeline.js';
  * ---------------------------------------------------------------------------
  * THE MARCH
  *
- * A perspective-correct screen-space DDA against `pipe.depthTex`, not a view-space
- * march. The ray's two endpoints are projected to screen, and the march interpolates
+ * A perspective-correct screen-space DDA against the OPAQUE depth snapshot (see the top
+ * of `ssao.js` — `pipe.depthTex` itself is wiped by the viewmodel's `clearDepth()` before
+ * post runs, which is why this pass rendered nothing at all until that was fixed), not a
+ * view-space march. The ray's two endpoints are projected to screen, and the march interpolates
  * **linearly in screen space** while interpolating **1/z linearly** alongside — which is
  * the only interpolation that is correct under perspective. That matters here more than
  * usual: these rays are near-grazing, so a view-space march with uniform steps spends
@@ -96,9 +99,19 @@ import { Pass, fsMaterial, makeRT, FullScreenQuad } from '../RenderPipeline.js';
  * ---------------------------------------------------------------------------
  * HOW THE REFLECTION IS APPLIED
  *
- *     F  = Schlick(F0(matId), N·V), roughness-attenuated (Lagarde)
- *     k  = F · gain(matId) · (1 − smoothstep(0.35, 0.9, roughness)) · ssrStrength
+ *     (A,B) = DFGApprox(N·V, roughness)                 pre-integrated split-sum EnvBRDF
+ *     k     = (F0(matId)·A + B) · gain(matId)
+ *             · (1 − smoothstep(0.35, 0.9, roughness)) · ssrStrength
  *     colour = mix(colour, reflection, clamp(k, 0, 0.92))
+ *
+ * The weight is the **pre-integrated EnvBRDF**, not raw Schlick. Raw Schlick at 4° grazing
+ * returns F ≈ 1 for every material in the frame and turns the whole shoreline into a
+ * mirror — research §5.8b, and the measured shoreline signature this pass shipped with.
+ * `(F0·A + B)` carries the geometric attenuation that pulls grazing reflectance back down,
+ * and it is the right weight for a reflection that has been prefiltered into a mip chain.
+ * It is applied AFTER the temporal filter and AFTER the sky/SSR mix, identically to both
+ * branches (Frostbite slide 87): weighting one branch and not the other puts a visible
+ * brightness step exactly at the fade you built the fallback to hide.
  *
  * A **mix**, not an add. The forward material has already put its own sun specular and
  * ambient into the pixel; adding a reflection on top double-counts and is a fast way to
@@ -119,21 +132,42 @@ import { Pass, fsMaterial, makeRT, FullScreenQuad } from '../RenderPipeline.js';
  * Water is on `LAYER.TRANSPARENT`, and the G-buffer pre-pass only rasterises
  * `LAYER.OPAQUE | LAYER.DEFAULT`. So the water surface has **no normal, no roughness and
  * no depth in the G-buffer**, and this pass cannot reflect off it — at a water pixel the
- * G-buffer describes the seabed behind it. `ocean` therefore has to do its own
- * reflection lookup, and `pass.ssrTexture` is published for that:
+ * G-buffer describes the seabed behind it.
+ *
+ * **Read this before wiring anything to `ssrTexture`.** As of today NOTHING in `src/`
+ * samples it — grep `ssrTexture|tSSR` outside this file and you get nothing — so the sea,
+ * the largest reflective surface in the `ref_01500` frame, has no reflection path from
+ * either direction. And the buffer is not a drop-in fix for that, because **the rays in it
+ * were traced from the opaque surface under the water, not from the water surface**: at a
+ * sea pixel `ssrTexture` holds a reflection computed off the seabed's normal, which is not
+ * the reflection the sea should show. It is a correct, useful buffer for the *wet sand*
+ * — which is opaque and IS in the G-buffer, and is where most of the `shoreline` region's
+ * high-frequency energy lives — and it is a bad answer for open water.
+ *
+ * The right fix for the sea is research §6.2 option (2): trace SSR **inside the ocean
+ * surface shader**, from the water surface, against the opaque depth buffer. The ray
+ * origin and the wave normal are both correct there, there is no one-frame lag, and the
+ * opaque depth it needs is now published as `pipe.opaqueDepthTex` (see the top of
+ * `ssao.js`) — before that snapshot existed there was no usable depth for it to march
+ * against, which is a large part of why this was never wired up.
+ *
+ * If the ocean owner instead wants the published-texture route (§6.2 option 1), the
+ * binding is:
  *
  *     const ssr = ctx.get('pipeline')?.pass('ssr');
  *     u.tSSR.value = ssr?.ssrTexture ?? null;      // half res, rgb = radiance,
  *                                                  // a = confidence 0..1
  *
- * Read from a scene-pass material that is **last frame's** buffer, because the post
- * chain runs after the scene draws. For a 60 Hz camera that is a sub-pixel lag on a
- * reflection that is already blurred; reproject it by the camera delta if it ever shows.
+ * — and it must be reprojected by the camera delta, because a scene-pass material reads
+ * **last frame's** buffer (the post chain runs after the scene draws), and it must accept
+ * the seabed-origin caveat above.
  *
  * ---------------------------------------------------------------------------
  * ctx.config knobs
  *   ssrEnabled 1     ssrStrength 1.0    ssrMaxDist 90     ssrThickness 0.55
- *   ssrEdgeFade 0.12 ssrAlpha 0.15      ssrWetRoughClamp 0.42
+ *   ssrThickMax 2.5  ssrEdgeFade 0.12   ssrAlpha 0.15     ssrWetRoughClamp 0.12
+ *   ssrDepthPhi 0.06
+ *   ssrLegacyDepth 0 — read the broken shared `pipe.depthTex` again, for an A/B
  *   ssrDebug 0       1 = reflection, 2 = confidence, 3 = applied weight
  */
 
@@ -200,6 +234,7 @@ uniform float uEdgeFade;
 uniform float uFrame;
 uniform float uProjScaleY;   // 0.5 * mip0Height / tanY  — world→pixels at unit depth
 uniform float uWetRoughClamp;
+uniform float uThickMax;
 out vec4 oCol;
 
 vec3 sampleMip(vec2 uv, float lod){
@@ -286,23 +321,34 @@ void main(){
   // is wrong under perspective, and on a grazing ray it is wrong by tens of metres.
   float dither = ign(floor(vUv * uRes), uFrame);
 
+  // McGuire & Mara's per-step depth INTERVAL test, not a point sample plus a scalar
+  // thickness. Each step covers the ray-depth range [zA, zB]; the surface at the sampled
+  // pixel occupies [sz, sz + thick]. Accept only when those two overlap. This is what
+  // makes the test robust when one step spans several pixels, which on a 90 m grazing ray
+  // at 24 steps it always does in the far field.
+  //
+  // The version this replaced used 'thick = max(uThickness, stepExtent * 1.6)', i.e. it let
+  // the acceptance window track the step's own depth extent with no bound — tens of metres
+  // out at the far end of the march. That accepts almost any depth sample and produces
+  // research 7's 'duplicated silhouette offset downward'. The extent is now handled by the
+  // interval itself, so 'thick' is just an object-thickness allowance and is CAPPED
+  // ('uThickMax', 2.5 m) at something scene-scaled.
   float hitU = -1.0;
   float prevU = 0.0;
+  float rzPrev = 1.0 / max(iz0, 1e-9);
   for (int i = 1; i <= SSR_STEPS; i++) {
     float u = (float(i) - dither) / float(SSR_STEPS);
     vec2 suv = mix(s0, s1, u);
     if (suv.x < 0.0 || suv.x > 1.0 || suv.y < 0.0 || suv.y > 1.0) break;
-    float sd = texture(tDepth, suv).r;
-    if (sd >= 1.0) { prevU = u; continue; }   // sky: never an occluder
     float rz = 1.0 / mix(iz0, iz1, u);
+    float sd = texture(tDepth, suv).r;
+    if (sd >= 1.0) { prevU = u; rzPrev = rz; continue; }   // sky: never an occluder
     float sz = linearDepth(sd, uNear, uFar);
-    float diff = rz - sz;
-    // Thickness grows with the step's own depth extent: a step that covers 3 m of depth
-    // cannot resolve a 0.5 m thick object anyway, and demanding it would just make the
-    // ray tunnel straight through the sea stacks.
-    float thick = max(uThickness, abs(rz - 1.0 / mix(iz0, iz1, max(u - 1.0 / float(SSR_STEPS), 0.0))) * 1.6);
-    if (diff > 0.0 && diff < thick) { hitU = u; break; }
+    float zA = min(rzPrev, rz), zB = max(rzPrev, rz);
+    float thick = min(uThickness + (zB - zA) * 0.25, uThickMax);
+    if (zB >= sz && zA <= sz + thick) { hitU = u; break; }
     prevU = u;
+    rzPrev = rz;
   }
 
   if (hitU < 0.0) { oCol = vec4(0.0); return; }
@@ -341,6 +387,17 @@ void main(){
   // ---- roughness cone -> mip level ---------------------------------------
   float a2 = rough * rough;
   float coneTan = a2 * 1.6 + rough * 0.05;
+  // Frostbite's grazing-angle cone shrink (slide 85), which was missing entirely:
+  //   specularConeTangent *= lerp(saturate(NdotV * 2), 1, sqrt(roughness))
+  // Their reasoning (slide 84): a GGX lobe becomes anisotropic at grazing incidence, and a
+  // cone fitted to the wider *azimuthal* angle over-blurs badly. Fit it to the polar angle
+  // instead. This scene is the worst case in the literature for it — every reflection that
+  // matters is a wet-sand or swash pixel at 2-10 degrees, where NoV ~ 0.07 and the
+  // unshrunk cone drives the LOD straight into the max-mip clamp. Max mip here is
+  // 1920/32 = 60 px wide, so 'the inverted silhouette of the sea stacks' — the entire
+  // visual payload of this pass — was being read out of a 60-pixel image.
+  float NoV = clamp(dot(N, V), 0.0, 1.0);
+  coneTan *= mix(clamp(NoV * 2.0, 0.0, 1.0), 1.0, sqrt(rough));
   float footprintPx = 2.0 * coneTan * rayLen * (uProjScaleY / max(hitZ, 1e-3));
   float lod = clamp(log2(max(footprintPx, 1.0)), 0.0, 4.0);
 
@@ -410,7 +467,7 @@ void main(){
 
 /* --------------------------------------------------------------- 4. apply */
 
-const APPLY_FRAG = COMMON + /* glsl */`
+const APPLY_FRAG = COMMON + VIEWPOS + /* glsl */`
 precision highp samplerCube;   // ESSL 3.00 defaults samplers to lowp; the sky is HDR
 in vec2 vUv;
 uniform sampler2D tSrc;
@@ -424,12 +481,22 @@ uniform float uHasSkyCube;
 uniform vec3  uSkyUp, uSkyHoriz;
 uniform mat3  uViewToWorld;
 uniform vec2  uSsrTexel, uSsrRes;
-uniform vec2  uTanHalf, uJitter;
 uniform float uNear, uFar;
 uniform float uStrength;
 uniform float uWetRoughClamp;
+uniform float uDepthPhi;
 uniform float uDebug;
 out vec4 oCol;
+
+/** Karis's analytic split-sum EnvBRDF, the same fit three ships as 'DFGApprox' in
+ *  'bsdfs.glsl.js'. Returns (A, B) for 'specular = prefiltered * (F0*A + B)'. */
+vec2 dfgApprox(float NoV, float rough){
+  const vec4 c0 = vec4(-1.0, -0.0275, -0.572,  0.022);
+  const vec4 c1 = vec4( 1.0,  0.0425,  1.040, -0.040);
+  vec4 r = rough * c0 + c1;
+  float a004 = min(r.x * r.x, exp2(-9.28 * NoV)) * r.x + r.y;
+  return vec2(-1.04, 1.04) * a004 + r.zw;
+}
 
 float gainFor(int id){
   if (id == 2) return 1.0;
@@ -473,8 +540,15 @@ void main(){
   vec3 R = reflect(-V, N);
   float NoV = clamp(dot(N, V), 1e-3, 1.0);
 
-  // --- depth-bilateral upsample of the half-res reflection. Straight bilinear drags a
-  // sea stack's reflection across the silhouette of whatever is in front of it.
+  // --- plane-distance bilateral upsample of the half-res reflection. Straight bilinear
+  // drags a sea stack's reflection across the silhouette of whatever is in front of it.
+  // The weight is the tap's distance from this pixel's tangent plane rather than |Δz|:
+  // on a beach at 4 degrees the raw depth difference between neighbouring pixels is
+  // metres on a perfectly smooth surface, so a |Δz| tolerance either refuses to
+  // reconstruct the sand or leaks across every silhouette. Same fix as ssao.js's two
+  // bilaterals; see the note there.
+  vec3 Pc = viewPos(vUv, linZ);
+  float phi = uDepthPhi + 0.012 * linZ;
   vec2 fp = vUv * uSsrRes - 0.5;
   vec2 base = floor(fp);
   vec2 f = fp - base;
@@ -486,7 +560,8 @@ void main(){
     float sd = texture(tDepth, suv).r;
     float sz = linearDepth(sd, uNear, uFar);
     float bw = ((i & 1) == 0 ? 1.0 - f.x : f.x) * ((i >> 1) == 0 ? 1.0 - f.y : f.y);
-    float dw = exp2(-abs(sz - linZ) / max(0.04 * linZ, 1e-3));
+    float dd = abs(dot(viewPos(suv, sz) - Pc, N));
+    float dw = (sd >= 1.0) ? 0.0 : max(1.0 - dd / phi, 0.0);
     float w = bw * dw + 1e-5;
     acc += texture(tSSR, suv) * w;
     wSum += w;
@@ -504,10 +579,19 @@ void main(){
 
   vec3 refl = mix(skyCol, acc.rgb, conf);
 
-  // --- Fresnel, roughness-aware (Lagarde): a rough surface cannot reach F=1 at grazing.
+  // --- energy weight: the PRE-INTEGRATED EnvBRDF, not raw Schlick.
+  //
+  // Raw 'F = f0 + (1-f0)(1-NoV)^5' at 4 degrees grazing returns ~1 for every material in
+  // the frame, which turns the whole shoreline into a mirror and washes it out — research
+  // 5.8b, and exactly the shoreline signature this frame had (lum_mean +37, sat_mean -13).
+  // The split-sum '(F0*A + B)' carries the geometric attenuation term that pulls grazing
+  // reflectance back down, and it is the correct weight when the reflection has been
+  // prefiltered into a mip chain, which it has. Applied AFTER the temporal filter and
+  // AFTER the sky/SSR mix, identically to both branches (Frostbite slide 87, research
+  // 5.4/5.7): weighting one branch and not the other puts a brightness step at the fade.
   float f0 = f0For(matId);
-  float F = f0 + (max(1.0 - rough, f0) - f0) * pow(1.0 - NoV, 5.0);
-  float k = F * gain * (1.0 - smoothstep(0.35, 0.9, rough)) * uStrength;
+  vec2 ab = dfgApprox(NoV, rough);
+  float k = (f0 * ab.x + ab.y) * gain * (1.0 - smoothstep(0.35, 0.9, rough)) * uStrength;
 
   // Do not reflect off a pixel that a transparent surface was drawn over — see the
   // header. Water in particular is not in the G-buffer at all.
@@ -546,10 +630,19 @@ export function create(opts = {}) {
     refine: 5,
     maxDist: 90,
     thickness: 0.55,
+    thickMax: 2.5,
     edgeFade: 0.12,
     strength: 1.0,
     alpha: 0.15,
-    wetRoughClamp: 0.42,
+    // A swash sheet is a water film. terrain.js:1601 writes 0.65 into the G-buffer for wet
+    // sand while terrain.js:1650 *shades* the same pixel at mix(rough, 0.16, wetp*0.85) —
+    // the comment two lines above the write says the two must agree and they do not. Until
+    // that is reconciled by the terrain owner this clamp is what the trace actually sees,
+    // so it is set to the shaded value's neighbourhood (research 6.3: wet sand is
+    // mix(rough_dry, 0.05..0.15, wetness)), not to the 0.42 it shipped with. At 0.42 the
+    // cone footprint saturated the mip clamp for every ray that mattered.
+    wetRoughClamp: 0.12,
+    depthPhi: 0.06,
     mips: 5,
   }, opts.ssr || {});
 
@@ -598,7 +691,7 @@ export function create(opts = {}) {
       uTanHalf: { value: new THREE.Vector2(1, 1) }, uJitter: { value: new THREE.Vector2() },
       uRes: { value: new THREE.Vector2() },
       uNear: { value: 0.06 }, uFar: { value: 12000 },
-      uMaxDist: { value: cfg.maxDist }, uThickness: { value: cfg.thickness },
+      uMaxDist: { value: cfg.maxDist }, uThickness: { value: cfg.thickness }, uThickMax: { value: cfg.thickMax },
       uEdgeFade: { value: cfg.edgeFade }, uFrame: { value: 0 },
       uProjScaleY: { value: 500 }, uWetRoughClamp: { value: cfg.wetRoughClamp },
     }, { SSR_STEPS: cfg.steps, SSR_REFINE: cfg.refine });
@@ -625,6 +718,7 @@ export function create(opts = {}) {
       uTanHalf: { value: new THREE.Vector2(1, 1) }, uJitter: { value: new THREE.Vector2() },
       uNear: { value: 0.06 }, uFar: { value: 12000 },
       uStrength: { value: cfg.strength }, uWetRoughClamp: { value: cfg.wetRoughClamp },
+      uDepthPhi: { value: cfg.depthPhi },
       uDebug: { value: 0 },
     });
 
@@ -633,6 +727,10 @@ export function create(opts = {}) {
 
     ctx.on?.('camera:teleport', () => { frames = 0; });
     ctx.on?.('engine:resize', () => { frames = 0; });
+
+    // `pipe.depthTex` holds the viewmodel and nothing else by the time post runs — see the
+    // header of ssao.js. Without this the march's first guard rejects every world pixel.
+    ensureOpaqueDepth(ctx, pipe);
 
     p.setSize(pipe.w > 2 ? pipe.w : ctx.size.w, pipe.h > 2 ? pipe.h : ctx.size.h, ctx);
   };
@@ -676,6 +774,7 @@ export function create(opts = {}) {
     const pe = pipe.unjitteredProj.elements;
     const tanX = 1 / Math.max(Math.abs(pe[0]), 1e-6);
     const tanY = 1 / Math.max(Math.abs(pe[5]), 1e-6);
+    const depthTex = (c.ssrLegacyDepth ? pipe.depthTex : opaqueDepthTexture(pipe));
 
     /* -------------------------------------------------- 1. colour pyramid */
     {
@@ -696,7 +795,7 @@ export function create(opts = {}) {
     /* ---------------------------------------------------------- 2. march */
     {
       const u = marchMat.uniforms;
-      u.tDepth.value = pipe.depthTex;
+      u.tDepth.value = depthTex;
       u.tGbuf0.value = pipe.gbuffer.textures[0];
       u.tGbuf1.value = pipe.gbuffer.textures[1];
       for (let i = 0; i < 5; i++) u['tMip' + i].value = mipRT[Math.min(i, mipRT.length - 1)].texture;
@@ -709,6 +808,7 @@ export function create(opts = {}) {
       u.uNear.value = cam.near; u.uFar.value = cam.far;
       u.uMaxDist.value = Math.max(1, c.ssrMaxDist ?? cfg.maxDist);
       u.uThickness.value = Math.max(0.01, c.ssrThickness ?? cfg.thickness);
+      u.uThickMax.value = Math.max(0.05, c.ssrThickMax ?? cfg.thickMax);
       u.uEdgeFade.value = THREE.MathUtils.clamp(c.ssrEdgeFade ?? cfg.edgeFade, 0.001, 0.45);
       u.uWetRoughClamp.value = THREE.MathUtils.clamp(c.ssrWetRoughClamp ?? cfg.wetRoughClamp, 0.02, 1.0);
       // Deterministic: driven by the pipeline frame counter, never a clock.
@@ -725,7 +825,7 @@ export function create(opts = {}) {
       const u = tempMat.uniforms;
       u.tCur.value = marchRT.texture;
       u.tHist.value = histA.texture;
-      u.tDepth.value = pipe.depthTex;
+      u.tDepth.value = depthTex;
       u.tGbuf1.value = pipe.gbuffer.textures[1];
       u.uTanHalf.value.set(tanX, tanY);
       u.uJitter.value.copy(pipe.jitter);
@@ -749,7 +849,7 @@ export function create(opts = {}) {
       u.tSrc.value = pipe.read.texture;
       u.tOpaque.value = pipe.opaqueRT.texture;
       u.tSSR.value = histA.texture;
-      u.tDepth.value = pipe.depthTex;
+      u.tDepth.value = depthTex;
       u.tGbuf0.value = pipe.gbuffer.textures[0];
       u.tGbuf1.value = pipe.gbuffer.textures[1];
       u.uSsrTexel.value.set(1 / sw, 1 / sh);
@@ -759,6 +859,7 @@ export function create(opts = {}) {
       u.uNear.value = cam.near; u.uFar.value = cam.far;
       u.uStrength.value = Math.max(0, c.ssrStrength ?? cfg.strength);
       u.uWetRoughClamp.value = THREE.MathUtils.clamp(c.ssrWetRoughClamp ?? cfg.wetRoughClamp, 0.02, 1.0);
+      u.uDepthPhi.value = Math.max(0.005, c.ssrDepthPhi ?? cfg.depthPhi);
       u.uDebug.value = c.ssrDebug ?? 0;
 
       // Reflection directions are world-space; the G-buffer normal is view-space.

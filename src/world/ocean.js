@@ -13,36 +13,49 @@ import { sharedAerialUniforms } from '../gfx/materialCommon.js';
  * dragging spectral_slope the wrong way).
  *
  * NOTHING IN THIS HEADER IS A MEASUREMENT UNLESS reports/ocean.md CARRIES THE COMMAND
- * THAT PRODUCED IT. This file did not parse until 2026-07-30 (a backtick-quoted 'h' in
- * a comment inside OCEAN_COMMON terminated the template literal), so every past-tense
- * number that predates that date was written against a module that had never rendered a
- * pixel. Current, reproducible numbers and the A/B commands live in reports/ocean.md.
- * Guard: 'node --check src/world/ocean.js' must pass, and a capture whose 'warnings'
- * contain "not loaded: ocean" is not evidence of anything.
+ * THAT PRODUCED IT.
  *
- * Where the energy actually comes from, in order of contribution:
+ * !! NO BACKTICKS ANYWHERE IN THIS FILE, INCLUDING IN COMMENTS INSIDE THE GLSL TEMPLATE
+ *    LITERALS. Use plain quotes. This has silently deleted the whole module three times.
+ *    An EVEN number of stray backticks re-closes the template, so 'node --check' STILL
+ *    PASSES, and the text between them becomes evaluated JavaScript — the module then
+ *    throws at import and the capture writes a perfectly plausible PNG with no water in
+ *    it. The only reliable guard is to reject any capture whose log contains
+ *    "not loaded: ocean"; reports/ocean.md section 1a has the scanner and the wrapper.
+ *
+ * READ reports/ocean.md SECTION 0 BEFORE TUNING ANYTHING. The short version: this module
+ * was scored 3/100 for raising water-ROI lap_var to +43% OVER the signature while
+ * REDUCING local_contrast to 45% UNDER it. That combination is not detail, it is
+ * pixel-scale hash. **Never judge a change here on lap_var alone.** The triple
+ * (lap_var, local_contrast, lum_std) has to move together, and a lap_var DROP toward 677
+ * is usually a win.
+ *
+ * Where the energy comes from, in order of contribution:
  *
  *  1. REFLECTION MODULATED BY WAVE SLOPE. At eye height 1.7 m almost the whole water
  *     surface is seen within a few degrees of grazing, so Fresnel is ~0.9 and the pixel
- *     is *the reflection*. A wave facet tilting by ±8 deg swings the reflected ray
- *     across 16 deg of sky — from bright horizon haze to deep zenith blue, or below the
- *     horizon onto a dark sea stack. That is a huge radiance swing driven by a tiny
- *     geometric change, and it is the mechanism intended to produce the light/dark
- *     banding kf_01800 shows. So the reflection is sampled from the *rendered frame* (full-res, via
- *     'pipe.opaqueRT') rather than from the 128 px sky cube: the cube cannot carry the
- *     ring, Threshold, the stacks or the beach, and those are exactly the high-contrast
- *     things whose reflections carry the detail.
+ *     is *the reflection*. A wave facet tilting by 8 deg swings the reflected ray across
+ *     16 deg of sky. That radiance swing is the mechanism that draws the light/dark
+ *     banding kf_01800 shows — but it is also, unbounded and unfiltered, exactly how
+ *     this module manufactured its hash. Two constraints keep it honest now:
+ *       - the reflected direction is bounded by clamping the SURFACE SLOPE
+ *         (uReflMaxSlope), and the same bounded direction drives the sky cube AND the
+ *         screen tap, so they cannot disagree;
+ *       - the screen tap is a MIP of a half-res prefiltered copy of the frame, at a
+ *         level chosen from the roughness cone. A rough facet gathers; it never
+ *         point-samples.
  *
- *  2. SUN GLITTER as a real microfacet lobe whose roughness is the *filtered-out* wave
- *     slope variance (Toksvig / LEAN). Waves finer than a pixel are removed from the
- *     normal and their slope variance is folded into roughness instead, which is both
- *     the correct anti-aliasing and the thing that turns a single mirror highlight into
- *     the broad broken glitter track the reference has.
+ *  2. REFRACTED, ABSORBED SEAFLOOR. Beer-Lambert with per-channel extinction over the
+ *     SNELL-REFRACTED in-water path, which is bounded at 1.512x the column depth by
+ *     total internal reflection. That bound is the whole reason water stays legible at
+ *     grazing angles, and running the absorption over the air-side path instead (which
+ *     is what was here) drives the bottom term to exp(-20) and turns the sea opaque
+ *     navy. Composed as Lyzenga's optically-shallow form, bottom*T2 + L_deep*(1-T2).
  *
- *  3. REFRACTED, ABSORBED, CAUSTIC-LIT SEAFLOOR. Beer-Lambert with per-channel
- *     extinction over the true water-column path (from the depth buffer), so the same
- *     shader goes clear at the swash, turquoise over the sandbar and deep blue offshore
- *     without a single hand-painted gradient.
+ *  3. SUN GLITTER as a real microfacet lobe whose roughness is the *filtered-out* wave
+ *     slope variance (Toksvig / LEAN, alpha = sqrt(mss)), lit by the sun as a DISC of
+ *     angular radius 0.00465 rad via Karis's representative point. A lobe narrower than
+ *     the sun is not physical and TAA eats it.
  *
  *  4. FOAM from an advected Eulerian field: crests break where depth-limited amplitude
  *     clipping kicks in, foam is injected there and at rock waterlines, then decays and
@@ -88,6 +101,8 @@ import { sharedAerialUniforms } from '../gfx/materialCommon.js';
 
 const SEA_LEVEL = 0.0;
 const G = 9.81;
+/** JS mirror of OC_RUNUP in OCEAN_COMMON. Keep the two in step. */
+const OCEAN_RUNUP = 0.12;
 
 /**
  * Displaced Gerstner bands. dirDeg is measured from +Z (shoreward) toward +X.
@@ -630,7 +645,7 @@ void main(){
    * before the depth-limited clip has anything to remove, so it draws the lace on the
    * face of a shoaling wave rather than only the band behind it. Gate on depth: a fold
    * out in open water is failure mode 13 (white blotches in deep water). */
-  float fold = smoothstep(0.40, -0.05, jminus) * smoothstep(14.0, 3.0, h);
+  float fold = smoothstep(0.12, -0.10, jminus) * smoothstep(14.0, 3.0, h);
   foam += fold * uFoamGain * uDt * 0.65;
 
   /* --- inject: shore proximity (Crest's shoreline foam) ------------------------- */
@@ -685,18 +700,18 @@ void main(){ oCol = vec4(texture(tDepth, vUv).r, 0.0, 0.0, 1.0); }
 
 /**
  * Half-resolution, cloud-composited copy of the opaque frame, rendered into a target
- * with a full mip chain. The water samples it with `textureLod` at a level chosen from
+ * with a full mip chain. The water samples it with 'textureLod' at a level chosen from
  * the roughness cone, so a rough facet GATHERS radiance over its lobe instead of point-
  * sampling one texel of a full-res image. Point-sampling was the single largest source
  * of the module's excess high-frequency energy (water lap_var +43% over the signature
  * while local_contrast sat 45% under it).
  *
  * The cloud composite happens here rather than at the tap, so every mip level carries
- * the cumulus. `clouds` composites in post, so `pipe.opaqueRT` has no cumulus in it, and
+ * the cumulus. 'clouds' composites in post, so 'pipe.opaqueRT' has no cumulus in it, and
  * its screen buffer is indexed by view-ray direction — a reflected ray projected to
  * infinity lands on exactly the pixel whose ray direction it shares.
  *
- * A 4-tap box at half res (three.js `generateMipmap` does a plain box downsample from
+ * A 4-tap box at half res (three.js 'generateMipmap' does a plain box downsample from
  * there) is a cheap approximation to a proper GGX prefilter, but the error is a slightly
  * boxy kernel, not a wrong radiance — and it is two orders of magnitude closer than no
  * filter at all.
@@ -766,7 +781,7 @@ void main(){
    * 5.85 m — so at 50 m five of eight bands were being displaced onto a mesh far too
    * coarse to carry them, at full amplitude. */
   float d = length(p - uCamPos.xz);
-  float e = max(0.14, d * 0.0225) * uLodStart;
+  float e = max(0.085, d * 0.0225) * uLodStart;
   vLod = e;
 
   float h = oc_depth(p);
@@ -781,7 +796,7 @@ void main(){
   vTx = tx; vTz = tz;
   vBrk = brk; vCrest = crest;
   vPinch = pinch;
-  vFold = smoothstep(0.40, -0.05, jminus);
+  vFold = smoothstep(0.12, -0.10, jminus);
 
   gl_Position = projectionMatrix * viewMatrix * vec4(P, 1.0);
 }
@@ -828,8 +843,10 @@ uniform float uSunIntensity;
 uniform vec3 uSkyAmbient;
 uniform vec3 uHorizonColor;
 uniform sampler2D tRefl;     // half-res, mipped, cloud-composited copy of the frame
-uniform float uReflDistort;  // UV excursion per unit surface slope at 1 m (Water.js rule)
+uniform float uReflMaxSlope; // slope beyond which a facet adds no more reflected excursion
+uniform float uUseSSR;       // below-horizon screen-space march on/off
 uniform float uReflBlur;     // scale on the roughness-cone mip selection
+uniform float uRefrScale;    // artistic multiplier on the PHYSICAL refraction offset
 
 uniform vec3 uExtinction;
 uniform vec3 uScatterCol;
@@ -1054,11 +1071,22 @@ void main(){
   varLost += vec2(1.6e-4) * dAmp * dAmp * (1.0 - smoothstep(2.0 * fp, 4.0 * fp, 0.16));
 
   vec3 N = normalize(cross(tz, tx));
-  // Only flip when we are genuinely looking at the underside. Flipping on
-  // dot(N,V) < 0 instead would erase the steep near-face of every shoaling crest —
-  // which is precisely where the Fresnel drops and the seabed shows through, i.e. the
-  // dark band that gives the reference surface its contrast.
-  if (!gl_FrontFacing) N = -N;
+  /* Flip ONLY when the eye is genuinely under the surface.
+   *
+   * This used to be: if (!gl_FrontFacing) N = -N;  -- and with side: DoubleSide on a
+   * rippled surface seen at grazing incidence, whether a given triangle is back-facing
+   * flips PER TRIANGLE. A flipped N gives dot(N,V) < 0, so ndv clamps to 0 and F goes
+   * to 1.0 (pure mirror), while R = reflect(-V,N) points DOWN so 'below' goes to 1 and
+   * the mirror returns the near-black deep-water body. Front-facing neighbours return
+   * bright sky. That is a hard, straight-edged, per-triangle bright/dark shatter across
+   * the whole mid field — and it got dramatically worse in this pass, because correcting
+   * uScatterCol made the dark side ~10x darker.
+   *
+   * The tangent frame cannot produce a downward normal on its own: tx ~ (1,.,.) and
+   * tz ~ (.,.,1), so cross(tz,tx).y is +1 minus the loop-budget sum, which GPU Gems'
+   * constraint (now actually enforced, see oc_wave) keeps below 1. So the only correct
+   * reason to flip is being underwater. */
+  if (uCamPos.y < P.y) N = -N;
 
   /* Filtered roughness (Toksvig / LEAN): the slope variance the LODs removed IS the
    * roughness. For an isotropic Beckmann/GGX lobe mss = alpha^2 exactly (research 5.3),
@@ -1070,14 +1098,30 @@ void main(){
   float alphaZ = clamp(sqrt(2.0 * vZ) + 0.004, 0.004, 0.7);
 
   /* ---- refraction + absorption -------------------------------------------------
-   * Offset the background tap along the surface normal, scaled by how much water is
-   * actually in front of the seabed and inversely by distance so the offset is a
-   * roughly constant number of pixels. Per-channel offsets give the dispersion fringe
-   * you see over cobbles in kf_01800. */
-  vec3 Nv = normalize((viewMatrix * vec4(N, 0.0)).xyz);
+   * The screen-space offset of the refracted seabed tap, in metres of LATERAL
+   * displacement at the bed, is
+   *     d ~ column * tilt * (1 - 1/n)        (n = 1.333, so the factor is 0.25)
+   * and a world offset d at range viewDist subtends d/viewDist radians, which is
+   * d/viewDist * P11/2 in UV. Everything on the right is known here.
+   *
+   * The old form was (0.055 + 0.30*thick) / max(viewDist*0.22, 1.0) applied to the
+   * raw view-space normal — which is ~0.77 for flat water seen at 50 deg, not a tilt.
+   * In the near field (viewDist < 4.5, so the divisor pinned at 1.0) with thick at its
+   * 3 m clamp that is an offset of up to **0.955 in UV — essentially the whole frame**.
+   * The ok test rejects the taps that land on sky, but a tap that lands on distant
+   * terrain below the horizon passes it, and the result is a smear of an unrelated part
+   * of the image stamped into the near water. That is a large part of the shard hash.
+   *
+   * Physically the correct number is small: 0.5 m of water at 5 m range with a 0.05
+   * slope displaces the bed by 6 mm, about one pixel. uRefrScale is the artistic
+   * multiplier on top of the physical value. */
+  vec3 Nv  = normalize((viewMatrix * vec4(N, 0.0)).xyz);
+  vec3 Nv0 = normalize((viewMatrix * vec4(0.0, 1.0, 0.0, 0.0)).xyz);
+  vec2 dNv = Nv.xy - Nv0.xy;                       // view-space tilt, ~= the slope angle
   float thick = clamp(column, 0.0, 3.0);
-  float offScale = (0.055 + 0.30 * thick) / max(viewDist * 0.22, 1.0);
-  vec2 roff = Nv.xy * offScale;
+  float offScale = thick * 0.25 * (projectionMatrix[1][1] * 0.5)
+                 / max(viewDist, 0.5) * uRefrScale;
+  vec2 roff = clamp(dNv * offScale, vec2(-0.06), vec2(0.06));
   vec3 refr;
   {
     vec2 u0 = clamp(suv + roff * 0.94, vec2(0.0015), vec2(0.9985));
@@ -1164,24 +1208,42 @@ void main(){
   /* A facet steeper than the view depression sends the reflected ray *below* the
    * horizon, where it meets the back of the next crest at near-normal incidence —
    * Fresnel a few percent — so what returns is the absorbed body, not dimmed sky. */
-  float below = clamp(-R.y * 26.0, 0.0, 1.0);
+  /* The ramp has to match the ANGULAR SCALE OF THE SEA it is describing: a ray a little
+   * below the horizon meets the next crest at grazing incidence and comes back mostly
+   * bright, and only a ray well below it strikes near-normal and returns the absorbed
+   * body. The rms slope of this sea is sqrt(mss) = 0.10, so the transition belongs over
+   * roughly R.y in [0, -0.15], not [0, -0.038]. The previous 26.0 was fitted while
+   * chasing shadow_frac, and against the corrected (10x darker) deep-water colour it
+   * snaps between bright sky and near-black inside one facet. */
+  float below = smoothstep(0.0, -0.15, R.y);
   vec3 deepBody = uScatterCol * Edn * 0.42;
 
-  // Cube fallback, true reflected direction clamped to the horizon.
-  vec3 Rs = vec3(R.x, max(R.y, 0.0) + 0.002, R.z);
+  /* ONE bounded reflection direction, used for BOTH the cube and the screen tap.
+   *
+   * The first version of this fix bounded only the screen tap (Water.js's UV rule) and
+   * left the cube sampled with the raw perturbed R. Near-field water at ~25 deg
+   * depression projects its reflection above the top of the frame, so it falls through
+   * to the cube every time — and the cube tap was still swinging +-20 deg of sky per
+   * +-10 deg of facet, across the limb of a very large, very bright gas giant. Measured
+   * result: hard pink/blue facets over the whole near field, near-patch blue 110.7.
+   *
+   * Bound the SLOPE instead of the UV: a facet steeper than uReflMaxSlope contributes no
+   * further reflected excursion. That is one clamp, it is expressed in the units the
+   * problem is actually in (surface slope), and it applies identically to both taps. */
+  vec2 slopeR = vec2(N.x, N.z) / max(N.y, 0.25);
+  float slopeLen = length(slopeR);
+  slopeR *= min(1.0, uReflMaxSlope / max(slopeLen, 1e-5));
+  vec3 Nr = normalize(vec3(slopeR.x, 1.0, slopeR.y));
+  vec3 Rr = reflect(-V, Nr);
+
+  // Cube fallback, clamped to the horizon.
+  vec3 Rs = vec3(Rr.x, max(Rr.y, 0.0) + 0.002, Rr.z);
   vec3 refl = texture(tSky, Rs).rgb;
 
-  // Flat-mirror direction: reflect(-V, up). This is where the reflected image of an
-  // infinitely distant sky actually lives on screen, and it varies smoothly.
-  vec3 Rflat = vec3(-V.x, V.y, -V.z);
-  if (Rflat.y > 0.004){
-    vec4 ci = uViewProj * vec4(Rflat, 0.0);
+  if (Rs.y > 0.004){
+    vec4 ci = uViewProj * vec4(Rs, 0.0);
     if (ci.w > 1e-6){
       vec2 uvi = (ci.xy / ci.w) * 0.5 + 0.5;
-      // Water.js's rule, verbatim in shape. N.xz is the surface slope; the offset
-      // shrinks as 1/dist so the horizon does not smear.
-      vec2 duv = N.xz * ((0.0015 + 1.0 / max(viewDist, 1.0)) * uReflDistort);
-      uvi += duv;
       vec2 e = min(uvi, 1.0 - uvi);
       float on = smoothstep(0.0, 0.035, min(e.x, e.y));
       if (on > 0.0){
@@ -1195,8 +1257,61 @@ void main(){
       }
     }
   }
-  // Dark term dominant, not a 55% lean on merely-dimmed sky.
-  refl = mix(refl, mix(refl * 0.30, deepBody, 0.82), below);
+
+  /* Below-horizon geometry: the sea stacks and the wet beach. kf_01800's water ROI gets
+   * a large share of its lum_std (45.4 against our 18.1) and essentially ALL of its
+   * shadow_frac (0.0206 against our 0.0004) from dark reflected rock — look at the crop,
+   * the dark streaks under the stacks are the single highest-contrast thing in it.
+   *
+   * OFF BY DEFAULT (config oceanSSR=1 to enable), and this time the experiment that
+   * settles it is run on the metric the term is supposed to serve, not on lap_var alone.
+   * The critic's evidence against the old 22-step march was that oceanSSR=0 moved
+   * lap_var by 0.35%, which says nothing about lum_std or shadow_frac. So I restored it
+   * leaner (14 steps) and re-measured everything. Water ROI at ref_01800, one window:
+   *
+   *   off -> on:  lum_std 18.1 -> 26.3,  p99 166 -> 181         (the wanted direction)
+   *               lap_var 408 -> 4802,   edge_density 0.047 -> 0.229
+   *               spectral_slope -2.10 -> -1.14,  local_contrast 0.0543 -> 0.0566
+   *               shadow_frac 0.00040 -> 0.00059  (target 0.0206 — it did not move)
+   *
+   * A spectral slope of -1.14 is white noise. A binary per-pixel hit test marched with a
+   * 1.55x geometric step over a rippled surface is salt-and-pepper by construction:
+   * neighbouring pixels hit and miss. It costs 4400 lap_var to buy 0.002 of
+   * local_contrast, and the shadow_frac it was restored for did not move at all.
+   *
+   * Kept behind the flag because the IDEA is right — the reference's dark water really
+   * is reflected sea stack — but it needs a filtered, temporally stable resolve, not a
+   * per-pixel march. */
+  if (uUseSSR > 0.5 && viewDist < 120.0 && Rr.y < 0.14){
+    float t = 0.08, dt = 0.14;
+    vec3 hitC = vec3(0.0); float hit = 0.0;
+    for (int i = 0; i < 14; i++){
+      t += dt; if (i >= 5) dt *= 1.55;
+      vec3 q = P + Rr * t;
+      vec4 cp = uViewProj * vec4(q, 1.0);
+      if (cp.w <= 1e-5) break;
+      vec2 uvq = (cp.xy / cp.w) * 0.5 + 0.5;
+      if (uvq.x < 0.0 || uvq.x > 1.0 || uvq.y < 0.0 || uvq.y > 1.0) break;
+      float dq = texture(tDepth, uvq).r;
+      if (dq >= 0.999995) continue;
+      vec3 sp = worldFromDepth(uvq, dq);
+      float rz = viewZ(q), sz = viewZ(sp);
+      if (rz > sz && (rz - sz) < dt * 3.4 + 0.6){
+        // never reflect the seafloor: it is behind the mirror, not in front of it
+        if (sp.y > uSeaLevel - 0.10){
+          vec2 ee = min(uvq, 1.0 - uvq);
+          hit = smoothstep(0.0, 0.06, min(ee.x, ee.y));
+          hitC = texture(tOpaque, uvq).rgb;
+        }
+        break;
+      }
+    }
+    refl = mix(refl, hitC, hit);
+  }
+  // A below-horizon ray still carries a real grazing reflection off the next crest, so
+  // it is not purely the body: 0.82 body / 0.18 dimmed-sky was fitted against a
+  // deep-water colour that was 10x too bright and reads as a hole now.
+  refl = mix(refl, mix(refl * 0.45, deepBody, 0.62), below);
 
   /* ---- Fresnel ------------------------------------------------------------------ */
   float ndv = clamp(dot(N, V), 0.0, 1.0);
@@ -1218,10 +1333,13 @@ void main(){
   vec3 ctr = dot(L0, R) * R - L0;
   float ctrLen = length(ctr);
   vec3 L = normalize(L0 + ctr * clamp(OC_SUN_R / max(ctrLen, 1e-5), 0.0, 1.0));
-  // widen alpha so the sphere light conserves energy
-  float aWiden = clamp(OC_SUN_R / (2.0 * ctrLen + 1e-5), 0.0, 1.0);
-  float aX = clamp(alphaX + aWiden, OC_SUN_R, 0.7);
-  float aZ = clamp(alphaZ + aWiden, OC_SUN_R, 0.7);
+  /* Karis: widen alpha by the light's angular radius and renormalise by
+   * (alpha/alphaPrime)^2 so the total energy is unchanged — the peak gets dimmer and
+   * the highlight gets WIDER, which is the whole point. A lobe narrower than the sun
+   * is not physical and is what TAA was eating. */
+  float aX = min(alphaX + OC_SUN_R, 0.7);
+  float aZ = min(alphaZ + OC_SUN_R, 0.7);
+  float specNorm = (alphaX / aX) * (alphaZ / aZ);
 
   vec3 Hv = normalize(L + V);
   float ndl = clamp(dot(N, L), 0.0, 1.0);
@@ -1236,7 +1354,7 @@ void main(){
   float kg = rough * rough * 0.5;
   float Gv = 1.0 / ((ndv * (1.0 - kg) + kg) * (ndl * (1.0 - kg) + kg) + 1e-5);
   float Fs = 0.02 + 0.98 * pow(1.0 - vdh, 5.0);
-  vec3 spec = uSunColor * uSunIntensity * (D * Gv * Fs * 0.25) * ndl * uGlitter;
+  vec3 spec = uSunColor * uSunIntensity * (D * specNorm * Gv * Fs * 0.25) * ndl * uGlitter;
   spec = min(spec, vec3(420.0));
 
   /* ---- sub-surface scattering in the crests -------------------------------------
@@ -1266,10 +1384,17 @@ void main(){
     vec2 fs = texture(tFoam, fuv).rg;
     env = fs.x; wet = fs.y;
   }
-  env = max(env, pow(vBrk, 3.0) * 0.55);
-  // Tessendorf J- fold, straight off the vertex tangent frame — free, and it is the
-  // source that fires on the pitching face rather than in the band behind it.
-  env = max(env, vFold * 0.6 * smoothstep(14.0, 3.0, h));
+  /* env comes from the ADVECTED FIELD ONLY.
+   *
+   * There used to be two shading-time floors here, env = max(env, pow(vBrk,3)*0.55) and
+   * a Tessendorf J- fold term. Both read VERTEX varyings, so the foam-coverage threshold
+   * crossed along straight TRIANGLE EDGES and the surf zone rendered as hard-edged white
+   * polygons — clearly visible at 2x in shots/oc2_H_on.png and shots/oc2_J_on.png.
+   *
+   * Both sources are already injected into the foam RT by FOAM_FRAG (depth-limited
+   * breaking, the J- fold, shore proximity, the swash sheet and the rock waterlines),
+   * where they are a smooth world-space field that advects and decays. Reading them a
+   * second time, faceted, only added the facets. */
   // Never let the dissolve threshold go solid: real whitewater always has holes, and
   // an env of 1.0 drives thr negative, which returns foamCov 1.0 for every texel.
   env = min(env, 0.85);
@@ -1287,7 +1412,11 @@ void main(){
     // Dissolve the density field against the texture rather than scaling it: a moving
     // threshold makes foam grow by *filling in holes*, which is how real foam appears
     // and disappears. Scaling an alpha makes it fade like a painted decal instead.
-    float thr = 1.06 - env * 1.18;
+    // At env 0.85 the old thr = 1.06 - 1.18*env evaluated to 0.057 against a tex
+    // distribution that runs ~0.3-1.2, i.e. foamCov saturated to 1 over almost every
+    // texel and the swash went solid white again. 1.15 - 0.95*env keeps the threshold
+    // inside the texture's range at both ends, so foam still grows by filling holes.
+    float thr = 1.15 - env * 0.95;
     foamCov = clamp(smoothstep(thr, thr + 0.30, tex), 0.0, 1.0);
     /* Foam is LIT: a rough (albedo 0.6-0.8, never 1.0) dielectric taking the sun's N.L
      * and the sky hemisphere. Unlit foam reads as fog — research/ocean.md failure mode
@@ -1321,7 +1450,25 @@ void main(){
 
   col = wmAerial(col, P, uCamPos);
 
-  /* ---- coverage: soft edge instead of a polygon silhouette --------------------- */
+  /* ---- coverage: soft edge instead of a polygon silhouette ---------------------
+   * The waterline is where the DISPLACED surface crosses the bed, and P.y is a vertex
+   * quantity linearly interpolated across a triangle, so its zero crossing is a straight
+   * segment per triangle: the water/land boundary is piecewise linear at the
+   * tessellation scale, ~22 px at 3 m range, and reads as hard wedges of dry beach
+   * cutting into the swash.
+   *
+   * Widening this feather 0.055 -> 0.120 to hide that is MEASURABLY THE WRONG TRADE.
+   * shoreline ROI at ref_01800, one window (shots/oc2_L_on.png vs shots/oc2_M_on.png):
+   *
+   *     0.055 -> 0.120:  lum_std 42.63 -> 28.71  (target 41.96)
+   *                      local_contrast 0.1562 -> 0.0932  (target 0.142)
+   *                      sat_mean 45.1 -> 27.4   shadow_frac 0.1518 -> 0.027
+   *                      lap_var 911.6 -> 1045   (target 914.9)
+   *
+   * A wider feather means mix(bgRaw, col, cov) keeps more DRY BEACH over the whole swash
+   * band, and the swash is where all of this module's contrast lives. Reverted. The real
+   * fix is a per-pixel waterline (recompute the displaced height in the fragment shader
+   * over the shallow band), not a fatter blend. */
   float cov = smoothstep(-0.004, 0.055, column);
   col = mix(bgRaw, col, cov);
 
@@ -1346,6 +1493,7 @@ export function create(opts = {}) {
   let foamA = null, foamB = null, foamMat = null, foamQuad = null;
   let detailRT = null;
   let depthRT = null, depthMat = null, depthQuad = null;
+  let reflRT = null, reflMat = null, reflQuad = null;
   let geom = null, mesh = null, mat = null;
   let uniforms = null;
   let landmarkArr = null;
@@ -1400,8 +1548,33 @@ export function create(opts = {}) {
     const ph = -z * 0.216 - t * 1.487 + Math.sin(x * 0.0135) * 1.1 + Math.sin(x * 0.0455 + 2.3) * 0.55;
     const s = Math.sin(ph);
     const up = Math.pow(Math.max(0, Math.min(1, s * 0.5 + 0.5)), 0.55);
-    const shore = smooth01((2.6 - h) / 2.6);
+    // Same two-factor gate as oc_swash(): 'h' is clamped to 0 on land and therefore
+    // carries no information there, so the run-up height above the local waterline
+    // contour is what actually stops the surge flooding the whole map.
+    const above = seabedCpu(x, z) - SEA_LEVEL;
+    const shore = smooth01((2.6 - h) / 2.6) * smooth01((OCEAN_RUNUP - above) / (OCEAN_RUNUP + 0.06));
     return { y: (up - 0.42) * 0.62 * shore, front: Math.max(0, Math.cos(ph)) * shore };
+  }
+
+  /** Refracted travel direction for band i at depth h — the JS twin of the bend in
+   *  oc_wave(). Physics/particles read heightAt(), so if the crests turn on the GPU and
+   *  not on the CPU a grunt standing in the surf bobs to a different wave than the one
+   *  drawn around him. */
+  function waveDirCpu(i, x, z, h) {
+    const D = waveDir[i];
+    const L0 = WAVE_BANDS[i].L;
+    const bend = 1 - Math.min(1, Math.max(0, h / (0.5 * L0)));
+    if (bend <= 1e-4) return D;
+    const e = 2.4;
+    const gx = seabedCpu(x + e, z) - seabedCpu(x - e, z);
+    const gz = seabedCpu(x, z + e) - seabedCpu(x, z - e);
+    const m = Math.hypot(gx, gz);
+    if (!(m > 1e-4)) return D;
+    const f = bend * 0.85;
+    const mx = D[0] * (1 - f) + (gx / m) * f;
+    const mz = D[1] * (1 - f) + (gz / m) * f;
+    const ml = Math.hypot(mx, mz);
+    return ml > 1e-4 ? [mx / ml, mz / ml] : D;
   }
 
   function heightAt(x, z, t) {
@@ -1411,7 +1584,7 @@ export function create(opts = {}) {
     for (let i = 0; i < NW; i++) {
       const w = waveCpu(i, h);
       if (w.A < 1e-4) continue;
-      const D = waveDir[i];
+      const D = waveDirCpu(i, x, z, h);
       const th = w.k * (D[0] * x + D[1] * z) - waveOmega[i] * t + wavePhase[i];
       const skew = Math.min(0.95, 0.85 * w.brk + 0.45 * Math.min(1, Math.max(0, w.Ks - 1)));
       y += w.A * Math.cos(th + skew * Math.sin(th));
@@ -1436,7 +1609,7 @@ export function create(opts = {}) {
     for (let i = 0; i < NW; i++) {
       const w = waveCpu(i, h);
       if (w.A < 1e-4) continue;
-      const D = waveDir[i];
+      const D = waveDirCpu(i, x, z, h);
       const th = w.k * (D[0] * x + D[1] * z) - waveOmega[i] * t + wavePhase[i];
       const c01 = Math.cos(th) * 0.5 + 0.5;
       brk = Math.max(brk, w.brk * smooth01((c01 - 0.05) / 0.67));
@@ -1503,14 +1676,14 @@ export function create(opts = {}) {
   }
 
   /**
-   * Camera-centred radial disc. Ring spacing is 0.14 m out to 6 m and 2.25% of radius
+   * Camera-centred radial disc. Ring spacing is 0.085 m out to 3.8 m and 2.25% of radius
    * beyond, so screen-space triangle size is roughly constant: ~0.9 m of tessellation
    * at 40 m, which resolves an 8 m shoaled crest with ten samples across its face.
    */
   function buildDisc() {
     const radii = [];
     let r = 0.18;
-    while (r < 12000) { radii.push(r); r += Math.max(0.14, r * 0.0225); }
+    while (r < 12000) { radii.push(r); r += Math.max(0.085, r * 0.0225); }
     radii.push(12000);
     const NR = radii.length;
     const NS = 448;
@@ -1631,6 +1804,20 @@ export function create(opts = {}) {
       depthMat = fsMaterial(DEPTH_COPY_FRAG, { tDepth: { value: null } });
       depthQuad = new FullScreenQuad(depthMat);
 
+      /* --- prefiltered reflection target (see REFL_PREFILTER_FRAG) --- */
+      reflRT = makeRT(Math.max(2, ctx.size.w >> 1), Math.max(2, ctx.size.h >> 1), {
+        minFilter: THREE.LinearMipmapLinearFilter,
+        magFilter: THREE.LinearFilter,
+        generateMipmaps: true,
+      });
+      reflMat = fsMaterial(REFL_PREFILTER_FRAG, {
+        tSrc: { value: null },
+        tCloudBuf: { value: null },
+        uUseClouds: { value: 0 },
+        uTexel: { value: new THREE.Vector2(1 / 1920, 1 / 1080) },
+      });
+      reflQuad = new FullScreenQuad(reflMat);
+
       /* --- uniform block --- */
       const { A, B, C } = waveUniformArrays();
       const aer = sharedAerialUniforms();
@@ -1693,10 +1880,25 @@ export function create(opts = {}) {
         uSunIntensity: { value: 6.2 },
         uSkyAmbient: { value: new THREE.Color(0.12, 0.19, 0.30) },
         uHorizonColor: { value: new THREE.Color(0.35, 0.42, 0.52) },
-        uUseSSR: { value: 1 },
+        tRefl: { value: reflRT.texture },
+        uReflMaxSlope: { value: 0.22 },
+        // OFF by default — measured broadband hash, see the note above the march.
+        uUseSSR: { value: 0 },
+        uReflBlur: { value: 1.0 },
+        uRefrScale: { value: 3.0 },
 
-        uExtinction: { value: new THREE.Vector3(0.365, 0.056, 0.040) },
-        uScatterCol: { value: new THREE.Color(0.048, 0.300, 0.345) },
+        /* Pope & Fry (1997) pure-water absorption band-averaged over sRGB primaries is
+         * (0.39, 0.045, 0.010) m^-1; a real lagoon carries CDOM and resuspended
+         * carbonate fines on top, giving research/ocean.md's clear-tropical value
+         * (0.45, 0.090, 0.045) m^-1. K_B = 0.045 sits between Jerlov IA and IB. These
+         * apply to the SNELL path, which is why the numbers can be this large without
+         * annihilating the bottom term the way the old air-side path did. */
+        uExtinction: { value: new THREE.Vector3(0.45, 0.090, 0.045) },
+        /* DEEP_SCATTER: what open water backscatters, as a factor on the downwelling
+         * irradiance. Was (0.048, 0.300, 0.345) — 10x the derived green and 4.6x the
+         * derived blue — so the volume term saturated before the bottom term had died
+         * and the near field went opaque navy. */
+        uScatterCol: { value: new THREE.Color(0.004, 0.030, 0.075) },
         uFoamAmount: { value: 1.0 },
         uGlitter: { value: 1.0 },
         uCausticAmount: { value: 1.0 },
@@ -1750,8 +1952,21 @@ export function create(opts = {}) {
         depthMat.uniforms.tDepth.value = pipe.depthTex;
         renderer2.setRenderTarget(depthRT);
         depthQuad.render(renderer2);
-        renderer2.setRenderTarget(prevRT);
         uniforms.tDepth.value = depthRT.texture;
+
+        /* Prefilter the opaque frame for the reflection tap: half res, cloud
+         * composited, full mip chain. three regenerates the mips at the end of
+         * WebGLRenderer.render(), which FullScreenQuad.render() goes through, so this
+         * one draw leaves the whole chain valid. */
+        const rw = Math.max(2, pipe.w >> 1), rh = Math.max(2, pipe.h >> 1);
+        if (reflRT.width !== rw || reflRT.height !== rh) reflRT.setSize(rw, rh);
+        reflMat.uniforms.tSrc.value = pipe.opaqueRT.texture;
+        reflMat.uniforms.tCloudBuf.value = uniforms.tClouds.value;
+        reflMat.uniforms.uUseClouds.value = uniforms.uUseClouds.value;
+        reflMat.uniforms.uTexel.value.set(1 / pipe.w, 1 / pipe.h);
+        renderer2.setRenderTarget(reflRT);
+        reflQuad.render(renderer2);
+        renderer2.setRenderTarget(prevRT);
       };
 
       ctx.scene.add(mesh);
@@ -1763,6 +1978,9 @@ export function create(opts = {}) {
         if (k === 'oceanGlitter') uniforms.uGlitter.value = v;
         if (k === 'oceanCaustics') uniforms.uCausticAmount.value = v;
         if (k === 'oceanDetail') uniforms.uDetailAmount.value = v;
+        if (k === 'oceanReflBlur') uniforms.uReflBlur.value = v;
+        if (k === 'oceanRefrScale') uniforms.uRefrScale.value = v;
+        if (k === 'oceanReflSlope') uniforms.uReflMaxSlope.value = v;
         if (k === 'oceanSSR') uniforms.uUseSSR.value = v ? 1 : 0;
         if (k === 'oceanExtinction') uniforms.uExtinction.value.fromArray(v);
         if (k === 'oceanScatter') uniforms.uScatterCol.value.fromArray(v);
@@ -1832,6 +2050,7 @@ export function create(opts = {}) {
     resize(w, h, ctx) {
       if (uniforms) uniforms.uInvRes.value.set(1 / w, 1 / h);
       depthRT?.setSize(Math.max(2, w), Math.max(2, h));
+      reflRT?.setSize(Math.max(2, w >> 1), Math.max(2, h >> 1));
     },
 
     /* ----------------------------------------------------------- public API */
@@ -1880,6 +2099,8 @@ export function create(opts = {}) {
       detailRT?.dispose();
       depthRT?.dispose();
       depthQuad?.dispose();
+      reflRT?.dispose();
+      reflQuad?.dispose();
     },
   };
 }

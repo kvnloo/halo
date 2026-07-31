@@ -250,9 +250,21 @@ Return at most 6 findings, ordered by (value / risk). Fewer, better findings bea
     { label: `inspect:${l.key}`, phase: 'Inspect', effort: 'high', schema: FINDING_SCHEMA })
   ))).filter(Boolean).flatMap((r) => r.findings || []);
 
-  const fresh = proposals.filter((f) => f?.id && !seen.has(f.id));
-  fresh.forEach((f) => seen.add(f.id));
-  log(`round ${round}: ${proposals.length} proposed, ${fresh.length} new`);
+  // Dedup, then CAP. Round 1 of the first real run fanned out one verifier per fresh finding
+  // across 5 lenses and reached 74 agents / 4.8M tokens — the lenses overlap, so the tail of
+  // that list is mostly near-duplicates of the head. Verify the best dozen; the rest resurface
+  // next run if they matter, and the ledger keeps them from being re-proposed if they don't.
+  const rank = { high: 0, medium: 1, low: 2 };
+  const riskRank = { none: 0, low: 1, medium: 2, high: 3 };
+  const fresh = proposals
+    .filter((f) => f?.id && !seen.has(f.id))
+    .sort((a, b) => (rank[a.value] ?? 3) - (rank[b.value] ?? 3)
+                 || (riskRank[a.risk] ?? 3) - (riskRank[b.risk] ?? 3))
+    .slice(0, 12);
+  proposals.filter((f) => f?.id).forEach((f) => seen.add(f.id));   // suppress the tail too
+  const dropped = proposals.filter((f) => f?.id).length - fresh.length;
+  log(`round ${round}: ${proposals.length} proposed, ${fresh.length} verifying`
+    + (dropped > 0 ? ` (${dropped} deduped or below the cut — see ${LEDGER})` : ''));
 
   if (!fresh.length) { dry++; log('nothing new — converged'); break; }
 
@@ -309,7 +321,17 @@ a genuine problem with a dangerous fix. If uncertain, reject.`,
 `${CONTEXT}
 ${SAFETY}
 
-## YOUR TASK: implement exactly this guardrail, and nothing else
+## FIRST: check whether this already exists
+
+Several agents last run spent a full task rediscovering that their guardrail was already
+built, then wrote a verification report instead. Do that check FIRST and cheaply:
+\`grep\` the named files, \`ls tools/\`, read \`${LEDGER}\`, and check \`git log --oneline -15\`.
+
+If it already exists and works: run its fire-test, add ONE short line to ${LEDGER} recording
+that you re-verified it, and STOP. Return "already present, re-verified" plus the test output.
+Do not write a long report about work you did not do.
+
+## OTHERWISE: implement exactly this guardrail, and nothing else
 
   ${f.title}
 

@@ -1,0 +1,74 @@
+name: preflight
+
+# The repo is public (github.com/kvnloo/halo) but nothing has ever run on a push. This is
+# the CPU-only half of the gate — no GPU, no capture, no reference footage (ref/ is
+# gitignored licensed material), so it runs anywhere in about a minute.
+#
+# What it would have caught: KNOWN_ISSUES §20. `ocean.js` and `rocks.js` stopped parsing
+# and stayed broken across Waves F and G; both waves' scores were recorded against a scene
+# with no ocean in it. A push-triggered `parsecheck` turns that from "discovered by a critic
+# two waves later" into a red mark on the commit that introduced it.
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # three is needed by tools/_posecheck.mjs (it boots terrain.js headlessly).
+      # Puppeteer/Chromium is not — nothing here captures a frame.
+      - name: install
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: '1'
+        run: npm install --no-audit --no-fund
+
+      - name: parsecheck — every src/**.js parses, no GLSL-template backticks
+        run: node tools/parsecheck.mjs
+
+      - name: posecheck — no camera pose has sunk under the terrain
+        run: node tools/_posecheck.mjs
+
+      - name: staged-blob parse gate is itself runnable
+        run: node tools/parsecheck-staged.mjs
+
+      # `npm run selftest` so CI and a reviewer invoke the exact same string; the flag is
+      # in capture.mjs's KNOWN_FLAGS, so this step stays silent when green rather than
+      # printing "unknown flag(s) IGNORED" inside the gate's own verification.
+      - name: capture integrity gate still fires (no GPU)
+        run: npm run selftest
+
+      # `ref/` is absent in CI by design, so `references` is advisory and preflight's
+      # soft checks pass. Hard checks (parsecheck, posecheck) are what gate the push.
+      - name: preflight
+        run: node tools/preflight.mjs
+
+      - name: scores/history.jsonl is parseable and monotonically appended
+        run: node tools/historycheck.mjs
+
+      # Advisory, never red: the trust chain over the written record. citecheck resolves the
+      # git objects and paths reports cite (four SHAs quoted as measurement provenance no
+      # longer exist, including the three in the KNOWN_ISSUES §28 reproduction, where
+      # `git show <bad> | grep -c` prints 0 — indistinguishable from a true negative).
+      # claimcheck finds refuted claims from tools/refuted.json still standing unannotated
+      # (§19's HALO_NO_DAEMON=1 had already spread to two other reports).
+      - name: citecheck / claimcheck (advisory)
+        run: |
+          node tools/citecheck.mjs --warn || true
+          node tools/claimcheck.mjs || true
+
+      # Advisory: joins scores/provenance.jsonl to scores/history.jsonl. Adjacent rows in the
+      # series that were captured under different poses.js / metrics.py are not one series —
+      # waveI-posefit -> fitstand -> handstand each changed both, and the only record of it is
+      # a hand-typed "== POSE REFIT LINE ==" row someone added afterwards.
+      - name: provcheck (advisory)
+        run: node tools/provcheck.mjs || true

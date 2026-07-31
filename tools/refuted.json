@@ -1,0 +1,62 @@
+{
+  "$comment": [
+    "Registry of claims that were stated confidently in a report or a doc, acted on by later",
+    "waves, and LATER DISPROVED BY MEASUREMENT. `node tools/claimcheck.mjs` greps reports/ and",
+    "docs/ for each pattern and flags any occurrence that does not carry a retraction marker",
+    "near it, so a refuted claim cannot quietly keep steering agents.",
+    "",
+    "Add an entry the moment you disprove something another agent asserted. Fields:",
+    "  id        stable slug",
+    "  claim     the refuted statement, in one line",
+    "  refutedBy where the disproof lives (issue number, report, commit)",
+    "  truth     what to do instead",
+    "  near      JS regex; a line matching this is a candidate site",
+    "  alsoNear  optional JS regex; the candidate only counts if this matches within +/-3 lines",
+    "  cleared   JS regex; if this matches within +/-8 lines the site is already annotated"
+  ],
+  "claims": [
+    {
+      "id": "no-daemon",
+      "claim": "Measure with HALO_NO_DAEMON=1 because the capture daemon serves a stale module graph for edits to the working tree.",
+      "refutedBy": "docs/KNOWN_ISSUES.md §19 (tested directly: vite re-transforms on edit even with HALO_NO_HMR=1)",
+      "truth": "Use the shared daemon for measurement of the working tree. HALO_NO_DAEMON=1 costs one vite + one Chrome per agent and OOMed the box at 17 agents. If a subsystem looks stale it has probably stopped loading: run node tools/parsecheck.mjs and read the capture's `missing` list. NARROW EXCEPTION, separately measured and NOT refuted: the daemon is machine-wide and serves the repo it was started from, so capturing a scratch COPY of the tree (e.g. under /tmp) does need HALO_NO_DAEMON=1 or it silently measures the original. That is a different claim from the refuted one and sites making it are cleared.",
+      "near": "HALO_NO_DAEMON",
+      "cleared": "KNOWN_ISSUES\\s*(§|section\\s*)?\\s*19|§\\s*19\\b|refuted\\.json|TESTED AND FALSE|retraction|refuted|do not use|warns against|scratch|/tmp|another repo|different repo|started from"
+    },
+    {
+      "id": "fog-owns-desaturation",
+      "claim": "The whole-scene saturation collapse (sat_mean at 43% of reference) is an additive near-field in-scatter term in volumetricFog.js.",
+      "refutedBy": "reports/vegetation.md:49 is the primary measurement — `--skip volumetricFog` produced a BYTE-IDENTICAL PNG at ref_00720 (with `--skip bloom` as the control, proving the skip mechanism works), so the pass wrote no pixels at all and cannot have caused anything. docs/KNOWN_ISSUES.md §18 then found the real cause: scene.js cleared the depth texture shared with the G-buffer, so every world pixel integrated 460 m of haze; fixing it moved sat_mean 55.66 -> 61.66. reports/tonemap.md:61 repeats the byte-identical result secondhand. KNOWN_ISSUES §8's later Wave-H note ('Stop attributing the residual to volumetricFog.js', p01 now correct while p99 is crushed) rules out an additive term a third time.",
+      "truth": "Do not attribute the desaturation to volumetricFog. The pass was inert; the cause was the shared-depth clear (§18), with `wmAerial` in src/gfx/materialCommon.js named at ref_00720 (reports/vegetation.md) and a highlight roll-off / exposure shoulder in tonemap.js named for the Wave-H residual (§8's own Wave-H note).",
+      "near": "volumetricFog|volumetric fog",
+      "alsoNear": "near-field in-scatter|additive[- ](near-field[- ])?(in-?scatter|haze)|crushed whole-scene|43% of (target|reference)|not albedo|single largest visual defect",
+      "cleared": "KNOWN_ISSUES\\s*(§|section\\s*)?\\s*(18|21)|§\\s*(18|21)\\b|refuted\\.json|shared depth|depth texture|scene\\.js|byte-identical|no-op|wrong file|Corrections to|superseded|Stop attributing|not the fog|wmAerial"
+    },
+    {
+      "id": "failedmodules-proves-loaded",
+      "claim": "A capture reporting failedModules: [] proves every subsystem was loaded and rendering.",
+      "refutedBy": "src/main.js:102 vs src/modules.js:76 — failedModules() only records modules whose create() threw during init. A module that fails to PARSE or import is skipped by src/modules.js and lands in __HALO_MISSING__, a different list. That is the §20 failure mode that silently deleted ocean and rocks for two waves.",
+      "truth": "Witness both: node tools/parsecheck.mjs, plus the `missing` array in the capture JSON (see tools/capture.mjs).",
+      "near": "failedModules",
+      "alsoNear": "every subsystem|all subsystems|was loaded|were loaded|nothing failed|no warnings|fair fight|proves",
+      "cleared": "__HALO_MISSING__|missing|parsecheck|refuted\\.json|KNOWN_ISSUES\\s*(§|section\\s*)?\\s*20|§\\s*20\\b"
+    },
+    {
+      "id": "skip-flag-can-disable-a-pass",
+      "claim": "`--skip <passname>` (volumetricFog, bloom, taa, ssao, ssr, dof, motionBlur, tonemap, grade, sharpen, grain, cloudComposite) removes that pass from the frame, so a byte-identical result from it proves the pass writes no pixels.",
+      "refutedBy": "src/render/pipeline.js PASS_MANIFEST never consults skip/only — it is a fixed list, loaded unconditionally in init(). Only src/modules.js:46 reads the flag, and it matches its own MODULE manifest by exact string; no pass name is in it. So `--skip volumetricFog` and `--skip bloom` BOTH skipped nothing, at every wave commit (verified braced at 6a19370 f25d7b9 8bceeb5 f96fae6). reports/ocean_waveH.md measured the same thing independently and wrote '(Confirmed again.)'. tools/capture.mjs now exits 2 on a --skip name that is not a module, so every recipe of this shape is a dead command going forward.",
+      "truth": "A byte-identical frame from `--skip <passname>` is the signature of a flag that did nothing, NOT of an inert pass — the two are indistinguishable and this project has confused them at least four times. reports/vegetation.md:49-50's control is void for the same reason (`--skip bloom` also skipped nothing; 'differs at byte 44' is the 50%-of-pixels nondeterminism that report documents 30 lines later). To turn a pass off use tools/ablate.mjs / __HALO__.togglePass(), or its own config knob (e.g. --config fogDensity=0), and prove the control arm differs. Every conclusion drawn from a --skip <passname> arm needs re-deriving; the conclusions themselves may still be true, but nothing here has measured them.",
+      "near": "--skip\\s+(volumetricFog|bloom|taa|ssao|ssr|dof|motionBlur|cloudComposite|tonemap|grade|sharpen|grain)\\b",
+      "alsoNear": "byte-identical|byte identical|wrote no pixels|writes (zero|no) pixels|no-?op|control|skip mechanism|cannot (be|have been) the cause|produced no output|worth \\+|differs at byte",
+      "cleared": "PASS_MANIFEST|pipeline\\.js|filters \\*?modules|is a `?Pass`?|togglePass|ablate\\.mjs|fogDensity=0|skip-flag-can-disable-a-pass|refuted\\.json|Confirmed again|did nothing|skipped nothing|dead command"
+    },
+    {
+      "id": "gtao-ssr-dead-through-waveG",
+      "claim": "ensureOpaqueDepth — the mid-frame snapshot that first gave ssao/ssr real depth — exists in NO commit, so every scored run up to and including waveG-mvfix had both passes dead, and aoStrength/aoRadius/aoPower/ssrStrength were all tuned against a pass that produced no output.",
+      "refutedBy": "The git check that established it could not fail, for two independent reasons, and its conclusion is wrong. (1) The three SHAs it loops over (865e972, 76237b2, 8ed94d7) exist in no object database here — history was rewritten at a9c1e8a/b92decf — so `git show` failed to stderr and `grep -c` printed 0 off an empty stream, which is byte-identical to a true negative. (2) The command is unbraced `$c:src/render/passes/ssao.js`; this repo's shell is zsh, where that is the `:s` modifier even inside double quotes (measured: `zsh -f -c 'c=abc123def; echo \"$c:src/render/x.js\"'` prints `abc123def/x.js`), so it never named ssao.js at any SHA, good or bad. Re-run braced against the wave commits that DO exist — E 6a19370, F f25d7b9, G 8bceeb5, H f96fae6 — `grep -c 'export function ensureOpaqueDepth'` on src/render/passes/ssao.js gives E:0 F:1 G:1 H:0, and src/render/passes/ssr.js imports and calls it at F and G (ssr.js:3, :733; ssao.js:51, :1053 at f25d7b9).",
+      "truth": "ensureOpaqueDepth was live in Waves F and G, not absent. It was DELETED in Wave H on purpose (see the header of src/render/passes/ssao.js: proved bit-identical to pipe.depthTex at all 21 poses). So 'tuned against a pass that produced no output' can only hold for Wave E, and any downward re-tune of aoStrength/aoRadius/aoPower/ssrStrength justified by that sentence needs re-deriving. The over-strength finding itself (edge_ratio 1.413, lap_ratio 1.360 at waveH) is a separate, image-based measurement and still stands on its own.",
+      "near": "exists in (\\*\\*)?no commit|tuned against a (dead pass|pass that produced no output)|export function ensureOpaqueDepth|rendered nothing through Waves E, F and G",
+      "cleared": "f25d7b9|8bceeb5|6a19370|E:0 F:1 G:1|refuted\\.json|gtao-ssr-dead|CORRECTION|zsh|:s modifier|history modifier|live in Waves? F"
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+#!/bin/sh
+# Refuse to commit a src/*.js file that does not parse.
+#
+# KNOWN_ISSUES §20: a backtick inside a /* glsl */ template ends the template, the file
+# stops parsing, src/modules.js skips the module, and the subsystem vanishes from every
+# capture SILENTLY. It has happened in noise.js, ocean.js (twice) and rocks.js, and both
+# Wave F and Wave G were measured against a tree where ocean.js and rocks.js were dead.
+# tools/checkpoint.md names the same hazard from the other side: "An agent killed mid-edit
+# can leave a file that does not parse... it took the whole build down twice here."
+#
+# This checks the STAGED blob, not the working tree, because with a dozen agents editing
+# one tree the working copy of a file is routinely mid-write while an unrelated commit
+# runs (§16). Only what you are actually committing is inspected.
+#
+# Escape hatch (salvage commits — see commit 2651d8c, where landing 23 half-finished
+# subsystems on disk was the whole point):   git commit --no-verify
+exec node "$(git rev-parse --show-toplevel)/tools/parsecheck-staged.mjs"

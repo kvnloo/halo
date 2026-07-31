@@ -1,0 +1,61 @@
+{
+  "shots": "shots/blindcap",
+  "n_poses": 9,
+  "separability": 5.69,
+  "detectable_features_per_pose": 5.8,
+  "total_features": 37,
+  "verdict": "machine separates most pairs",
+  "top_tells": [
+    {
+      "feature": "sil.sky_frac",
+      "median_z": 4.99
+    },
+    {
+      "feature": "stat.local_contrast",
+      "median_z": 4.48
+    },
+    {
+      "feature": "stat.lum_std",
+      "median_z": 4.42
+    },
+    {
+      "feature": "sct.shoreline.size_cv",
+      "median_z": 2.59
+    },
+    {
+      "feature": "sil.overhang",
+      "median_z": 2.13
+    },
+    {
+      "feature": "stat.sat_mean",
+      "median_z": 2.04
+    },
+    {
+      "feature": "sil.undercut",
+      "median_z": 2.03
+    },
+    {
+      "feature": "stat.spectral_slope",
+      "median_z": 1.98
+    },
+    {
+      "feature": "sil.rough_D",
+      "median_z": 1.9
+    },
+    {
+      "feature": "sct.sand.modality",
+      "median_z": 1.73
+    }
+  ],
+  "per_pose_max_z": {
+    "ref_00000": 5.12,
+    "ref_00120": 5.26,
+    "ref_00450": 5.78,
+    "ref_00600": 9.85,
+    "ref_00720": 7.94,
+    "ref_00840": 8.85,
+    "ref_01500": 5.36,
+    "ref_01800": 5.69,
+    "ref_02220": 5.03
+  }
+}

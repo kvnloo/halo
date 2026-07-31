@@ -43,6 +43,15 @@ template literal that killed the whole module the same way.
 
 ## 2. THE SCENE-WIDE DESATURATION IS `volumetricFog`, NOT ALBEDO — not my file
 
+> **RETRACTED by later measurement — this section names the wrong file.** The half that
+> holds is "not albedo": zeroing the albedo and re-measuring was the right experiment and
+> its result stands. The attribution to `volumetricFog.js` does not. `reports/vegetation.md`
+> §"Corrections to §8" measured `--skip volumetricFog` as a **byte-identical** PNG at
+> `ref_00720` (with `--skip bloom` as a control), so the pass wrote no pixels and cannot
+> have been the cause; `docs/KNOWN_ISSUES.md` §18 then found it — `scene.js` cleared the
+> depth texture shared with the G-buffer, so every world pixel integrated 460 m of haze.
+> Registered as `fog-owns-desaturation` in `tools/refuted.json`.
+
 `docs/KNOWN_ISSUES.md` §8 blames the `sat_mean` collapse on material albedo. It is not
 albedo. It is an additive near-field in-scatter from
 `src/render/passes/volumetricFog.js` that auto-exposure then conceals.

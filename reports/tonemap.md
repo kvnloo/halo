@@ -39,6 +39,15 @@ sensor gain, and silently scaling it would make the pin lie.
 
 ### Proof, re-measured this session (terrain + fog fixes in the tree)
 
+> **Method retraction (added by a later wave):** the `HALO_NO_DAEMON=1` below was copied
+> from `reports/fog.md`'s stale-module-cache theory. That theory was tested and is false —
+> `docs/KNOWN_ISSUES.md` §19: vite re-transforms on edit even with `HALO_NO_HMR=1`. Do not
+> use the flag; it costs one vite + one Chrome per agent, the configuration that exhausted
+> memory at 17 agents. It is a harness choice, not a render setting, so the six numbers
+> below are not challenged by this note — but re-run them on the shared daemon. If a
+> subsystem looks stale it has probably stopped loading: `node tools/parsecheck.mjs`, then
+> read the capture's `missing` list. Registered as `no-daemon` in `tools/refuted.json`.
+
 `ref_00000 --settle 48`, `HALO_NO_DAEMON=1`, all six captures with an identical module
 state (the single boot warning in each is `physics: addStatic is not defined`, another
 agent's file, no visual effect):

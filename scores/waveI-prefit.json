@@ -1,0 +1,199 @@
+{
+  "tag": "waveI-prefit",
+  "n": 9,
+  "score": 29.44,
+  "axes": {
+    "structure": 3.42,
+    "grade": 1.4,
+    "perceptual": 7.51,
+    "detail": 76.86,
+    "geometry": 80.81,
+    "spectrum": 94.15
+  },
+  "raw": {
+    "ssim": 0.3921,
+    "ms_ssim": 0.3145,
+    "hist": 0.754,
+    "lpips": 0.6724,
+    "lap_ratio": 1.3604,
+    "edge_ratio": 1.4132
+  },
+  "render_stats": {
+    "lum_mean": 98.7436,
+    "lum_std": 38.9237,
+    "sat_mean": 61.6551,
+    "lap_var": 472.5009,
+    "edge_density": 0.0986,
+    "local_contrast": 0.1367,
+    "shadow_frac": 0.0406,
+    "highlight_frac": 0.0039
+  },
+  "ref_stats": {
+    "lum_mean": 105.4037,
+    "lum_std": 52.3592,
+    "sat_mean": 79.1377,
+    "lap_var": 424.1278,
+    "edge_density": 0.0768,
+    "local_contrast": 0.1936,
+    "shadow_frac": 0.0565,
+    "highlight_frac": 0.0088
+  },
+  "spectral": {
+    "ref": -2.542,
+    "test": -2.533
+  },
+  "perf": {
+    "fps": 109,
+    "ms": 9.15,
+    "drawCalls": 670,
+    "tris": 35121485
+  },
+  "worst": [
+    {
+      "pose": "ref_00600",
+      "score": 22.18,
+      "axes": {
+        "structure": 30.81,
+        "grade": 5.49,
+        "perceptual": 14.19,
+        "detail": 1.7,
+        "geometry": 22.96,
+        "spectrum": 95.66
+      }
+    },
+    {
+      "pose": "ref_02220",
+      "score": 23.69,
+      "axes": {
+        "structure": 0,
+        "grade": 0.03,
+        "perceptual": 4.04,
+        "detail": 65.55,
+        "geometry": 63.01,
+        "spectrum": 90.04
+      }
+    },
+    {
+      "pose": "ref_00720",
+      "score": 25.14,
+      "axes": {
+        "structure": 0,
+        "grade": 0,
+        "perceptual": 0,
+        "detail": 74.82,
+        "geometry": 68.06,
+        "spectrum": 100
+      }
+    }
+  ],
+  "per_pose": [
+    {
+      "pose": "ref_00000",
+      "score": 32.82,
+      "axes": {
+        "structure": 0,
+        "grade": 0,
+        "perceptual": 8.97,
+        "detail": 100,
+        "geometry": 89.25,
+        "spectrum": 97.18
+      }
+    },
+    {
+      "pose": "ref_00120",
+      "score": 33.22,
+      "axes": {
+        "structure": 0,
+        "grade": 1.47,
+        "perceptual": 11.64,
+        "detail": 100,
+        "geometry": 96.48,
+        "spectrum": 78.99
+      }
+    },
+    {
+      "pose": "ref_00450",
+      "score": 34.99,
+      "axes": {
+        "structure": 0,
+        "grade": 0.55,
+        "perceptual": 17.21,
+        "detail": 96,
+        "geometry": 90.74,
+        "spectrum": 100
+      }
+    },
+    {
+      "pose": "ref_00600",
+      "score": 22.18,
+      "axes": {
+        "structure": 30.81,
+        "grade": 5.49,
+        "perceptual": 14.19,
+        "detail": 1.7,
+        "geometry": 22.96,
+        "spectrum": 95.66
+      }
+    },
+    {
+      "pose": "ref_00720",
+      "score": 25.14,
+      "axes": {
+        "structure": 0,
+        "grade": 0,
+        "perceptual": 0,
+        "detail": 74.82,
+        "geometry": 68.06,
+        "spectrum": 100
+      }
+    },
+    {
+      "pose": "ref_00840",
+      "score": 31.36,
+      "axes": {
+        "structure": 0,
+        "grade": 0,
+        "perceptual": 0,
+        "detail": 94.87,
+        "geometry": 100,
+        "spectrum": 99.68
+      }
+    },
+    {
+      "pose": "ref_01500",
+      "score": 29.4,
+      "axes": {
+        "structure": 0,
+        "grade": 5.07,
+        "perceptual": 8.76,
+        "detail": 63.52,
+        "geometry": 96.82,
+        "spectrum": 85.83
+      }
+    },
+    {
+      "pose": "ref_01800",
+      "score": 32.15,
+      "axes": {
+        "structure": 0,
+        "grade": 0,
+        "perceptual": 2.78,
+        "detail": 95.25,
+        "geometry": 100,
+        "spectrum": 100
+      }
+    },
+    {
+      "pose": "ref_02220",
+      "score": 23.69,
+      "axes": {
+        "structure": 0,
+        "grade": 0.03,
+        "perceptual": 4.04,
+        "detail": 65.55,
+        "geometry": 63.01,
+        "spectrum": 90.04
+      }
+    }
+  ]
+}

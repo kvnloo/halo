@@ -5,6 +5,7 @@
   "ssim": 0.34242930744759614,
   "ms_ssim": 0.29130132282106536,
   "hist": 0.7426369643155699,
+  "hist_smooth": 0.6272462533935458,
   "grad_hist": 0.05786956857196468,
   "lap_ratio": 1.0467299274043769,
   "edge_ratio": 1.2055646010918495,
@@ -53,7 +54,41 @@
       93.75338204089506
     ]
   },
+  "raw": {
+    "structure": 0.708699,
+    "grade": 0.627246,
+    "perceptual": 0.647605,
+    "detail": 0.045671,
+    "geometry": 0.186948,
+    "spectrum": 0.328569,
+    "ms_ssim": 0.291301,
+    "ssim": 0.342429,
+    "hist": 0.742637,
+    "hist_smooth": 0.627246,
+    "grad_hist": 0.05787,
+    "lpips": 0.647605,
+    "lap_ratio": 1.04673,
+    "edge_ratio": 1.205565,
+    "spectral_slope_ref": -2.537159,
+    "spectral_slope_test": -2.20859
+  },
   "axes": {
+    "structure": 11.69,
+    "grade": 3.04,
+    "perceptual": 20.95,
+    "detail": 92.86,
+    "geometry": 15.01,
+    "spectrum": 0.09
+  },
+  "progress": {
+    "structure": 4.61,
+    "grade": -59.47,
+    "perceptual": 22.81,
+    "detail": 102.36,
+    "geometry": 24.97,
+    "spectrum": -380.02
+  },
+  "axes_legacy": {
     "structure": 0.0,
     "grade": 1.47,
     "perceptual": 11.64,
@@ -61,5 +96,9 @@
     "geometry": 96.48,
     "spectrum": 78.99
   },
-  "score": 33.22
+  "score": 21.06,
+  "score_comparative": 12.01,
+  "score_geometric": 8.85,
+  "score_legacy": 33.22,
+  "warnings": []
 }

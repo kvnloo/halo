@@ -163,6 +163,15 @@ KNOWN_ISSUES §8 identified in `volumetricFog.js`. **The fog fix reduced the ter
 not eliminate it.** Chasing the remaining `sat_mean` with grade saturation would be a
 mistake; the tell is that `p01` is lifted, which saturation cannot cause.
 
+> **Retraction (added by a later wave):** the additive-haze *signature* read here was real,
+> but `volumetricFog.js` is the wrong file for it. `--skip volumetricFog` measured
+> byte-identical (`reports/vegetation.md`); the source was `scene.js` clearing the depth
+> texture shared with the G-buffer, per `docs/KNOWN_ISSUES.md` §18. By Wave H the signature
+> itself is gone — `p01` is 14.89 against a reference 15.67 while `p99` is still crushed,
+> which is an exposure shoulder in `tonemap.js`, not an additive term (§8's Wave-H note).
+> The "do not chase it with grade saturation" warning still stands. Registered as
+> `fog-owns-desaturation` in `tools/refuted.json`.
+
 Per-pose `sat_mean` is also strikingly *flat* — render 53.0–65.4 (range 12.4) against a
 reference spanning 63.3–105.2 (range 41.9). The scene is not just under-saturated on
 average, it fails to vary chroma between shots the way the reference does.

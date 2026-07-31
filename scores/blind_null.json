@@ -1,0 +1,190 @@
+{
+  "stride": 8,
+  "features": {
+    "sct.sand.aniso": {
+      "median": 2.034,
+      "sigma": 0.29222,
+      "n": 20
+    },
+    "sct.sand.clark_evans": {
+      "median": 1.0035,
+      "sigma": 0.095109,
+      "n": 20
+    },
+    "sct.sand.modality": {
+      "median": 0.32255,
+      "sigma": 0.053151,
+      "n": 20
+    },
+    "sct.sand.n_per_kpx": {
+      "median": 0.2174,
+      "sigma": 0.083693,
+      "n": 20
+    },
+    "sct.sand.nn_cv": {
+      "median": 0.5225,
+      "sigma": 0.073611,
+      "n": 20
+    },
+    "sct.sand.size_cv": {
+      "median": 0.9187,
+      "sigma": 0.163901,
+      "n": 20
+    },
+    "sct.sand.size_slope": {
+      "median": -1.52315,
+      "sigma": 0.315794,
+      "n": 20
+    },
+    "sct.sand.tile_peak": {
+      "median": 0.30055,
+      "sigma": 0.133137,
+      "n": 20
+    },
+    "sct.shoreline.aniso": {
+      "median": 2.57925,
+      "sigma": 0.310827,
+      "n": 20
+    },
+    "sct.shoreline.clark_evans": {
+      "median": 1.0773,
+      "sigma": 0.129728,
+      "n": 20
+    },
+    "sct.shoreline.modality": {
+      "median": 0.33935,
+      "sigma": 0.065012,
+      "n": 20
+    },
+    "sct.shoreline.n_per_kpx": {
+      "median": 0.1467,
+      "sigma": 0.05367,
+      "n": 20
+    },
+    "sct.shoreline.nn_cv": {
+      "median": 0.6756,
+      "sigma": 0.143442,
+      "n": 20
+    },
+    "sct.shoreline.size_cv": {
+      "median": 1.0886,
+      "sigma": 0.257083,
+      "n": 20
+    },
+    "sct.shoreline.size_slope": {
+      "median": -1.14765,
+      "sigma": 0.295779,
+      "n": 20
+    },
+    "sct.shoreline.tile_peak": {
+      "median": 0.42055,
+      "sigma": 0.085175,
+      "n": 20
+    },
+    "sil.convex_def": {
+      "median": 0.28665,
+      "sigma": 0.066198,
+      "n": 20
+    },
+    "sil.monotone_frac": {
+      "median": 0.6062,
+      "sigma": 0.057377,
+      "n": 20
+    },
+    "sil.n_objects": {
+      "median": 5.0,
+      "sigma": 1.4826,
+      "n": 20
+    },
+    "sil.overhang": {
+      "median": 1.49665,
+      "sigma": 0.249077,
+      "n": 20
+    },
+    "sil.reversals": {
+      "median": 2.1943,
+      "sigma": 1.036708,
+      "n": 20
+    },
+    "sil.rough_D": {
+      "median": 1.03085,
+      "sigma": 0.007487,
+      "n": 20
+    },
+    "sil.sky_frac": {
+      "median": 0.4708,
+      "sigma": 0.027725,
+      "n": 20
+    },
+    "sil.taper_r2": {
+      "median": 0.30565,
+      "sigma": 0.326469,
+      "n": 20
+    },
+    "sil.undercut": {
+      "median": 6.86565,
+      "sigma": 1.443682,
+      "n": 20
+    },
+    "sil.vert_break": {
+      "median": 0.61925,
+      "sigma": 0.130024,
+      "n": 20
+    },
+    "stat.edge_density": {
+      "median": 0.079776,
+      "sigma": 0.016526,
+      "n": 20
+    },
+    "stat.highlight_frac": {
+      "median": 0.010985,
+      "sigma": 0.005781,
+      "n": 20
+    },
+    "stat.lab_a": {
+      "median": 2.546098,
+      "sigma": 0.606837,
+      "n": 20
+    },
+    "stat.lab_b": {
+      "median": 2.39996,
+      "sigma": 3.534182,
+      "n": 20
+    },
+    "stat.lap_var": {
+      "median": 472.941307,
+      "sigma": 191.228911,
+      "n": 20
+    },
+    "stat.local_contrast": {
+      "median": 0.201661,
+      "sigma": 0.013739,
+      "n": 20
+    },
+    "stat.lum_mean": {
+      "median": 107.042739,
+      "sigma": 7.203572,
+      "n": 20
+    },
+    "stat.lum_std": {
+      "median": 54.181819,
+      "sigma": 3.307024,
+      "n": 20
+    },
+    "stat.sat_mean": {
+      "median": 74.014831,
+      "sigma": 8.700649,
+      "n": 20
+    },
+    "stat.shadow_frac": {
+      "median": 0.069293,
+      "sigma": 0.039232,
+      "n": 20
+    },
+    "stat.spectral_slope": {
+      "median": -2.529474,
+      "sigma": 0.087855,
+      "n": 20
+    }
+  }
+}

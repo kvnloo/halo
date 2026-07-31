@@ -1,0 +1,2 @@
+{"at":"2026-07-30T00:00:00","kind":"human","tag":"waveH","shots":"shots/blindcap","n":9,"chose_render":0,"render_win_rate":0,"note":"reports/blind.md — the 9/9 loss, backfilled"}
+{"at":"2026-07-31T06:54:31","kind":"auto","tag":"waveH","shots":"shots/blindcap","separability":5.69,"detectable":5.8,"top_tell":"sil.sky_frac","verdict":"machine separates most pairs"}

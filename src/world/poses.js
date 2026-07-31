@@ -9,6 +9,22 @@
  * pose-refit task may change them, and it must re-baseline every recorded score.
  *
  * ---------------------------------------------------------------------------
+ * REFIT 2026-07-31 (Wave I, reports/posefit.md) — the ref_* poses HAVE been refitted.
+ * Everything in scores/history.jsonl above the `poses-refit-discontinuity` marker was
+ * measured on the old hand-authored framing and is NOT comparable to anything below it.
+ *
+ * x/z/pitch/yaw/fov come from `tools/fitpose.mjs --all`; `pos[1]` does NOT. It is
+ * pinned to `terrain.height(x,z) + EYE_STAND` instead, because the fitter searches
+ * absolute Y against a floor clamp of 0.4 m and will happily lie the camera on the
+ * sand: unconstrained it put ref_01800 0.19 m above the beach, which scored the single
+ * best MS-SSIM in the whole experiment (0.3324) while losing the shot's subject
+ * entirely. Framing improved and the picture got worse. The reference is a *standing*
+ * Chief, so eye height is not a free parameter — constraining it beat the raw fit on
+ * every comparative axis (structure 24.15 vs 23.73, score_comparative 15.32 vs 15.27).
+ *
+ * If you re-run the fitter, re-apply that constraint afterwards; fitpose.mjs does not
+ * know about the ground.
+ * ---------------------------------------------------------------------------
  * GROUND CONTRACT — read this before you move a pose.
  *
  * `pos[1]` is an ABSOLUTE world Y, not a height above the ground. `terrain.js` is
@@ -31,32 +47,32 @@
 export const POSES = {
   // Opening: standing on damp sand, bridge cantilevered out of the cliff ahead-right,
   // shallow water and low rocks to the left.
-  ref_00000: { pos: [10.5, 1.74, 20.0], rot: [-4.0, 292.0, 0], fov: 78 },
+  ref_00000: { pos: [10.5, 2.98, 17.39], rot: [-2.78, 285.04, 0], fov: 74.3 },
 
   // Slight push forward, bridge fills the right third, dust haze under the deck.
-  ref_00120: { pos: [7.2, 1.74, 15.4], rot: [-3.0, 288.0, 0], fov: 78 },
+  ref_00120: { pos: [4.62, 2.71, 15.65], rot: [0.21, 280.27, 0], fov: 68.3 },
 
   // Hero sea stack with its flat-crowned tree comes into frame left of the bridge.
-  ref_00450: { pos: [-1.0, 1.74, 6.5], rot: [-2.0, 313.0, 0], fov: 78 },
+  ref_00450: { pos: [-0.23, 2.07, 1.91], rot: [-0.9, 316.49, 0], fov: 79.8 },
 
   // Look up: Halo ring band and Threshold across the sky, cliff edge lower-left.
-  ref_00600: { pos: [-6.0, 1.74, 2.0], rot: [26.0, 330.0, 0], fov: 78 },
+  ref_00600: { pos: [-7.56, 2.2, 1.21], rot: [26.06, 329.83, 0], fov: 78.8 },
 
   // The sky frame: Threshold fills the upper right, two Halo ring bands rise from
   // the horizon, stars in the zenith, cliff left, hero sea stack centre.
-  ref_00720: { pos: [-14.0, 1.74, 8.0], rot: [8.0, 320.0, 0], fov: 78 },
+  ref_00720: { pos: [-12.34, 2.4, 6.68], rot: [11.52, 318.75, 0], fov: 73.5 },
 
   // Down among the tide-pool shelf, big stacks close and towering.
-  ref_00840: { pos: [-24.0, 1.74, -3.0], rot: [2.0, 342.0, 0], fov: 78 },
+  ref_00840: { pos: [-24.41, 2.22, 2.59], rot: [5.02, 338.46, 0], fov: 77.7 },
 
   // Wide: stacks standing in the shallows, wet sand foreground taking the sky.
-  ref_01500: { pos: [-30.0, 1.72, -1.5], rot: [-3.5, 352.0, 0], fov: 78 },
+  ref_01500: { pos: [-30, 1.95, -1.5], rot: [-3.5, 352, 0], fov: 78 },
 
   // Waterline, low sun glitter across the swash, distant islets in haze.
-  ref_01800: { pos: [-42.0, 1.70, -6.5], rot: [-5.0, 8.0, 0], fov: 78 },
+  ref_01800: { pos: [-40.4, 1.93, -10.01], rot: [-4.88, 10, 0], fov: 72.1 },
 
   // Turning back east: bridge silhouette against bright sky, cliff on the right.
-  ref_02220: { pos: [-30.0, 1.74, 4.0], rot: [-1.0, 96.0, 0], fov: 78 },
+  ref_02220: { pos: [-28.63, 2.34, 4.06], rot: [1.43, 73.71, 0], fov: 82.5 },
 
   /* -------------------------------------------------------- showcase poses */
   // A curated tour of the level, one pose per thing worth looking at. These are for
@@ -129,26 +145,33 @@ export const EYE_STAND = 1.72;
  *   groundY  `terrain.height(pos[0], pos[2])` when the pose was last verified.
  *   minClear the smallest eye-above-ground the pose is allowed to have.
  *
- * The showcase poses are authored as `groundY + EYE_STAND`, so they get the full
- * standing clearance. The `ref_*` poses are camera-matched to the reference video
- * and must NOT be moved — their absolute Y of ~1.74 was fitted before the current
- * beach profile existed, so several of them now sit only ~0.3 m off the sand. That
- * is a terrain/pose mismatch recorded in reports/poses.md, not something to "fix"
- * here; the contract for them is only "must stay above ground".
+ * Since the Wave I refit, EVERY pose here — showcase and `ref_*` alike — is authored
+ * as `groundY + EYE_STAND`, so they all stand. This closes reports/poses.md section 5,
+ * which measured the old `ref_*` cameras at 0.26-1.18 m off the sand (ref_00000, the
+ * pose the whole score history is anchored on, was effectively lying down) and flagged
+ * it for the next refit. Raising them alone — no reframing at all — is worth
+ * ms_ssim +0.0067 of the refit's +0.0130, i.e. half the structural gain of this wave
+ * came from simply standing the camera up.
+ *
+ * `minClear` is 1.20 for the `ref_*` set rather than the showcase 1.40: they must not
+ * be allowed to sink (that is the failure this gate exists for), but terrain.js is
+ * re-profiled most waves and a hard FAIL has a blast radius across every agent, so
+ * there is 0.52 m of headroom below the authored 1.72 and the 0.60 m drift WARN fires
+ * first.
  *
  * `null` groundY = the pose is deliberately airborne (overview, diagnostics) and
  * only the clearance floor is checked.
  */
 export const POSE_GROUND = {
-  ref_00000:               { groundY: 1.48, minClear: 0.10 },
-  ref_00120:               { groundY: 0.98, minClear: 0.10 },
-  ref_00450:               { groundY: 0.56, minClear: 0.10 },
-  ref_00600:               { groundY: 0.52, minClear: 0.10 },
-  ref_00720:               { groundY: 0.64, minClear: 0.10 },
-  ref_00840:               { groundY: 0.17, minClear: 0.10 },
-  ref_01500:               { groundY: 0.23, minClear: 0.10 },
-  ref_01800:               { groundY: -0.03, minClear: 0.10 },
-  ref_02220:               { groundY: 0.56, minClear: 0.10 },
+  ref_00000:               { groundY: 1.26, minClear: 1.20 },
+  ref_00120:               { groundY: 0.99, minClear: 1.20 },
+  ref_00450:               { groundY: 0.35, minClear: 1.20 },
+  ref_00600:               { groundY: 0.48, minClear: 1.20 },
+  ref_00720:               { groundY: 0.68, minClear: 1.20 },
+  ref_00840:               { groundY: 0.50, minClear: 1.20 },
+  ref_01500:               { groundY: 0.23, minClear: 1.20 },
+  ref_01800:               { groundY: 0.21, minClear: 1.20 },
+  ref_02220:               { groundY: 0.62, minClear: 1.20 },
 
   shot_beach_establishing: { groundY: 1.95, minClear: 1.40 },
   shot_forerunner_bridge:  { groundY: 0.42, minClear: 1.40 },

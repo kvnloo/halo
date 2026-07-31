@@ -97,6 +97,12 @@ function release() {
 
 let lastUse = Date.now();
 let served = 0;
+/** When a request last *completed*. KNOWN_ISSUES §27: a wedged daemon reports
+ *  `{inflight:3, queued:479}` forever and is indistinguishable from a busy one, so
+ *  `previewsheet.mjs` waited 15 minutes on a daemon that had stopped serving. `/health`
+ *  now exposes how long it has been since anything finished; that is the one number that
+ *  tells the two apart. */
+let lastServedAt = Date.now();
 
 /**
  * Render one request. `poses` may hold many names — they are captured in a SINGLE page
@@ -122,8 +128,8 @@ async function doCapture(req) {
 
     await page.goto(`${BASE}/index.html?${q}`, { waitUntil: 'load', timeout: 300000 });
     const ready = await page.evaluate(async () => {
-      try { await globalThis.__HALO__.ready; return { ok: true, missing: globalThis.__HALO_MISSING__ || [] }; }
-      catch (e) { return { ok: false, err: String(e && e.stack || e), missing: globalThis.__HALO_MISSING__ || [] }; }
+      try { await globalThis.__HALO__.ready; return { ok: true, missing: globalThis.__HALO_MISSING__ || [], missingPasses: globalThis.__HALO_MISSING_PASSES__ || [] }; }
+      catch (e) { return { ok: false, err: String(e && e.stack || e), missing: globalThis.__HALO_MISSING__ || [], missingPasses: globalThis.__HALO_MISSING_PASSES__ || [] }; }
     });
     if (!ready.ok) return { ok: false, err: ready.err, logs: logs.slice(-40) };
 
@@ -151,7 +157,11 @@ async function doCapture(req) {
       }, pose, settle, time, video, config);
     }
     const stats = await page.evaluate(() => globalThis.__HALO__.stats());
-    return { ok: true, shots: out, stats, missing: ready.missing,
+    lastServedAt = Date.now();
+    // `missingPasses` (src/render/pipeline.js:61) is the third integrity channel; without
+    // it a dead post pass reaches the caller only as a console warning inside `warnings[]`,
+    // which is exactly how KNOWN_ISSUES §19 got misdiagnosed as a stale-code daemon bug.
+    return { ok: true, shots: out, stats, missing: ready.missing, missingPasses: ready.missingPasses || [],
              warnings: logs.filter((l) => /warn|error|THREE|Shader/i.test(l)).slice(0, 25) };
   } catch (e) {
     return { ok: false, err: String(e && e.stack || e), logs: logs.slice(-40) };
@@ -166,7 +176,12 @@ async function doCapture(req) {
 const server = http.createServer((req, res) => {
   if (req.url === '/health') {
     res.writeHead(200, { 'content-type': 'application/json' });
-    return res.end(JSON.stringify({ ok: true, inflight, queued: queue.length, served, base: BASE }));
+    // `root` and `pid`: the daemon is machine-wide and serves whatever repo it was STARTED
+    // from. Without this, a capture taken in a scratch copy is silently answered from the
+    // original tree and returns a clean-looking null result (see tools/preflight.mjs check 7).
+    return res.end(JSON.stringify({ ok: true, inflight, queued: queue.length, served, base: BASE,
+      root: ROOT, pid: process.pid,
+      stalledSec: Math.round((Date.now() - lastServedAt) / 1000), upSec: Math.round(process.uptime()) }));
   }
   if (req.url === '/stop') { res.end('bye'); shutdown(); return; }
   if (req.url !== '/capture') { res.writeHead(404); return res.end(); }

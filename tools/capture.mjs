@@ -12,11 +12,49 @@
  *   node tools/capture.mjs --pose ref_00000 --video 120 --outdir shots/anim
  */
 import puppeteer from 'puppeteer';
-import { spawn } from 'node:child_process';
-import { writeFileSync, readFileSync, mkdirSync, existsSync, openSync, closeSync, unlinkSync, readdirSync, statSync } from 'node:fs';
+import { spawn, execFileSync } from 'node:child_process';
+import { writeFileSync, readFileSync, appendFileSync, mkdirSync, existsSync, openSync, closeSync, unlinkSync, readdirSync, statSync } from 'node:fs';
 import { dirname, resolve, join as pjoin } from 'node:path';
-import { tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
+import { tmpdir, loadavg, cpus, totalmem } from 'node:os';
 import net from 'node:net';
+
+/* --------------------------------------------------------------- machine state ---
+ * KNOWN_ISSUES §29: `ref_00600` was measured four times on ONE identical build in one
+ * session and spread 10.23 -> 18.80 ms p50 — 1.84x, no source change — because the box
+ * was at load average 24 with 1 GB of 15 GB free while the GPU sat 27% idle. That
+ * voided §23's and §25's conclusions ("rocks is over 11 ms", "19 of 21 poses regressed")
+ * and probably §25b's "~400 ms frame hitch on 11 poses", which is a scheduler stall on a
+ * swapping box, not a renderer. It is the THIRD time every frame-time number on record
+ * was invalidated at once: §13 (structural zero), §22 (EMA of the last pose only), §29.
+ *
+ * §29's own remedy — "record `uptime` and `free` alongside every frame-time table from
+ * now on" — was never wired to anything. This is that, taken automatically at the moment
+ * the number is produced and joined to the score row by outdir, exactly as G2 does for
+ * the git tree. Two syscalls, no subprocess, inside the existing try/catch: it cannot
+ * slow or fail a capture.
+ */
+const LOAD_AT_START = (() => { try { return loadavg().map((n) => +n.toFixed(2)); } catch { return null; } })();
+function memAvailableMb() {
+  try {
+    const m = /^MemAvailable:\s+(\d+) kB/m.exec(readFileSync('/proc/meminfo', 'utf8'));
+    return m ? Math.round(+m[1] / 1024) : null;
+  } catch { return null; }
+}
+function machineState() {
+  try {
+    const la = loadavg().map((n) => +n.toFixed(2));
+    const n = cpus().length || 1;
+    return {
+      loadAtStart: LOAD_AT_START, load: la, cpus: n,
+      loadPerCpu: +(la[0] / n).toFixed(2),
+      memAvailMb: memAvailableMb(), memTotalMb: Math.round(totalmem() / 1048576),
+      note: 'KNOWN_ISSUES §29: a frame-time number taken at loadPerCpu > 1 is a CPU ' +
+            'stopwatch on an oversubscribed box and is not comparable to one taken idle. ' +
+            'Triangle and draw counts are deterministic counters and stay trustworthy.',
+    };
+  } catch { return null; }
+}
 
 /**
  * Global capture semaphore.
@@ -82,9 +120,234 @@ const OPT = {
   timeout: +arg('timeout', 180000),
   verbose: has('verbose'),
   config: arg('config', null),   // "k=v,k=v" poked via __HALO__.setConfig before capture
+  allowMissing: has('allow-missing') || process.env.HALO_ALLOW_MISSING === '1',
+  strictWarn: has('strict-warn') || process.env.HALO_STRICT_WARN === '1',
 };
 
 const ROOT = resolve(new URL('..', import.meta.url).pathname);
+
+/* --------------------------------------------------------------- argument hygiene ---
+ * `arg()` and `has()` just index into argv, so this file has always accepted any flag at
+ * all and silently ignored it. A typo, or a flag borrowed from another tool, produced a
+ * perfectly normal *default* capture that the caller believed was something else.
+ *
+ * KNOWN_ISSUES §27 caught one in flight: `node tools/capture.mjs --beauty --placement
+ * --chrome --label loop-r27` — four flags this file does not define, running for hours.
+ *
+ * The `--only` / `--skip` case is the dangerous one, because the project's dominant
+ * measurement method is built on it: `reports/structures.md`, `reports/clouds.md` and
+ * `reports/ocean_waveH.md` all measure by differencing a `--skip <module>` capture against
+ * a full one, and call that difference "an exact semantic segmentation of this subsystem".
+ * `src/modules.js` matches those names by EXACT STRING against its manifest, so `--skip
+ * rock` (for `rocks`) skips nothing at all and the difference mask is pure noise — while
+ * the capture succeeds, the integrity gate passes, and the report reads as rigorous.
+ *
+ * Unknown flags warn. A bad module name is fatal, because there is no reading of that
+ * capture which is correct. Names are read from `src/modules.js` so they cannot drift.
+ */
+{
+  const KNOWN_FLAGS = new Set(['pose', 'out', 'outdir', 'w', 'h', 'settle', 'time', 'seed',
+    'only', 'skip', 'all', 'video', 'port', 'keep-server', 'timeout', 'verbose', 'config',
+    'allow-missing', 'selftest-integrity', 'strict-warn']);
+  const unknown = [], eqForm = [];
+  for (const tok of argv) {
+    if (!tok.startsWith('--')) continue;
+    const name = tok.slice(2);
+    if (name.includes('=')) eqForm.push(tok);          // arg() has no --k=v form; it reads as unset
+    else if (!KNOWN_FLAGS.has(name)) unknown.push(tok);
+  }
+  if (eqForm.length) process.stderr.write(
+    `[capture] WARNING: --key=value is not supported here and was IGNORED: ${eqForm.join(' ')}\n` +
+    `[capture]          use a space: --settle 96, not --settle=96\n`);
+  if (unknown.length) process.stderr.write(
+    `[capture] WARNING: unknown flag(s) IGNORED, this capture used defaults instead: ${unknown.join(' ')}\n` +
+    `[capture]          known flags: ${[...KNOWN_FLAGS].map((f) => '--' + f).join(' ')}\n`);
+
+  let names = null;
+  try {
+    const man = readFileSync(resolve(ROOT, 'src/modules.js'), 'utf8');
+    names = new Set([...man.matchAll(/\bname:\s*'([A-Za-z0-9_]+)'/g)].map((m) => m[1]));
+  } catch { /* if the manifest cannot be read, do not invent a reason to fail */ }
+  if (names && names.size) {
+    for (const k of ['only', 'skip']) {
+      const v = OPT[k];
+      if (!v || v === true) continue;
+      const bad = String(v).split(',').map((s) => s.trim()).filter((s) => s && !names.has(s));
+      if (bad.length) {
+        process.stderr.write(
+          `\n[capture] FATAL: --${k} names no such module: ${bad.join(', ')}\n` +
+          `[capture]   known modules: ${[...names].join(' ')}\n` +
+          `[capture]   src/modules.js matches these by exact string, so this capture would\n` +
+          `[capture]   have silently ${k === 'skip' ? 'skipped nothing' : 'loaded the wrong subset'} and any A/B built on it\n` +
+          `[capture]   would be meaningless (KNOWN_ISSUES §27).\n\n`);
+        process.exit(2);
+      }
+    }
+  }
+}
+
+/* ---------------------------------------------------------------- integrity gate ---
+ * A capture used to succeed — exit 0, `"ok": true` — against a scene that was missing
+ * whole subsystems. Three independent channels report that, and NONE of them was checked
+ * by any caller:
+ *
+ *   __HALO_MISSING__          module failed to import / create()   (src/modules.js:76)
+ *   stats.failedModules       module imported but init() threw     (src/core/Engine.js:147)
+ *   __HALO_MISSING_PASSES__   post pass failed to load             (src/render/pipeline.js:61)
+ *
+ * The damage is in KNOWN_ISSUES: §20 — ocean.js and rocks.js were dead through Waves F and
+ * G and every capture in both waves was scored against a scene with no ocean in it; a Wave E
+ * critic wrote a full 12/100 review of a subsystem that was not in the build. §11 — physics
+ * threw in init() and was "dead in every capture and every score on record", for the whole
+ * project, because nobody read `failedModules`. §19 — the fog agent misdiagnosed a pass that
+ * had stopped *loading* as a stale-code daemon bug, and shipped a workaround that cost a vite
+ * + Chrome per agent.
+ *
+ * `tools/parsecheck.mjs` catches only the syntax half of this, and only if someone runs it.
+ * This catches all three, at the one moment that matters — the moment a number is produced —
+ * and makes the process exit non-zero, which is what `score.mjs` already checks. Scoring a
+ * broken tree is now impossible by default.
+ *
+ * Escape hatch, for deliberately partial builds:  --allow-missing  /  HALO_ALLOW_MISSING=1
+ */
+function integrityReport(missing, stats, missingPasses) {
+  return {
+    missing: missing || [],
+    failedModules: (stats?.failedModules || []).map((f) => `${f.name}: ${String(f.error).split('\n')[0]}`),
+    missingPasses: missingPasses || [],
+  };
+}
+
+function integrityGate(rep, via) {
+  const n = rep.missing.length + rep.failedModules.length + rep.missingPasses.length;
+  if (!n) return 0;
+  const lines = [
+    '',
+    '!!! CAPTURE INTEGRITY FAILURE — this scene is incomplete, do not measure it !!!',
+    `    via: ${via}`,
+  ];
+  for (const m of rep.missing) lines.push(`    module not loaded : ${m}`);
+  for (const m of rep.failedModules) lines.push(`    module init threw : ${m}`);
+  for (const m of rep.missingPasses) lines.push(`    pass not loaded   : ${m}`);
+  lines.push('',
+    '    Run `node tools/parsecheck.mjs` first; a broken file is skipped silently and its',
+    '    subsystem simply vanishes from the frame (KNOWN_ISSUES §20, §11, §19).',
+    '    The PNGs were still written, so you can look at what broke.',
+    '    Deliberately partial build? re-run with --allow-missing (or HALO_ALLOW_MISSING=1).',
+    '');
+  process.stderr.write(lines.join('\n') + '\n');
+  return n;
+}
+
+/* ------------------------------------------------ warnings that mean "nothing drew" ---
+ * Both capture paths already collect a `warnings[]` array (daemon: `captured.mjs:165`,
+ * standalone: the `logs.filter(...)` below) and G2 now writes it into `_capture.json` and
+ * `scores/provenance.jsonl`. Nothing has ever *printed* it. It reaches stdout only inside a
+ * ~100-line JSON blob, and `score.mjs:106` parses that blob and reads `capInfo.stats` and
+ * nothing else — so a capture warning has never once appeared next to a score.
+ *
+ * That array is where the fourth integrity channel lives. `__HALO_MISSING__`,
+ * `stats.failedModules` and `__HALO_MISSING_PASSES__` all catch a module that failed to
+ * LOAD. A module that loads and then draws nothing shows up only here:
+ *
+ *   - GLSL compile/link failure. `reports/terrain.md` §1: all three terrain materials failed
+ *     to link ("'patch' : Illegal use of reserved word"), every integrity channel said the
+ *     scene was complete, and the "sand" in the committed showcase sheet was the clear
+ *     colour. Also `reports/integration_waveE.md` (3x VALIDATE_STATUS false) and §16.
+ *   - `GL_INVALID_OPERATION` — the driver refuses the draw call and returns normally.
+ *     `scores/provenance.jsonl` is carrying five of these right now, from a `--only pipeline`
+ *     capture, seen by nobody.
+ *   - A subsystem's own "I placed nothing" diagnostic. `src/world/vegetation.js:2071` warns
+ *     when the ivy band underfills; a `--skip rocks` capture in provenance.jsonl reports
+ *     `ivy drape underfilled: 0/3200 cards`, i.e. ablating *rocks* silently also ablates
+ *     3200 vegetation cards and the resulting delta is attributed entirely to rocks.
+ *
+ * Ledger round 5 deferred making any of this fatal because "benign and real are genuinely
+ * mixed in there, and someone must separate them before any of it can be made to exit
+ * non-zero." This is that separation: a narrow list matched against the already-filtered
+ * warnings, printed to stderr on every capture. It does NOT change the exit code — the
+ * default behaviour of this file is unchanged — unless you opt in with `--strict-warn`.
+ */
+const CRITICAL_WARN = [
+  /Shader Error|VALIDATE_STATUS|Illegal use of reserved word|ERROR: \d+:/i,
+  /GL_INVALID_(OPERATION|FRAMEBUFFER_OPERATION|VALUE|ENUM)/,
+  /\[pageerror\]/,
+  /underfilled|\b0\s*\/\s*\d+\b/,
+  /\bno-?op\b|not loaded|\bdisabled\b|feedback loop|\bNaN\b/i,
+];
+function reportCriticalWarnings(warnings, via) {
+  let crit = [];
+  try {
+    crit = [...new Set((warnings || []).filter((w) => CRITICAL_WARN.some((re) => re.test(w))))];
+    if (crit.length) {
+      const lines = ['',
+        `!! ${crit.length} capture warning(s) that mean something did not compile, did not draw,`,
+        `   or placed nothing (via: ${via}). The scene loaded; that is not the same as complete.`];
+      for (const w of crit) lines.push('     ' + String(w).slice(0, 300));
+      lines.push('   Exit code is unchanged. `--strict-warn` / HALO_STRICT_WARN=1 makes these fatal (exit 4).', '');
+      process.stderr.write(lines.join('\n') + '\n');
+    }
+  } catch { /* never let the reporter break a capture */ }
+  return crit;
+}
+
+/* -------------------------------------------------------------- provenance stamp ---
+ * Every capture drops a `_capture.json` beside its PNGs recording what produced them.
+ *
+ * Nothing in `scores/*.json` or `scores/history.jsonl` says which git tree, which pose
+ * table, which settle count or which of the two capture code paths made a number. That has
+ * already cost real time: §3/`ba09973` — poses are refittable and "applying a fit invalidates
+ * every previously recorded score", with no stamp on a score to say which pose set it used;
+ * §26 — `waveG` and `waveG-settle96` are the same code and differ by 0.52, and `--settle` is
+ * not recorded anywhere in the history row; §16 — six `src/` files were rewritten *while*
+ * captures were running, producing findings that "look real and are not", and the prescribed
+ * check is a `find -newermt` incantation in a doc that nobody runs.
+ *
+ * This is a stamp, not a gate: it never fails a capture, and it changes no measurement.
+ */
+function sha256File(rel) {
+  try { return createHash('sha256').update(readFileSync(resolve(ROOT, rel))).digest('hex').slice(0, 16); }
+  catch { return null; }
+}
+function git(...args) {
+  try { return execFileSync('git', args, { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); }
+  catch { return null; }
+}
+function writeProvenance(dir, extra) {
+  try {
+    const abs = resolve(ROOT, dir);
+    mkdirSync(abs, { recursive: true });
+    // §16: src/ must be quiescent for a run to be trustworthy. Report anything touched
+    // in the last 10 minutes rather than telling people to run `find` by hand.
+    let recent = [];
+    try {
+      recent = (git('status', '--porcelain', '--', 'src') || '').split('\n').filter(Boolean)
+        .map((l) => l.slice(3).trim())
+        .filter((f) => { try { return Date.now() - statSync(resolve(ROOT, f)).mtimeMs < 10 * 60 * 1000; } catch { return false; } });
+    } catch { }
+    const rec = {
+      ts: new Date().toISOString(),
+      git: { sha: git('rev-parse', 'HEAD'), branch: git('rev-parse', '--abbrev-ref', 'HEAD'),
+             dirtySrc: (git('status', '--porcelain', '--', 'src') || '').split('\n').filter(Boolean).length,
+             srcEditedWithin10min: recent },
+      poses: { file: 'src/world/poses.js', sha256: sha256File('src/world/poses.js') },
+      tools: { capture: sha256File('tools/capture.mjs'), metrics: sha256File('tools/metrics.py'),
+               score: sha256File('tools/score.mjs'), node: process.version },
+      opts: { settle: OPT.settle, time: OPT.time, seed: OPT.seed, w: OPT.w, h: OPT.h,
+              only: OPT.only, skip: OPT.skip, video: OPT.video, config: OPT.config },
+      machine: machineState(),   // §29 — see the machine-state block at the top of this file
+      ...extra,
+    };
+    writeFileSync(pjoin(abs, '_capture.json'), JSON.stringify(rec, null, 2));
+    // `shots/` is gitignored, so the sidecar alone would never reach a reviewer. Mirror one
+    // line into `scores/provenance.jsonl`, which IS tracked, keyed by outdir + timestamp —
+    // `score.mjs` writes its frames to `shots/<tag>/`, so the tag is the join key back to
+    // `scores/<tag>.json` and to the matching row of `scores/history.jsonl`.
+    mkdirSync(resolve(ROOT, 'scores'), { recursive: true });
+    appendFileSync(resolve(ROOT, 'scores/provenance.jsonl'),
+      JSON.stringify({ outdir: dir, ...rec }) + '\n');
+  } catch { /* provenance must never be the reason a capture fails */ }
+}
 
 async function freePort() {
   return new Promise((res) => {
@@ -161,6 +424,19 @@ async function viaDaemon(poses, all = false) {
 }
 
 async function main() {
+  // Self-test for the integrity gate above, with the three real historical failures as
+  // input. No GPU, no browser, ~30 ms — so CI and a reviewer can both confirm the gate
+  // still fires without having to break a src/ file to find out.
+  if (has('selftest-integrity')) {
+    const rep = integrityReport(
+      ['ocean: Unexpected identifier — KNOWN_ISSUES §20'],
+      { failedModules: [{ name: 'physics', error: 'ReferenceError: addStatic is not defined — §11' }] },
+      ['tonemap: no create() — §19']);
+    const n = integrityGate(rep, 'selftest');
+    console.log(JSON.stringify({ selftest: true, detected: n, expected: 3 }, null, 2));
+    process.exit(n === 3 ? 0 : 1);
+  }
+
   // Fast path: a shared daemon already holds a vite + Chrome. No semaphore needed -
   // the daemon bounds its own concurrency.
   if (!OPT.port && !process.env.HALO_NO_DAEMON) {
@@ -180,8 +456,15 @@ async function main() {
           });
           process.stderr.write(`captured ${pose} (daemon)\n`);
         }
-        if (d.missing?.length) console.error('[capture] modules not loaded: ' + d.missing.join(' | '));
-        console.log(JSON.stringify({ ok: true, via: 'daemon', files, stats: d.stats, warnings: d.warnings || [] }, null, 2));
+        const rep = integrityReport(d.missing, d.stats, d.missingPasses);
+        const dir = OPT.out ? dirname(OPT.out) : OPT.outdir;
+        writeProvenance(dir, { via: 'daemon', files, integrity: rep, warnings: d.warnings || [] });
+        const bad = OPT.allowMissing ? 0 : integrityGate(rep, 'daemon');
+        const crit = reportCriticalWarnings(d.warnings, 'daemon');
+        console.log(JSON.stringify({ ok: bad === 0, via: 'daemon', files, stats: d.stats,
+          integrity: rep, warnings: d.warnings || [], criticalWarnings: crit }, null, 2));
+        if (bad) process.exit(3);
+        if (OPT.strictWarn && crit.length) process.exit(4);
         return;
       }
     }
@@ -245,14 +528,13 @@ async function main() {
   await page.goto(`${base}/index.html?${q}`, { waitUntil: 'load', timeout: OPT.timeout });
 
   const ok = await page.evaluate(async () => {
-    try { await globalThis.__HALO__.ready; return { ok: true, missing: globalThis.__HALO_MISSING__ || [] }; }
-    catch (e) { return { ok: false, err: String(e && e.stack || e), missing: globalThis.__HALO_MISSING__ || [] }; }
+    try { await globalThis.__HALO__.ready; return { ok: true, missing: globalThis.__HALO_MISSING__ || [], missingPasses: globalThis.__HALO_MISSING_PASSES__ || [] }; }
+    catch (e) { return { ok: false, err: String(e && e.stack || e), missing: globalThis.__HALO_MISSING__ || [], missingPasses: globalThis.__HALO_MISSING_PASSES__ || [] }; }
   });
   if (!ok.ok) {
     console.error('BOOT FAILED\n' + ok.err + '\n--- console ---\n' + logs.slice(-40).join('\n'));
     await browser.close(); cleanup(); process.exit(2);
   }
-  if (ok.missing?.length) console.error('[capture] modules not loaded: ' + ok.missing.join(' | '));
 
   const poses = OPT.all
     ? await page.evaluate(() => Object.keys(globalThis.__HALO__.poses).filter((k) => k.startsWith('ref_')))
@@ -288,12 +570,20 @@ async function main() {
   }
 
   const stats = await page.evaluate(() => globalThis.__HALO__.stats());
-  console.log(JSON.stringify({ ok: true, files: results, stats,
-    warnings: logs.filter((l) => /warn|error|404|THREE/i.test(l)).slice(0, 25) }, null, 2));
+  const warnings = logs.filter((l) => /warn|error|404|THREE/i.test(l)).slice(0, 25);
+  const rep = integrityReport(ok.missing, stats, ok.missingPasses);
+  const dir = OPT.out ? dirname(OPT.out) : OPT.outdir;
+  writeProvenance(dir, { via: 'standalone', files: results, integrity: rep, warnings });
+  const bad = OPT.allowMissing ? 0 : integrityGate(rep, 'standalone');
+  const crit = reportCriticalWarnings(warnings, 'standalone');
+  console.log(JSON.stringify({ ok: bad === 0, via: 'standalone', files: results, stats,
+    integrity: rep, warnings, criticalWarnings: crit }, null, 2));
 
   await browser.close();
   if (!OPT.keepServer) cleanup();
   releaseSlot();
+  if (bad) process.exit(3);
+  if (OPT.strictWarn && crit.length) process.exit(4);
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

@@ -6,7 +6,15 @@ with published, measured solutions. Guessing at them costs more than reading abo
 
 The evidence is in this repo. `volumetricFog.js` was written from intuition and shipped an
 additive near-field in-scatter that crushed whole-scene saturation to 43% of target — the
-single largest visual defect in the project. Aerial perspective has a standard formulation
+single largest visual defect in the project.
+<!-- CORRECTION, added by a later wave: the example above is wrong on the file, not on the
+     lesson. `--skip volumetricFog` produced a byte-identical PNG (reports/vegetation.md),
+     so that pass wrote no pixels at all; docs/KNOWN_ISSUES.md §18 found the real cause —
+     scene.js cleared the depth texture shared with the G-buffer, so every world pixel
+     integrated 460 m of haze. An invented near-field in-scatter *was* written from
+     intuition and it *did* have to be undone; it was simply not what crushed sat_mean.
+     Registered as `fog-owns-desaturation` in tools/refuted.json. -->
+Aerial perspective has a standard formulation
 (Bruneton-Neyret precomputed scattering, or the analytic Preetham/Hosek approximation). Either
 one would have gotten the near-field right for free, because both make in-scatter a function
 of distance that goes to zero at the camera.

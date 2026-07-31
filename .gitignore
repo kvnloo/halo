@@ -8,4 +8,7 @@ reference.mp4
 ref/frames_full/
 shots/*
 !shots/preview/
+# score.mjs per-pose scratch — written and read back within one run, never a deliverable.
+# A dozen agents were each committing their own copies of these.
+scores/_tmp_*.json
 .venv/

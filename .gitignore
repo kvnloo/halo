@@ -3,6 +3,8 @@ dist/
 node_modules/
 *.pyc
 __pycache__/
+ref/
+reference.mp4
 ref/frames_full/
 shots/*
 !shots/preview/
